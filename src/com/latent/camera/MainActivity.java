@@ -857,7 +857,9 @@ public class MainActivity extends Activity {
             public void changed() { screen.invalidate(); }
             public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
             public void shot(File photo, String film) { vfShot(photo, film); }
+            public void hud(boolean on) { screen.setVisibility(on ? View.VISIBLE : View.INVISIBLE); }
             public void stuck(String what) {
+                screen.setVisibility(View.VISIBLE);
                 devLog("viewfinder: " + what);
                 restarting = false;
                 relaunchWhenClosed = false;
@@ -867,6 +869,7 @@ public class MainActivity extends Activity {
             }
             public void closed(String why) {
                 vf = null;
+                screen.setVisibility(View.VISIBLE);
                 if (relaunchWhenClosed) { relaunch(); return; }   // the camera is back: Latent starts again and develops
                 if (killWhenClosed) { killNow(); return; }
                 ui.removeCallbacks(closeWhenFinished);

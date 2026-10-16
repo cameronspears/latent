@@ -62,6 +62,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         void closed(String why);
         /** A picture won't save, so the camera can't be given back safely: what to tell you. */
         void stuck(String what);
+        /** Latent's own drawing over live view, shown (true) or not (only the camera's picture). */
+        void hud(boolean on);
     }
 
     /**
@@ -935,6 +937,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             shots++;
             lastAnswerAt = now;
             awaitingPreview = shots;
+            if (BLACKOUT) blackout(true);
             ui.removeCallbacks(restartPreviewLate);
             ui.postDelayed(restartPreviewLate, PREVIEW_LATE_MS);
             shotFilms.add(filmId != null ? filmId : "");
@@ -984,6 +987,38 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      * on the camera's word, or 1 s after the shutter's answer if it says nothing.
      */
     static final long PREVIEW_LATE_MS = 1000;
+
+    /**
+     * Nothing of Latent's over live view from the shutter's answer until the picture is listed, as a
+     * shutter's blackout: only the camera's own picture. The tests that stored their pictures drew a
+     * small label over live view; the viewfinder draws its whole HUD, redrawn at each press; and leaving
+     * Latent (its drawing gone) stored every waiting picture. v0.35.6: live view restarted as Sony's apps
+     * do, and the second picture still waited 20 s, until Playback.
+     */
+    static final boolean BLACKOUT = true;
+    static final long BLACKOUT_MAX_MS = 15000;
+    private boolean blackedOut;
+    private long blackoutAt;
+
+    private void blackout(boolean on) {
+        if (on == blackedOut) return;
+        blackedOut = on;
+        long now = SystemClock.uptimeMillis();
+        if (on) {
+            blackoutAt = now;
+            ui.removeCallbacks(blackoutEnd);
+            ui.postDelayed(blackoutEnd, BLACKOUT_MAX_MS);
+        } else {
+            ui.removeCallbacks(blackoutEnd);
+            if (blackoutNotes++ < 30) note("Latent's drawing back after " + (now - blackoutAt) + " ms (picture " + stored + " listed)");
+        }
+        host.hud(!on);
+    }
+
+    private int blackoutNotes;
+    private final Runnable blackoutEnd = new Runnable() {
+        public void run() { if (blackedOut) { note("blackout ended after " + BLACKOUT_MAX_MS / 1000 + " s with " + (shots - stored) + " picture(s) not listed"); blackout(false); } }
+    };
     private int awaitingPreview, previewNotes;
 
     private void previewStarted() {
@@ -1114,6 +1149,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                             if (n <= highestKnown) continue;
                             highestKnown = n;
                             stored++;
+                            if (BLACKOUT && stored >= shots) blackout(false);
                             if (stored > shots) {   // the shutter wasn't reported: it's an exposure all the same
                                 shots = stored;
                                 flashUntil = SystemClock.uptimeMillis() + FLASH_MS;
@@ -1310,6 +1346,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private void finishClose() {
         if (closed) return;
         closed = true;
+        if (blackedOut) { blackedOut = false; host.hud(true); }
         String why = closeWhy;
         releaseCamera();
         host.showLive(false);
