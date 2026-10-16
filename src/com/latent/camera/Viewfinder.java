@@ -132,27 +132,51 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private int frames, lookMsSum, grabFails;
     private final int[] px = new int[FRAME_W * FRAME_H], info = new int[FilmCore.L_COUNT];
     private Bitmap frame;
-    // the look as shown on the 16-bit plane: rendered on the worker at the screen's own pixels, dithered
-    // (Skia dithers into a 4444 bitmap), so it reads as fine grain rather than bands; two, swapped on the UI thread
+    // the look as shown on the 16-bit plane: made on the worker at the screen's own pixels and ordered-dithered
+    // in native code (FilmCore.to4444: Android 2.3's own drawing didn't dither into 4444, and its scaling cost
+    // ~100 ms a frame), so it reads as fine grain rather than bands; two, swapped on the UI thread
     private final Bitmap[] shown16 = new Bitmap[2];
     private int front16 = -1, liveW, liveH;
-    private Bitmap work8888;
-    private final android.graphics.Paint dither = new android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG | android.graphics.Paint.DITHER_FLAG);
+    private short[] out16;
+    private static int[] shifts;
+
+    /** Where ARGB_4444 keeps each channel on this Android (red, green, blue, alpha), asked once of a 1 px bitmap. */
+    static int[] shifts4444() {
+        if (shifts != null) return shifts;
+        int[] sh = { 12, 8, 4, 0 };   // Skia's usual layout
+        try {
+            Bitmap b = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_4444);
+            int alpha = litNibble(b, 0xFF000000, -1);            // opaque black lights alpha alone
+            int r = litNibble(b, 0xFFFF0000, alpha), g = litNibble(b, 0xFF00FF00, alpha), bl = litNibble(b, 0xFF0000FF, alpha);
+            b.recycle();
+            if (alpha >= 0 && r >= 0 && g >= 0 && bl >= 0 && r != g && g != bl && r != bl) sh = new int[] { r, g, bl, alpha };
+        } catch (Throwable ignored) { }
+        shifts = sh;
+        return sh;
+    }
+
+    /** The shift of the nibble a pixel of this colour sets to 15, other than 'except'; -1 if none. */
+    private static int litNibble(Bitmap b, int colour, int except) {
+        b.setPixel(0, 0, colour);
+        java.nio.ShortBuffer sb = java.nio.ShortBuffer.allocate(1);
+        b.copyPixelsToBuffer(sb);
+        int v = sb.get(0) & 0xFFFF;
+        for (int n = 0; n < 4; n++) if (n * 4 != except && ((v >> (n * 4)) & 15) == 15) return n * 4;
+        return -1;
+    }
 
     /** The picture's size on the screen in real pixels (the 3:2 area), so the 16-bit look is made 1:1. */
     void setLiveSize(int w, int h) { liveW = w; liveH = h; }
 
-    /** Worker: px (w x h) into the back 16-bit picture, cropped to 3:2 as the screen shows it. Returns its index, or -1. */
+    /** Worker: px (w x h) into the back 16-bit picture, cropped to 3:2 as the screen shows it, dithered. Returns its index, or -1. */
     private int render16(int w, int h) {
-        if (!SHOOT_16BIT || liveW <= 0 || liveH <= 0 || w <= 0 || h <= 0) return -1;
+        if (!SHOOT_16BIT || liveW <= 0 || liveH <= 0 || w <= 1 || h <= 1) return -1;
         try {
-            if (work8888 == null || work8888.getWidth() != w || work8888.getHeight() != h) work8888 = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-            work8888.setPixels(px, 0, w, 0, 0, w, h);
             int back = front16 == 0 ? 1 : 0;
             if (shown16[back] == null) shown16[back] = Bitmap.createBitmap(liveW, liveH, Bitmap.Config.ARGB_4444);
-            float sc = Math.max(liveW / (float) w, liveH / (float) h), sw = liveW / sc, sh = liveH / sc;
-            android.graphics.Rect src = new android.graphics.Rect(Math.round((w - sw) / 2), Math.round((h - sh) / 2), Math.round((w + sw) / 2), Math.round((h + sh) / 2));
-            new android.graphics.Canvas(shown16[back]).drawBitmap(work8888, src, new android.graphics.Rect(0, 0, liveW, liveH), dither);
+            if (out16 == null || out16.length != liveW * liveH) out16 = new short[liveW * liveH];
+            if (FilmCore.to4444(px, w, h, out16, liveW, liveH, shifts4444()) != 0) return -1;
+            shown16[back].copyPixelsFromBuffer(java.nio.ShortBuffer.wrap(out16));
             return back;
         } catch (Throwable e) {
             return -1;
@@ -1465,7 +1489,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                     + ", heap " + (rt.totalMemory() - rt.freeMemory()) / 1024 + " of " + rt.maxMemory() / 1024 + " KB");
             statCpu = cpu;
             // the camera struggling: give it its own live view back rather than push on
-            if (lookOn && (look > 400 || grab > 150)) {
+            if (lookOn && (look > 700 || grab > 150)) {
                 if (++slowSpells >= 2) { lookOn = false; lookFailed = true; say("Film look paused: the camera is busy"); note("look off: the frames slowed down"); pauseFrames(); }
             } else slowSpells = 0;
             flushLog();

@@ -1346,6 +1346,58 @@ int fl_level(const unsigned char *rgb, int w, int h, int *out) {
     return 0;
 }
 
+int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int ow, int oh, const int *shifts) {
+    static const unsigned char bayer[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
+    int off[16], x, y, rs, gs, bs, as;
+    int *xi, *xw;
+    double scale, sw, sh, sx0, sy0;
+    if (!argb || !out || !shifts || w < 2 || h < 2 || ow < 1 || oh < 1 || ow > 4096 || oh > 4096) return -1;
+    rs = shifts[0]; gs = shifts[1]; bs = shifts[2]; as = shifts[3];
+    if (rs < 0 || rs > 12 || gs < 0 || gs > 12 || bs < 0 || bs > 12 || as < 0 || as > 12) return -1;
+    for (x = 0; x < 16; x++) off[x] = (bayer[x] * 255 + 128) / 16;   /* thresholds, in 1/255 of a 4-bit step */
+    /* the source rectangle that covers ow:oh, centred, in source pixels */
+    scale = (double)ow / w > (double)oh / h ? (double)ow / w : (double)oh / h;
+    sw = ow / scale; sh = oh / scale; sx0 = (w - sw) / 2; sy0 = (h - sh) / 2;
+    xi = (int *)malloc(sizeof(int) * ow * 2);
+    if (!xi) return -1;
+    xw = xi + ow;
+    for (x = 0; x < ow; x++) {   /* per column: the left source pixel and its weight (0..256) */
+        double fx = sx0 + (x + 0.5) * sw / ow - 0.5;
+        int ix = (int)fx;
+        if (fx < 0) { fx = 0; ix = 0; }
+        if (ix > w - 2) { ix = w - 2; fx = w - 1; }
+        xi[x] = ix;
+        xw[x] = (int)((fx - ix) * 256 + 0.5);
+    }
+    for (y = 0; y < oh; y++) {
+        double fy = sy0 + (y + 0.5) * sh / oh - 0.5;
+        int iy = (int)fy, wy;
+        const unsigned int *r0, *r1;
+        unsigned short *o = out + (size_t)y * ow;
+        const int *od = off + (y & 3) * 4;
+        if (fy < 0) { fy = 0; iy = 0; }
+        if (iy > h - 2) { iy = h - 2; fy = h - 1; }
+        wy = (int)((fy - iy) * 256 + 0.5);
+        r0 = argb + (size_t)iy * w;
+        r1 = r0 + w;
+        for (x = 0; x < ow; x++) {
+            unsigned int a = r0[xi[x]], b = r0[xi[x] + 1], c = r1[xi[x]], d = r1[xi[x] + 1];
+            int wx = xw[x], t = od[x & 3], ch[3], k;
+            for (k = 0; k < 3; k++) {
+                int sft = 16 - 8 * k;
+                int top = (((a >> sft) & 255) * (256 - wx) + ((b >> sft) & 255) * wx);
+                int bot = (((c >> sft) & 255) * (256 - wx) + ((d >> sft) & 255) * wx);
+                int v = (top * (256 - wy) + bot * wy + 32768) >> 16;   /* 0..255 */
+                int q = (v * 15 + t) / 255;
+                ch[k] = q > 15 ? 15 : q;
+            }
+            o[x] = (unsigned short)((ch[0] << rs) | (ch[1] << gs) | (ch[2] << bs) | (15 << as));
+        }
+    }
+    free(xi);
+    return 0;
+}
+
 int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
             unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen) {
     struct jpeg_decompress_struct d;

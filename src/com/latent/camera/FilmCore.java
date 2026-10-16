@@ -67,4 +67,11 @@ final class FilmCore {
 
     /** Why the last call failed. */
     static native String lastError();
+
+    /**
+     * A live frame (argb, w x h) for the 16-bit screen: cropped to ow:oh from the centre, stretched to ow x oh
+     * and ordered-dithered to 4 bits a channel, into out as 16-bit pixels, each channel's nibble at
+     * shifts[0..3] (red, green, blue, alpha). 0, or -1.
+     */
+    static native int to4444(int[] argb, int w, int h, short[] out, int ow, int oh, int[] shifts);
 }

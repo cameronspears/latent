@@ -58,6 +58,24 @@ public class JniTest {
         check(FilmCore.live(junk, junk.length, lut, p, live, 320, 240, lp) != 0, "not a JPEG: refused (" + FilmCore.lastError() + ")");
         check(FilmCore.live(jpeg, jpeg.length, lut, p, new int[100], 320, 240, lp) != 0 && FilmCore.lastError().contains("buffers"), "small buffer rejected");
         check(FilmCore.live(jpeg, jpeg.length + 1, lut, p, live, 320, 240, lp) != 0, "a length past the array rejected");
+        {   // the live frame for the 16-bit screen: cropped to 3:2, stretched, dithered to 4 bits a channel
+            int w = 320, h = 216, ow = 540, oh = 480;
+            int[] argb = new int[w * h];
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) argb[y * w + x] = 0xFF000000 | (x < 160 ? 0x808080 : 0xFF0000 | (y * 255 / (h - 1)) << 8);
+            short[] o = new short[ow * oh];
+            int[] sh = { 12, 8, 4, 0 };
+            check(FilmCore.to4444(argb, w, h, o, ow, oh, sh) == 0, "16-bit frame made: " + FilmCore.lastError());
+            int sevens = 0, eights = 0, other = 0;
+            for (int y = 100; y < 140; y++) for (int x = 20; x < 100; x++) {   // the grey half: 128 lies between 7 (119) and 8 (136)
+                int v = o[y * ow + x] & 0xFFFF, r = v >> 12 & 15, g = v >> 8 & 15, bl = v >> 4 & 15, al = v & 15;
+                if (al != 15 || r != g || g != bl) other++; else if (r == 7) sevens++; else if (r == 8) eights++; else other++;
+            }
+            check(other == 0 && sevens > 0 && eights > 0, "mid-grey dithers between the two nearest levels (" + sevens + " 7s, " + eights + " 8s, " + other + " other)");
+            int right = o[240 * ow + 500] & 0xFFFF;
+            check((right >> 12 & 15) == 15 && (right & 15) == 15, "red lands in the red nibble, opaque");
+            check(FilmCore.to4444(argb, w, h, new short[100], ow, oh, sh) != 0, "a small output rejected");
+            check(FilmCore.to4444(argb, w, h, o, ow, oh, new int[] { 13, 8, 4, 0 }) != 0, "a bad channel shift rejected");
+        }
         FilmCore.setVariant(1);
         FilmCore.setVariant(0);
         System.out.println("JNI OK");

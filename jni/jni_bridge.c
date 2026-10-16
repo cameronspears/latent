@@ -116,6 +116,28 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_live(JNIEnv *env, jclass 
     return rc;
 }
 
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_to4444(JNIEnv *env, jclass cls, jintArray jargb, jint w, jint h,
+        jshortArray jout, jint ow, jint oh, jintArray jshifts) {
+    jint *argb;
+    jshort *out;
+    int shifts[4], rc;
+    (void)cls;
+    g_err[0] = 0;
+    if (!jargb || !jout || !jshifts || w <= 1 || h <= 1 || ow <= 0 || oh <= 0 || (*env)->GetArrayLength(env, jargb) < w * h
+            || (*env)->GetArrayLength(env, jout) < ow * oh || (*env)->GetArrayLength(env, jshifts) < 4) {
+        strcpy(g_err, "bad 16-bit frame buffers");
+        return -1;
+    }
+    (*env)->GetIntArrayRegion(env, jshifts, 0, 4, (jint *)shifts);
+    argb = (*env)->GetIntArrayElements(env, jargb, NULL);
+    out = (*env)->GetShortArrayElements(env, jout, NULL);
+    rc = fl_to4444((const unsigned int *)argb, w, h, (unsigned short *)out, ow, oh, shifts);
+    (*env)->ReleaseShortArrayElements(env, jout, out, 0);
+    (*env)->ReleaseIntArrayElements(env, jargb, argb, JNI_ABORT);
+    if (rc != 0) strcpy(g_err, "bad 16-bit frame sizes");
+    return rc;
+}
+
 JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_lastError(JNIEnv *env, jclass cls) {
     (void)cls;
     return (*env)->NewStringUTF(env, g_err);

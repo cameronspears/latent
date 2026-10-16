@@ -153,6 +153,14 @@ int main(int argc, char **argv) {
         for (k = 0; k < 10; k++)
             if (fl_live(jpg, (unsigned long)len, lut, params, px, 320, 240, info, err, sizeof err) != 0) { fprintf(stderr, "error: %s\n", err); return 1; }
         fprintf(stderr, "live %dx%d in %.1f ms; level %.2f deg, confidence %d, %d blocks\n", info[0], info[1], (now() - t1) * 100, info[2] / 100.0, info[3], info[4]);
+        {   /* the same frame for the 16-bit screen, as the viewfinder makes it */
+            static const int sh[4] = { 12, 8, 4, 0 };
+            unsigned short *o16 = malloc(sizeof(unsigned short) * 540 * 480);
+            double t2 = now();
+            if (!o16 || fl_to4444(px, info[0], info[1], o16, 540, 480, sh) != 0) { fprintf(stderr, "error: 16-bit frame\n"); return 1; }
+            fprintf(stderr, "16-bit 540x480 in %.1f ms\n", (now() - t2) * 1000);
+            free(o16);
+        }
         f = fopen(argv[3], "wb");
         fprintf(f, "P6\n%d %d\n255\n", info[0], info[1]);
         for (y = 0; y < info[1]; y++)

@@ -14,7 +14,9 @@ final class Level {
     static final float LEVEL_IN = 0.5f, LEVEL_OUT = 0.9f;
     /** A reading this far from the shown angle is an outlier, unless frames keep saying so. */
     static final float JUMP = 3f;
-    static final int JUMP_FRAMES = 3;
+    static final int JUMP_FRAMES = 2;   // v0.36.0 at ~2 frames a second: 3 trailed the hand by 1.5 s
+    /** How far toward each new reading the shown angle moves (more: quicker, less steady). */
+    static final float EASE = 0.6f;
     /** With no sure reading for this long, the level hides. */
     static final long HOLD_MS = 1500;
 
@@ -39,7 +41,7 @@ final class Level {
         } else if (Math.abs(a - angle) > JUMP) {
             if (++odd >= JUMP_FRAMES) { angle = a; odd = 0; }   // the camera really moved
         } else {
-            angle += 0.45f * (a - angle);
+            angle += EASE * (a - angle);
             odd = 0;
         }
         float off = Math.abs(angle);
