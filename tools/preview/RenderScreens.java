@@ -123,6 +123,16 @@ public class RenderScreens {
         s.mode = UiState.PROBE; s.probeStage = 0; s.probeTitle = "Hardware develop test"; s.probeSteps = HardwareTest.STEPS;
         s.probePlan = Ui.HARDWARE_PLAN; s.probeFooter = Ui.HARDWARE_FOOTER;
         render(s, fonts, out, "13-probe-intro");
+        s = state();
+        s.mode = UiState.PROBE; s.probeStage = 0; s.probeTitle = "Shooting test"; s.probeSteps = ShootingTest.STEPS;
+        s.probePlan = Ui.SHOOT_PLAN; s.probeFooter = Ui.SHOOT_FOOTER;
+        render(s, fonts, out, "13b-shooting-intro");
+        s.probeStage = 2;
+        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
+        s.probeDetail = new String[] { "opened in 560 ms", "on screen", "locked in 840 ms on try 2, AF lamp on 1900 ms in all",
+                "DSC04671.JPG on the card: shutter 410 ms, saved 1200 ms later", "41 in 3.0 s (13.7 a second), 640x424, 31 KB each",
+                "Tri-X: 95 ms a frame, decode included (640x424, one core)", "live view stopped, camera released" };
+        render(s, fonts, out, "13c-shooting-results");
         s.probeStage = 2; s.probeTitle = "Camera roll test"; s.probeSteps = Probe.STEPS;
         s.probeStatus = new int[] { Probe.INFO, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.FAIL, Probe.OK };
         s.probeDetail = new String[] { "ILCE-5100, Android 2.3.7, build 3.10", "all present: catalog, catalog query, catalog delete, hardware decoder",
