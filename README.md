@@ -27,31 +27,32 @@ To remove it later: **MENU → Application → Application Management → Manage
 
 ## Use
 
-Latent has two modes, like the X Half. UP / DOWN on the camera back switches between them.
+**Choose film.** With the camera empty, Latent opens on your last photo in a film look.
+- Turn the wheel to change film.
+- UP / DOWN sets the roll: 12, 24, 36 or ∞.
+- Press the centre button to load the film, or half-press to load it and go straight to shooting.
 
-**Film**
-1. **Load film:** pick a look and a roll length (12, 24 or 36).
-2. **Shoot.** Half-press the shutter, or choose Shoot, to go back to the camera. Every photo you take
-   is an exposure on the roll, up to its length. Rolls count by the camera's photo numbers
-   (DSC04592, DSC04593, …), because the camera's file times can shift by hours between power-ons.
-3. **Develop.** Open Latent and choose Develop. The darkroom shows each frame as it develops, plus
-   the time left and the battery. MENU pauses after the frame in hand, and you can continue later.
-4. **Rolls** shows every roll's contact sheet. LEFT / RIGHT choose a frame, UP / DOWN change roll,
-   and the centre button opens the viewer (press it again to fill the screen).
+**Shoot.** The camera back shows the frame counter. Half-press, or press the centre button, to go to
+the camera. Every photo you take is an exposure on the roll. Rolls count by the camera's photo
+numbers (DSC04592, DSC04593, …), because file times can shift by hours between power-ons.
 
-**Photo**
-- **Preview:** the wheel changes the look, shown full screen on your newest original. Looks are always
-  previewed on a photo Latent shot neutral, never on one with your own style or a look already on it.
-- **Shoot:** half-press to go to the camera and shoot as many photos as you like.
-- **Develop:** back in Latent, they develop in the background in the chosen look.
-- **Photos:** the centre button opens them.
-- **Neutral:** the camera shoots neutral in Photo mode too.
+**Develop.**
+- A finished roll develops by itself as soon as you open Latent again.
+- The darkroom shows each frame, the time left and the battery.
+- MENU pauses after the frame in hand; a half-press pauses it and goes to shoot.
+- **An ∞ roll never ends:** each time you come back, the photos shot since develop in the
+  background, and the newest ones show under the counter.
 
-**Settings** (the gear at the end of the camera back's row) holds:
-- **Use three cores** and **Shoot neutral**.
-- **Try looks on a photo** (the Lab: any look on any photo, with highlight, shadow and grain controls).
-- **Unload this roll**.
-- **The camera checks** below.
+Looks are always previewed on a photo Latent shot neutral, never on one with your own style or a look
+already on it.
+
+**MENU** holds:
+- **This roll:** Develop now, Change film.
+- **Rolls:** contact sheets. LEFT / RIGHT choose a frame, UP / DOWN change roll, and the centre button
+  opens the viewer.
+- **Developing:** Use three cores, Shoot neutral.
+- **Looks:** Try looks on a photo, the Lab with highlight, shadow and grain controls.
+- **Camera:** the checks below.
 
 **Speed test** times the film look's interchangeable inner loops on this camera's own
 chip, on your newest photo decoded into memory, checks each against a full-precision reference, and
@@ -59,7 +60,7 @@ keeps the fastest one that is as accurate as today's. Results go to `LATENT/SPEE
 
 **Settings check** reads your white balance, its fine-tune grid and your Creative Style,
 and shows them as the camera's menus do. It only reads, and every raw value goes to
-`LATENT/SETTINGS.TXT`. While a roll is loaded, and in Photo mode, Latent sets the camera to neutral (white balance fine-tune 0 / 0, Standard
+`LATENT/SETTINGS.TXT`. While a roll is loaded, Latent sets the camera to neutral (white balance fine-tune 0 / 0, Standard
 0 / 0 / 0, DRO off) and puts your own settings back once the roll is developed. Your values are kept
 in `LATENT/NEUTRAL.TXT` until then. Latent can only write those few settings, within their menu ranges.
 

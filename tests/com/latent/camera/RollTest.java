@@ -157,28 +157,30 @@ public class RollTest {
         check(rb2.isOpen() && rb2.exposures(Roll.exposable(Library.photos(card), Roll.list(card))).size() == 1, "the newer roll keeps only the photo after it");
         check(Roll.inCamera(Roll.list(card), "") .number == rb2.number, "and is the one in the camera");
 
-        // Photo mode: a trip to the camera from Photo makes a photo roll; what it shot is never on the film roll
+        // an endless roll: no last frame; each return to Latent adds what was shot since
         Roll film = Roll.inCamera(Roll.list(card), "");
-        int filmBefore = film.exposures(Roll.exposable(Library.photos(card), Roll.list(card))).size();
-        Roll pr = Roll.create(card, Roll.PHOTO, "TRIX400", Roll.PHOTO_LENGTH, 0, Roll.highest(Library.photos(card)));
+        film.close(Roll.exposable(Library.photos(card), Roll.list(card)));   // loading the endless roll replaces it
+        Roll inf = Roll.create(card, "TRIX400", Roll.ENDLESS, 0, Roll.highest(Library.photos(card)));
         touch(new File(dcim, "DSC01034.JPG"), t + 34 * 10000);
         touch(new File(dcim, "DSC01035.JPG"), t + 35 * 10000);
-        List<Roll> rp = Roll.list(card);
-        check(Roll.inCamera(rp, "").number == film.number, "a photo roll is never the film in the camera");
-        check(Roll.tidy(rp, Roll.exposable(Library.photos(card), rp)) == null, "tidying leaves the photo roll and the film roll alone");
-        List<Roll> closedP = Roll.closePhotoRolls(rp, Library.photos(card));
-        check(closedP.size() == 1 && closedP.get(0).frames.size() == 2 && !closedP.get(0).isOpen(), "back in Latent, the photo roll closes with its two photos");
-        List<Roll> rp2 = Roll.list(card);
-        check(Roll.open(pr.dir).isPhoto() && Roll.open(pr.dir).label().startsWith("Photos"), "it reads back as photos");
-        check(film.exposures(Roll.exposable(Library.photos(card), rp2)).size() == filmBefore, "the film roll doesn't count them");
-        check(Roll.undevelopedPhotos(rp2).size() == 1, "and they wait to develop");
+        List<Roll> re = Roll.list(card);
+        Roll ec = Roll.inCamera(re, "");
+        check(ec.number == inf.number && ec.endless(), "the endless roll is the one in the camera");
+        check(ec.collect(Roll.exposable(Library.photos(card), re)) == 2 && ec.frames.size() == 2, "back in Latent, it takes the two new photos");
+        check(Roll.open(inf.dir).frames.size() == 2 && Roll.open(inf.dir).isOpen(), "saved, and still in the camera with frames");
+        check(ec.collect(Roll.exposable(Library.photos(card), re)) == 0, "looking again adds nothing");
+        new File(dcim, "DSC01034.JPG").delete();   // its original filed as a negative after developing
         touch(new File(dcim, "DSC01036.JPG"), t + 36 * 10000);
-        check(film.exposures(Roll.exposable(Library.photos(card), Roll.list(card))).size() == filmBefore + 1, "a photo shot from Film is on the film roll again");
-        Roll idle = Roll.create(card, Roll.PHOTO, "TRIX400", Roll.PHOTO_LENGTH, 0, Roll.highest(Library.photos(card)));
-        List<Roll> rp3 = Roll.list(card);
-        check(Roll.closePhotoRolls(rp3, Library.photos(card)).isEmpty() && !idle.exists(), "a trip with nothing shot leaves no photo roll");
-        File ref = Roll.reference(Roll.list(card), film, Roll.exposable(Library.photos(card), Roll.list(card)));
-        check(ref != null && ref.getName().equals("DSC01036.JPG"), "looks preview on the newest original Latent shot: " + ref);
+        check(ec.collect(Roll.exposable(Library.photos(card), re)) == 1 && ec.frames.size() == 3, "the next trip adds only the new photo, though an older one has left the camera roll");
+        check(Roll.undevelopedEndless(Roll.list(card)).size() == 1, "its frames wait to develop");
+        check(Roll.tidy(Roll.list(card), Roll.exposable(Library.photos(card), Roll.list(card))) == null, "tidying leaves it alone");
+        Roll ec2 = Roll.open(inf.dir);
+        touch(new File(dcim, "DSC01037.JPG"), t + 37 * 10000);
+        ec2.close(Roll.exposable(Library.photos(card), Roll.list(card)));
+        Roll closed = Roll.open(inf.dir);
+        check(!closed.isOpen() && closed.frames.size() == 4, "changing film closes it with every photo, the last one too");
+        File ref = Roll.reference(Roll.list(card), null, Roll.exposable(Library.photos(card), Roll.list(card)));
+        check(ref != null && ref.getName().equals("DSC01037.JPG"), "looks preview on the newest original Latent shot: " + ref);
 
         // old ROLL.TXT without prints still reads
         check(Roll.open(a1.dir).prints.isEmpty() && Roll.open(a1.dir).print(0) == null, "rolls without prints read fine");

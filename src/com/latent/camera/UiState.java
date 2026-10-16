@@ -26,10 +26,8 @@ final class UiState {
     Film film;                         // stock of the loaded roll, null when no film is loaded
     int rollNumber, exposed, length;
     int developed = -1;                // frames developed so far when a develop was paused, else -1
-    List<String> nav = new ArrayList<String>();
-    int camMode;                       // the switch at the top of the camera back: 0 Film, 1 Photo
-    boolean camSwitch;                 // show that switch (once Photo mode is in the app)
-    boolean gear;                      // the camera back's row ends with Settings (a gear); navSel == nav.size() is it
+    boolean endless;                   // a roll with no end: it develops as you shoot
+    int camMode;                       // Photo mode's Film | Photo switch (drawn; in-app shooting is still to come)
 
     // Photo mode: live view with a look on it
     Object liveImage;                  // a still standing in for live view (previews only)
@@ -43,12 +41,12 @@ final class UiState {
     List<String[]> rows = new ArrayList<String[]>();   // {label, value}: value "on"/"off" draws a switch, "›" opens, "" is a heading
     int rowSel;
     String footer = "";
-    int navSel;
 
     // load film
     List<Film> films = new ArrayList<Film>();
     int filmSel, lengthSel;
-    int[] lengths = { 12, 24, 36 };
+    String[] lengthLabels = { "12", "24", "36", "\u221e" };
+    boolean cancelable;                // choosing film with a roll still in the camera: MENU goes back to it
 
     // darkroom
     int devFrame, devTotal, devDone;

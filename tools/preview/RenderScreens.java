@@ -28,76 +28,76 @@ public class RenderScreens {
         String[] names = { "STREET", "HOUSE", "PEOPLE" };
         for (int i = 0; i < 24; i++) thumbs.add(img(samples, names[i % 3] + "-CUBANNEG.png"));
 
-        UiState s = state();
-        s.gear = true; s.nav = Arrays.asList("Load film", "Rolls");
-        render(s, fonts, out, "1-back-empty");
-
-        // ---- the redesign: Film / Photo, a short row with Settings at its end, Photo mode, Settings
+        UiState s;
         UiState.Film natural = film("Natural", "100", "", 0xFF8C9096, 0xFFE9E5DC, 0xFFD9D2C3);
         UiState.Film classic = film("Classic Neg", "400", "", 0xFF1F6E52, 0xFFE8E2D3, 0xFF6CC29E);
         UiState.Film trix = film("Tri-X", "400", "", 0xFF1D1C1A, 0xFFF2C230, 0xFFF4F1EA);
         UiState.Film party = film("Afterparty", "800", "", 0xFF4B2470, 0xFFE8458B, 0xFFF0629F);
         List<UiState.Film> six = Arrays.asList(natural, portra, classic, cuban, trix, party);
+
+        // ---- home: choosing film when the camera is empty; the frame counter with a roll in; MENU holds the rest
         s = state();
-        s.camSwitch = true; s.gear = true; s.nav = Arrays.asList("Load film", "Rolls");
-        render(s, fonts, out, "20-home-film-empty");
+        s.mode = UiState.LOAD; s.films = six; s.filmSel = 2; s.lengthSel = 1; s.liveCaption = "on";
+        classic.tagline = "Fuji's Classic Negative: muted, hard, nostalgic.";
+        classic.sample = img(samples, "STREET-CLASSNEG.png");
+        render(s, fonts, out, "1-home-choose-classic");
+        trix.tagline = "Deep blacks and a gorgeous coarse grain."; trix.sample = img(samples, "PEOPLE-TRIX400.png");
+        s.filmSel = 4; s.lengthSel = 3;
+        render(s, fonts, out, "1b-home-choose-trix-endless");
+        s.cancelable = true; s.filmSel = 5; party.tagline = "Flash at a dark party: hot skin, deep night."; party.sample = img(samples, "PEOPLE-PARTY800.png");
+        render(s, fonts, out, "1c-change-film-party");
+        s.loading = true;
+        render(s, fonts, out, "1d-loading");
         s = state();
-        s.camSwitch = true; s.gear = true; s.film = cuban; s.rollNumber = 3; s.exposed = 14; s.length = 24;
-        s.nav = Arrays.asList("Shoot", "Develop", "Rolls");
-        render(s, fonts, out, "21-home-film-midroll");
-        s.navSel = 3;
-        render(s, fonts, out, "21b-home-film-gear");
-        s = state();
-        s.mode = UiState.PHOTO; s.looks = six; s.lookSel = 2; s.liveImage = img(samples, "STREET-CLASSNEG.png"); s.developing = 2;
-        render(s, fonts, out, "22-photo");
-        s.lookSel = 4; s.liveImage = img(samples, "HOUSE-TRIX400.png"); s.lookShown = true; s.developing = 0;
-        render(s, fonts, out, "23-photo-look-change");
-        s.lookShown = false; s.liveCaption = "On your last photo";
-        render(s, fonts, out, "23b-photo-caption");
-        s.liveImage = null; s.liveCaption = "";
-        render(s, fonts, out, "23c-photo-empty");
-        s = state();
-        s.mode = UiState.SETTINGS;
-        s.rows = new ArrayList<String[]>();
-        s.rows.add(new String[] { "Developing", "" });
-        s.rows.add(new String[] { "Use three cores", "on" });
-        s.rows.add(new String[] { "Shoot neutral while a roll is loaded", "on" });
-        s.rows.add(new String[] { "Film", "" });
-        s.rows.add(new String[] { "Try looks on a photo", "›" });
-        s.rows.add(new String[] { "Unload this roll", "›" });
-        s.rows.add(new String[] { "Camera", "" });
-        s.rows.add(new String[] { "Settings check", "›" });
-        s.rows.add(new String[] { "Speed test", "›" });
-        s.rows.add(new String[] { "Live view test", "›" });
-        s.footer = "Develops on cores 1 and 2 as well. Core 0 is left to the camera.";
-        s.rowSel = 1;
-        render(s, fonts, out, "24-settings");
+        s.mode = UiState.LOAD; s.films = six; s.filmSel = 0; s.lengthSel = 1; s.liveCaption = "";
+        render(s, fonts, out, "1e-home-first-run");
 
         s = state();
         s.film = portra; s.rollNumber = 5; s.exposed = 0; s.length = 12; s.toast = "Portra 400 loaded";
-        s.gear = true; s.nav = Arrays.asList("Shoot", "Rolls");
-        render(s, fonts, out, "2-back-fresh-toast");
+        render(s, fonts, out, "2-home-fresh-toast");
+        s = state();
+        s.film = classic; s.rollNumber = 12; s.exposed = 9; s.length = 24;
+        render(s, fonts, out, "3-home-roll");
+        s = state();
+        s.film = trix; s.rollNumber = 13; s.exposed = 23; s.endless = true; s.developing = 2;
+        for (int i = 0; i < 6; i++) s.thumbs.add(img(samples, names[i % 3] + "-TRIX400.png"));
+        render(s, fonts, out, "4-home-endless");
+        s = state();
+        s.film = trix; s.rollNumber = 13; s.exposed = 0; s.endless = true;
+        render(s, fonts, out, "4b-home-endless-fresh");
+        s = state();
+        s.film = portra; s.rollNumber = 4; s.exposed = 12; s.length = 12; s.battery = 17;
+        render(s, fonts, out, "5-home-finished-lowbattery");
 
         s = state();
-        s.film = cuban; s.rollNumber = 3; s.exposed = 14; s.length = 24;
-        s.gear = true; s.nav = Arrays.asList("Shoot", "Develop", "Rolls");
-        render(s, fonts, out, "3-back-midroll");
+        s.mode = UiState.SETTINGS;
+        s.rows = new ArrayList<String[]>();
+        s.rows.add(new String[] { "This roll", "" });
+        s.rows.add(new String[] { "Develop now", "\u203a" });
+        s.rows.add(new String[] { "Change film", "\u203a" });
+        s.rows.add(new String[] { "Rolls", "\u203a" });
+        s.rows.add(new String[] { "Developing", "" });
+        s.rows.add(new String[] { "Use three cores", "on" });
+        s.rows.add(new String[] { "Shoot neutral while a roll is loaded", "on" });
+        s.rows.add(new String[] { "Looks", "" });
+        s.rows.add(new String[] { "Try looks on a photo", "\u203a" });
+        s.rows.add(new String[] { "Camera", "" });
+        s.rows.add(new String[] { "Settings check", "\u203a" });
+        s.rows.add(new String[] { "Speed test", "\u203a" });
+        s.rows.add(new String[] { "Live view test", "\u203a" });
+        s.rows.add(new String[] { "Shooting test", "\u203a" });
+        s.footer = "Ends the roll here and develops the 9 shot so far.";
+        s.rowSel = 1;
+        render(s, fonts, out, "6-menu");
+        s.rowSel = 13; s.footer = "Latent 0.19.0";
+        render(s, fonts, out, "6b-menu-scrolled");
 
-
+        // Photo mode, for in-app shooting (not wired yet)
         s = state();
-        s.film = portra; s.rollNumber = 4; s.exposed = 36; s.length = 36; s.battery = 17;
-        s.gear = true; s.nav = Arrays.asList("Develop", "Rolls");
-        render(s, fonts, out, "5-back-full-lowbattery");
-
-        s = state();
-        s.mode = UiState.LOAD; s.films = Arrays.asList(cuban, portra); s.filmSel = 0; s.lengthSel = 1;
-        render(s, fonts, out, "6-load-cuban");
-        s.loading = true;
-        render(s, fonts, out, "6b-load-loading");
-        s.loading = false;
-        UiState.Film pending = film("Portra", "400", "Soft contrast, warm creamy highlights and golden skin.", 0xFFC79A3E, 0xFFF3E7C9, 0xFFE8B653);
-        s.films = Arrays.asList(cuban, pending); s.filmSel = 1;
-        render(s, fonts, out, "7-load-sample-rendering");
+        s.mode = UiState.PHOTO; s.looks = six; s.lookSel = 2; s.liveImage = img(samples, "STREET-CLASSNEG.png"); s.developing = 2;
+        render(s, fonts, out, "7-photo");
+        s.lookSel = 4; s.liveImage = img(samples, "HOUSE-TRIX400.png"); s.lookShown = true; s.developing = 0;
+        render(s, fonts, out, "7b-photo-look-change");
 
         s = state();
         s.mode = UiState.DARKROOM; s.film = cuban; s.devFrame = 4; s.devTotal = 12; s.devDone = 4;

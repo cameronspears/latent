@@ -45,34 +45,60 @@ final class Ui {
 
     // ------------------------------------------------------------------------------ camera back
 
+    /**
+     * The camera back with a roll in it: the frame counter is the hero, as in a film camera's window.
+     * One thing to do (half-press, or the centre button, to shoot); everything else is behind MENU.
+     */
     private static void back(Gfx g, UiState s) {
         float R = right(s);
         battery(g, s.battery, R, INK2, INK3);
-        if (s.camSwitch) modeSwitch(g, s, 0, s.film != null ? s.film.accent : INK);
-        if (s.film == null) {
-            g.text("No film loaded", L, TOP, Gfx.MEDIUM, 18, INK2, Gfx.LEFT, 0);
-            g.text("Load a roll", L - 3, 222, Gfx.DISPLAY, 72, INK, Gfx.LEFT, -10);
-            g.text("Pick a film stock, then shoot with the camera as usual.", L, 270, Gfx.REGULAR, 21, INK2, Gfx.LEFT, 0);
-            nav(g, s, INK);
-            return;
-        }
         UiState.Film f = s.film;
+        if (f == null) return;   // no roll: the film chooser is the home screen
         canisterIcon(g, f, L, TOP - 15);
         g.text(f.title + " " + f.iso + "  ·  Roll " + s.rollNumber, L + 26, TOP, Gfx.MEDIUM, 18, INK, Gfx.LEFT, 0);
 
-        int shown = Math.min(s.exposed, s.length);
+        int shown = s.endless ? s.exposed : Math.min(s.exposed, s.length);
         String num = String.valueOf(shown);
         g.text(num, L - 10, 300, Gfx.DISPLAY, 230, INK, Gfx.LEFT, -30);
         float nw = g.textWidth(num, Gfx.DISPLAY, 230, -30);
-        g.text("of " + s.length, L - 10 + nw + 16, 300, Gfx.REGULAR, 26, INK2, Gfx.LEFT, 0);
+        g.text(s.endless ? (shown == 1 ? "photo" : "photos") : "of " + s.length, L - 10 + nw + 16, 300, Gfx.REGULAR, 26, INK2, Gfx.LEFT, 0);
 
-        ticks(g, s.length, shown, -1, L, R, 338, INK, LINE, f.accent);
-        String note = s.developed >= 0 ? s.developed + " of " + shown + " developed. Continue any time."
-                : shown >= s.length ? "Roll finished. Develop it to see your photos."
-                : shown == 0 ? "Fresh roll. Half-press the shutter to start shooting."
-                : (s.length - shown) + (s.length - shown == 1 ? " exposure left" : " exposures left") + "  ·  half-press the shutter to shoot";
-        g.text(note, L, 384, Gfx.REGULAR, 19, INK2, Gfx.LEFT, 0);
-        nav(g, s, f.accent);
+        String note;
+        if (s.endless) {   // develops as you go: the newest prints, small, in a row
+            float tw = 84, th = 56, x = L;
+            for (int i = 0; i < s.thumbs.size() && x + tw <= R; i++, x += tw + 10) {
+                Object t = s.thumbs.get(i);
+                if (t != null) g.image(t, x, 322, tw, th, false);
+                else g.rect(x, 322, tw, th, SURFACE);
+            }
+            note = s.developing > 0 ? "" : shown == 0 ? "No end to this roll. Photos develop each time you come back." : "";
+            if (s.thumbs.isEmpty() && note.length() > 0) g.text(note, L, 356, Gfx.REGULAR, 19, INK2, Gfx.LEFT, 0);
+        } else {
+            ticks(g, s.length, shown, -1, L, R, 338, INK, LINE, f.accent);
+            note = s.developed >= 0 ? s.developed + " of " + shown + " developed. Press to carry on."
+                    : shown >= s.length ? "Roll finished. Press to develop."
+                    : shown == 0 ? "Fresh roll. Half-press the shutter to shoot."
+                    : (s.length - shown) + (s.length - shown == 1 ? " exposure left" : " exposures left");
+            g.text(note, L, 384, Gfx.REGULAR, 19, INK2, Gfx.LEFT, 0);
+        }
+        String action = s.developed >= 0 || (!s.endless && shown >= s.length) ? "Develop" : "Shoot";
+        hints(g, s, INK2, new String[] { "centre", action }, new String[] { "menu", "Menu" });
+        if (s.developing > 0) developingPill(g, s, R - g.textWidth("Menu", Gfx.REGULAR, 17, 0) - glyphWidth(g, "menu") - 30, f.accent);
+    }
+
+    /** ∞, drawn: two loops side by side. */
+    private static void infinity(Gfx g, float cx, float cy, int color) {
+        g.strokeCircle(cx - 5.2f, cy, 5f, 2f, color);
+        g.strokeCircle(cx + 5.2f, cy, 5f, 2f, color);
+    }
+
+    /** "2 developing": a quiet pill, right-aligned at x. */
+    private static void developingPill(Gfx g, UiState s, float x, int accent) {
+        String d = s.developing + " developing";
+        float dw = g.textWidth(d, Gfx.MEDIUM, 16, 0) + 34;
+        g.roundRect(x - dw, FOOT - 20, dw, 28, 14, SURFACE);
+        g.circle(x - dw + 15, FOOT - 6, 3.5f, accent);
+        g.text(d, x - 12, FOOT - 1, Gfx.MEDIUM, 16, INK, Gfx.RIGHT, 0);
     }
 
     /** Film | Photo, like the X Half's two ways of shooting: a quiet capsule at the top centre. UP / DOWN switch. */
@@ -85,16 +111,6 @@ final class Ui {
         g.roundRect(sx, y + 3, on == 0 ? w0 : w1, 24, 12, 0xFF2C2A27);
         g.text(names[0], x + 3 + w0 / 2, y + 20, Gfx.MEDIUM, 15, on == 0 ? INK : INK2, Gfx.CENTER, 0);
         g.text(names[1], x + 3 + w0 + w1 / 2, y + 20, Gfx.MEDIUM, 15, on == 1 ? INK : INK2, Gfx.CENTER, 0);
-    }
-
-    /** A small gear: Settings, at the end of the camera back's row. */
-    private static void gear(Gfx g, float cx, float cy, int color, boolean on, int accent) {
-        for (int i = 0; i < 8; i++) {
-            double a = i * Math.PI / 4;
-            g.line(cx + (float) Math.cos(a) * 7, cy + (float) Math.sin(a) * 7, cx + (float) Math.cos(a) * 10.5f, cy + (float) Math.sin(a) * 10.5f, 3, color);
-        }
-        g.strokeCircle(cx, cy, 6.5f, 2.4f, color);
-        if (on) g.roundRect(cx - 11, FOOT + 12, 22, 4, 2, accent);
     }
 
     // ------------------------------------------------------------------------------ photo mode
@@ -151,62 +167,54 @@ final class Ui {
 
     // ------------------------------------------------------------------------------ settings
 
-    /** Settings: one plain list, the way the Settings app does it. Headings, switches, and rows that open. */
+    /**
+     * The menu: one plain list, the way the Settings app does it. Headings, switches, and rows that
+     * open. It scrolls to keep the chosen row in view, under a fixed title and footer.
+     */
     private static void settings(Gfx g, UiState s) {
-        float R = right(s);
-        g.text("Settings", L, TOP, Gfx.MEDIUM, 18, INK, Gfx.LEFT, 0);
-        float y = 78;
+        float R = right(s), top = 70, bottom = FOOT - 30;
+        float[] ys = new float[s.rows.size()];
+        float y = 0;
+        for (int i = 0; i < s.rows.size(); i++) {
+            if (s.rows.get(i)[1].length() == 0) { ys[i] = y + 12; y += 26; }
+            else { ys[i] = y; y += 38; }
+        }
+        float scroll = 0;
+        if (s.rowSel >= 0 && s.rowSel < ys.length) {
+            float selBottom = top + 8 + ys[s.rowSel] + 38;
+            if (selBottom > bottom) scroll = selBottom - bottom;
+            if (s.rowSel <= 1) scroll = 0;   // the first row: the list from its top, heading and all
+        }
         for (int i = 0; i < s.rows.size(); i++) {
             String[] r = s.rows.get(i);
+            float ry = top + 8 + ys[i] - scroll;
+            if (ry + 38 < top || ry > bottom + 4) continue;
             if (r[1].length() == 0) {   // a heading
-                y += 12;
-                g.text(r[0].toUpperCase(java.util.Locale.US), L, y + 6, Gfx.MEDIUM, 12, INK3, Gfx.LEFT, 120);
-                y += 14;
+                g.text(r[0].toUpperCase(java.util.Locale.US), L, ry + 6, Gfx.MEDIUM, 12, INK3, Gfx.LEFT, 120);
                 continue;
             }
             boolean on = i == s.rowSel;
-            if (on) g.roundRect(L - 14, y - 2, R - L + 28, 38, 10, SURFACE);
-            g.text(r[0], L, y + 23, Gfx.REGULAR, 19, on ? INK : INK2, Gfx.LEFT, 0);
+            if (on) g.roundRect(L - 14, ry - 2, R - L + 28, 38, 10, SURFACE);
+            g.text(r[0], L, ry + 23, Gfx.REGULAR, 19, on ? INK : INK2, Gfx.LEFT, 0);
             if (r[1].equals("on") || r[1].equals("off")) {   // a switch
                 boolean v = r[1].equals("on");
-                g.roundRect(R - 44, y + 5, 44, 24, 12, v ? 0xFF3FA66B : 0xFF3A3834);
-                g.circle(v ? R - 12 : R - 32, y + 17, 9.5f, INK);
-            } else if (r[1].equals("›")) {
-                g.line(R - 8, y + 11, R - 2, y + 17, 2, INK3);
-                g.line(R - 2, y + 17, R - 8, y + 23, 2, INK3);
+                g.roundRect(R - 44, ry + 5, 44, 24, 12, v ? 0xFF3FA66B : 0xFF3A3834);
+                g.circle(v ? R - 12 : R - 32, ry + 17, 9.5f, INK);
+            } else if (r[1].equals("\u203a")) {
+                g.line(R - 8, ry + 11, R - 2, ry + 17, 2, INK3);
+                g.line(R - 2, ry + 17, R - 8, ry + 23, 2, INK3);
             } else {
-                g.text(r[1], R, y + 23, Gfx.REGULAR, 17, INK3, Gfx.RIGHT, 0);
+                g.text(r[1], R, ry + 23, Gfx.REGULAR, 17, INK3, Gfx.RIGHT, 0);
             }
-            y += 38;
         }
+        // title and footer stay put; rows slide under them
+        g.rect(0, 0, s.width, top, BG);
+        g.rect(0, bottom + 6, s.width, H - bottom - 6, BG);
+        if (scroll > 0) g.rect(L - 14, top - 1, R - L + 28, 1, LINE);
+        g.text("Menu", L, TOP, Gfx.MEDIUM, 18, INK, Gfx.LEFT, 0);
+        battery(g, s.battery, R, INK2, INK3);
         if (s.footer.length() > 0) g.text(s.footer, L, FOOT, Gfx.REGULAR, 15, INK3, Gfx.LEFT, 0);
         menuHint(g, "Back", INK3, R, FOOT);
-    }
-
-    /** Bottom navigation: a row of words, the chosen one bright with an accent bar under it. */
-    private static void nav(Gfx g, UiState s, int accent) {
-        float x = L;
-        // the row slides so the chosen item is always in view; "…" says there is more
-        float end = right(s), dots = g.textWidth("…", Gfx.MEDIUM, 21, 0) + 12;
-        int n = s.nav.size(), first = 0, sel = Math.min(s.navSel, n - 1);   // navSel == n: the gear, not a word
-        if (s.gear) end -= 44;
-        float[] w = new float[n];
-        for (int i = 0; i < n; i++) w[i] = g.textWidth(s.nav.get(i), Gfx.MEDIUM, 21, 0);
-        while (first < sel) {   // drop items from the left until the chosen one fits
-            float span = (first > 0 ? dots : 0);
-            for (int i = first; i <= sel; i++) span += w[i] + (i < sel ? 36 : 0);
-            if (x + span <= end - (sel < n - 1 ? dots : 0)) break;
-            first++;
-        }
-        if (first > 0) { g.text("…", x, FOOT, Gfx.MEDIUM, 21, INK3, Gfx.LEFT, 0); x += dots; }
-        for (int i = first; i < n; i++) {
-            boolean on = i == s.navSel, last = i == n - 1;
-            if (x + w[i] > end - (last ? 0 : dots) && i > sel) { g.text("…", x, FOOT, Gfx.MEDIUM, 21, INK3, Gfx.LEFT, 0); break; }
-            g.text(s.nav.get(i), x, FOOT, Gfx.MEDIUM, 21, on ? INK : INK3, Gfx.LEFT, 0);
-            if (on) g.roundRect(x, FOOT + 12, 22, 4, 2, accent);
-            x += w[i] + 36;
-        }
-        if (s.gear) gear(g, right(s) - 11, FOOT - 7, s.navSel == n ? INK : INK3, s.navSel == n, accent);
     }
 
     /** A short notice, centred under the top bar. Never on top of the controls. */
@@ -253,46 +261,78 @@ final class Ui {
 
     // ------------------------------------------------------------------------------ load film
 
+    /**
+     * Choosing film is the home screen when the camera is empty: your last photo, full screen, in the
+     * film under the wheel (the way a Fuji previews a film simulation), its name over the picture,
+     * and the roll length beside it. The centre button loads it; a half-press loads it and goes to shoot.
+     */
     private static void load(Gfx g, UiState s) {
         float R = right(s);
-        UiState.Film f = s.films.get(s.filmSel);
-        g.text("Load film", L, TOP, Gfx.MEDIUM, 18, INK, Gfx.LEFT, 0);
-        g.text((s.filmSel + 1) + " of " + s.films.size(), R, TOP, Gfx.MEDIUM, 18, INK3, Gfx.RIGHT, 0);
-
-        // the latest photo, rendered in this stock
-        float pw = 420, ph = 280, px = L, py = 80;
-        if (f.sample != null) {
-            float iw = g.imageWidth(f.sample), ih = g.imageHeight(f.sample);
-            float sc = Math.min(pw / iw, ph / ih), dw = iw * sc, dh = ih * sc;
-            g.image(f.sample, px + (pw - dw) / 2, py + (ph - dh) / 2, dw, dh, false);
-        } else {   // still rendering: a quiet tile that says so
-            g.rect(px, py, pw, ph, SURFACE);
-            g.text("Developing a sample…", px + pw / 2, py + ph / 2 + 6, Gfx.REGULAR, 17, INK2, Gfx.CENTER, 0);
-            g.roundRect(px + pw / 2 - 20, py + ph / 2 + 22, 40, 3, 1.5f, f.accent);
+        UiState.Film f = s.films.isEmpty() ? null : s.films.get(Math.min(s.filmSel, s.films.size() - 1));
+        Object hero = s.liveImage != null ? s.liveImage : f != null ? f.sample : null;
+        float iw = H * 1.5f, ix = (s.width - iw) / 2;
+        if (hero != null) g.image(hero, ix, 0, iw, H, false);
+        else if (f != null && s.liveCaption.length() > 0) {   // still rendering
+            g.rect(ix, 0, iw, H, SURFACE);
+        }
+        // a soft fade to black under the words, so they read over any picture
+        for (int y = 230; y < H; y += 2) {
+            float t = (y - 230) / 170f;
+            g.rect(0, y, s.width, 2, ((int) (0xE8 * Math.min(1, t * t * (3 - 2 * Math.min(1, t))))) << 24);
         }
 
-        float cx = px + pw + 40;
-        g.text(f.title, cx - 2, 124, Gfx.DISPLAY, 46, INK, Gfx.LEFT, -10);
-        if (f.iso.length() > 0) g.text("ISO " + f.iso, cx, 156, Gfx.MEDIUM, 16, f.accent, Gfx.LEFT, 80);
-        wrap(g, f.tagline, cx, 204, R - cx, Gfx.REGULAR, 19, INK2, 27);
+        int glass = 0x99000000;
+        String head = s.cancelable ? "Change film" : "Choose film";
+        float hw = g.textWidth(head, Gfx.MEDIUM, 17, 0) + 28;
+        g.roundRect(L - 14, TOP - 22, hw, 30, 15, glass);
+        g.text(head, L, TOP - 1, Gfx.MEDIUM, 17, INK, Gfx.LEFT, 0);
+        if (s.battery >= 0) g.roundRect(R - 92, TOP - 23, 104, 32, 16, glass);
+        battery(g, s.battery, R, INK, INK2);
+        if (f == null) {
+            g.text("No looks on the card", L, 300, Gfx.DISPLAY, 44, INK, Gfx.LEFT, -10);
+            return;
+        }
+        if (hero == null && s.liveCaption.length() == 0) {   // nothing shot yet to show the look on
+            g.text("Your first photo will show each look.", s.width / 2, 200, Gfx.REGULAR, 19, INK2, Gfx.CENTER, 0);
+        }
 
-        // exposures: a segmented control
-        g.text("EXPOSURES", cx, 300, Gfx.MEDIUM, 13, INK3, Gfx.LEFT, 120);
-        float sx = cx, sy = 314, sw = Math.min(252, R - cx), sh = 46, seg = sw / s.lengths.length;
-        g.roundRect(sx, sy, sw, sh, sh / 2, SURFACE);
-        for (int i = 0; i < s.lengths.length; i++) {
+        // which film of how many: dots, centred, like pages
+        float dw = 14, dx = s.width / 2 - (s.films.size() - 1) * dw / 2;
+        for (int i = 0; i < s.films.size(); i++) g.circle(dx + i * dw, TOP - 7, i == s.filmSel ? 3.5f : 2.5f, i == s.filmSel ? INK : 0x80F4F1EA);
+
+        // the film: canister, name, ISO and a line about it
+        g.roundRect(L + 2, 352, 16 * 1.4f, 18 * 1.4f, 4, f.body);
+        g.rect(L + 2, 352 + 8.4f, 16 * 1.4f, 8.4f, f.band);
+        g.text(f.title, L + 38, 378, Gfx.DISPLAY, 50, INK, Gfx.LEFT, -10);
+        String sub = (f.iso.length() > 0 ? "ISO " + f.iso : "") + (f.tagline.length() > 0 ? (f.iso.length() > 0 ? "  ·  " : "") + f.tagline : "");
+        g.text(sub, L + 38, 410, Gfx.REGULAR, 18, INK2, Gfx.LEFT, 0);
+
+        // the roll length: a segmented control on the right
+        int n = s.lengthLabels.length;
+        float seg = 54, sw = seg * n, sx = R - sw, sy = 344, sh = 40;
+        g.roundRect(sx, sy, sw, sh, sh / 2, 0xB0171614);
+        for (int i = 0; i < n; i++) {
             boolean on = i == s.lengthSel;
             if (on) g.roundRect(sx + i * seg + 4, sy + 4, seg - 8, sh - 8, (sh - 8) / 2, INK);
-            g.text(String.valueOf(s.lengths[i]), sx + i * seg + seg / 2, sy + 30, Gfx.MEDIUM, 19, on ? BG : INK2, Gfx.CENTER, 0);
+            float cx = sx + i * seg + seg / 2;
+            if (s.lengthLabels[i].equals("\u221e")) infinity(g, cx, sy + sh / 2, on ? BG : INK);   // the fonts have no ∞
+            else g.text(s.lengthLabels[i], cx, sy + 27, Gfx.MEDIUM, 18, on ? BG : INK, Gfx.CENTER, 0);
         }
+        g.text(s.lengthSel == n - 1 ? "No end: develops as you go" : "exposures", sx + sw / 2, sy + 62, Gfx.REGULAR, 15, INK2, Gfx.CENTER, 0);
 
-        g.text("Shoots neutral while loaded.", cx, 392, Gfx.REGULAR, 15, INK3, Gfx.LEFT, 0);
-
-        hints(g, s, INK3, new String[] { "wheel", "Film", "updown", "Exposures" }, s.loading ? null : new String[] { "centre", "Load" });
-        if (s.loading) g.text("Loading…", R, FOOT, Gfx.MEDIUM, 17, INK, Gfx.RIGHT, 0);
+        if (s.loading) {
+            g.text("Loading…", L, FOOT + 14, Gfx.MEDIUM, 17, INK, Gfx.LEFT, 0);
+            return;
+        }
+        float y = FOOT + 14, x = L;
+        String[] h = { "wheel", "Film", "updown", "Length", "centre", "Load" };
+        for (int i = 0; i < h.length; i += 2) {
+            x += glyph(g, h[i], x, y - 6, INK2) + 8;
+            g.text(h[i + 1], x, y, Gfx.REGULAR, 17, INK2, Gfx.LEFT, 0);
+            x += g.textWidth(h[i + 1], Gfx.REGULAR, 17, 0) + 26;
+        }
+        menuHint(g, s.cancelable ? "Back" : "Menu", INK2, R, y);
     }
-
-    // ------------------------------------------------------------------------------ darkroom
 
     private static void darkroom(Gfx g, UiState s) {
         float R = right(s);

@@ -47,9 +47,8 @@ import java.util.concurrent.ThreadFactory;
  */
 public class MainActivity extends Activity {
     private static final int BACK = UiState.BACK, LOAD = UiState.LOAD, DARKROOM = UiState.DARKROOM,
-            SHEET = UiState.SHEET, VIEW = UiState.VIEW, LAB = UiState.LAB, PROBE = UiState.PROBE, SETTINGS = UiState.SETTINGS,
-            PHOTO = UiState.PHOTO;
-    private static final int[] LENGTHS = { 12, 24, 36 };
+            SHEET = UiState.SHEET, VIEW = UiState.VIEW, LAB = UiState.LAB, PROBE = UiState.PROBE, SETTINGS = UiState.SETTINGS;
+    private static final int[] LENGTHS = { 12, 24, 36, Roll.ENDLESS };
 
     // camera key scan codes (Sony ScalarInput)
     private static final int SC_UP = 103, SC_DOWN = 108, SC_LEFT = 105, SC_RIGHT = 106, SC_ENTER = 232,
@@ -88,22 +87,14 @@ public class MainActivity extends Activity {
     private int battery = -1;          // percent
     private final Map<String, Bitmap> samples = new HashMap<String, Bitmap>();   // latest photo per stock
     private String samplesFor = "";
-    private int backSel;               // camera back menu
     private int stockSel, lengthSel = 1;   // load film
 
-    // Photo mode
-    private int camMode;               // 0 Film, 1 Photo (remembered)
     private File reference;            // the newest neutral original: looks are previewed on it
-    private int lookSel;               // the look Photo mode develops in
-    private boolean lookShown;         // its name, large, for a moment after it changed
-    private Bitmap photoPreview;       // the reference in the chosen look, full screen
-    private String photoPreviewFor = "";
-    private int photoGen;
-    private final Runnable hideLook = new Runnable() { public void run() { lookShown = false; screen.invalidate(); } };
+    private boolean backFromCamera;    // set on resume: a finished roll develops by itself, a paused develop carries on
 
     // darkroom
     private volatile Roll developing;
-    private volatile boolean devQuiet;   // a photo roll developing behind the Photo screen
+    private volatile boolean devQuiet;   // an endless roll developing behind whatever is on screen
     private int quietLeft;               // its photos still to develop
     private boolean shootAfterFrame;     // the shutter was pressed during a quiet develop: shoot once the frame in hand is done
     private Roll developAfter;           // a film roll to develop once the quiet develop has stopped
@@ -160,8 +151,6 @@ public class MainActivity extends Activity {
         root.addView(screen);
         setContentView(root);
         prefs = getPreferences(Context.MODE_PRIVATE);
-        camMode = prefs.getInt("camMode", 0) == 1 ? 1 : 0;
-        if (camMode == 1) mode = PHOTO;
         powerSave = new PowerSave(prefs);
         powerSave.release();       // undo a power-save change left behind by a crash
         if (!Environment.MEDIA_MOUNTED.equals(Environment.getExternalStorageState())) {
@@ -175,6 +164,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        backFromCamera = true;
         Display.fullColour(true);
         if (card != null && developing == null) refresh(null);
     }
@@ -185,11 +175,6 @@ public class MainActivity extends Activity {
         resumed = false;
         ui.removeCallbacks(shootWhenSettled);   // left some other way: don't jump to shooting later
         shootPending = false;
-        if (neutralQueued) {   // never change settings behind the camera's back: the next visit puts them right
-            ui.removeCallbacks(neutralLater);
-            neutralQueued = false;
-            neutralTried = false;
-        }
         if (liveRun != null) liveRun.close();    // never keep the camera when Latent isn't on screen
         final Runnable keysLog = new Runnable() { public void run() { logKeys(); } };
         worker.execute(keysLog);
@@ -225,11 +210,6 @@ public class MainActivity extends Activity {
                 long r2 = SystemClock.uptimeMillis();
                 List<File> all = Library.photos(card);
                 long r3 = SystemClock.uptimeMillis();
-                try {   // what was shot from Photo mode is the photo roll's, before any film roll counts
-                    for (Roll c : Roll.closePhotoRolls(ro, all)) devLog(c.label() + ": " + c.frames.size() + " photo(s) to develop");
-                } catch (Exception e) {
-                    devLog("photos: couldn't close (" + Probe.why(e) + ")");
-                }
                 try {
                     String tidied = Roll.tidy(ro, Roll.exposable(all, ro));
                     if (tidied != null) devLog("rolls: " + tidied);
@@ -245,6 +225,21 @@ public class MainActivity extends Activity {
                     devLog("Latent's note of the loaded roll was " + (note.length() == 0 ? "missing" : note) + "; " + inCamera.label()
                             + " is open on the card, so that's the roll in the camera" + (saved ? "" : " (the note couldn't be saved)"));
                 }
+                Roll busy = developing;   // that roll's develop owns its ROLL.TXT until it stops
+                if (inCamera != null && inCamera.endless() && Roll.LOADED.equals(inCamera.state) && (busy == null || !busy.dir.equals(inCamera.dir))) {   // what was shot since joins it
+                    try {
+                        int added = inCamera.collect(ph);
+                        if (added > 0) devLog(inCamera.label() + ": " + added + " new photo(s) to develop");
+                    } catch (Exception e) {
+                        devLog(inCamera.label() + ": new photos not added (" + Probe.why(e) + ")");
+                    }
+                }
+                final List<Roll> waiting = Roll.undevelopedEndless(ro);
+                final List<File> prints = new ArrayList<File>();
+                if (inCamera != null && inCamera.endless()) {
+                    List<File> dev = inCamera.developed();
+                    for (int i = dev.size() - 1; i >= 0 && prints.size() < 8; i--) { loadThumb(dev.get(i)); prints.add(dev.get(i)); }
+                }
                 final File ref = Roll.reference(ro, inCamera, ph);
                 final String neutralMsg = reconcileNeutral(neutralWanted(inCamera != null));
                 if (cardReadNote == null) cardReadNote = "card read: first touch " + (r0 - r00) + " ms" + (cardThere ? "" : " (no LATENT)") + ", looks " + (r1 - r0) + " ms, rolls " + (r2 - r1) + " ms, photos "
@@ -257,7 +252,8 @@ public class MainActivity extends Activity {
                         photos = ph;
                         current = inCamera;
                         reference = ref;
-                        if (camMode == 1) lookSel = lookIndex();
+                        endlessWaiting = waiting;
+                        endlessPrints = prints;
                         exposed = current == null ? 0 : current.frames.isEmpty() ? current.exposures(photos).size() : current.frames.size();
                         if (msg != null) toast(msg);
                         if (neutralMsg != null) {   // after any toast the caller shows (e.g. "Roll 8 developed")
@@ -267,11 +263,16 @@ public class MainActivity extends Activity {
                         if (!ready) readyAt = SystemClock.uptimeMillis();
                         ready = true;
                         saveSnapshot();
-                        backSel = Math.min(backSel, backItems().size());
+                        if (mode == BACK && current == null) openLoad();   // nothing in the camera: choosing film is home
+                        else if (mode == LOAD && !loading && current == null) renderHero();
                         filer.execute(new Runnable() { public void run() { fileBacklog(ro); } });
-                        renderSamples();   // so Load film and Photo open with them ready (only when the reference changed)
+                        renderSamples();   // so choosing film opens with them ready (only when the reference changed)
                         if (then != null) then.run();
-                        developPhotosIfWaiting();
+                        boolean back = backFromCamera;
+                        backFromCamera = false;
+                        // finished while you were out (or a develop was left part-way): straight to the darkroom
+                        if (back && current != null && developing == null && mode == BACK && wantsDeveloping(current)) startDevelop(current);
+                        else developWaiting();
                         screen.invalidate();
                     }
                 });
@@ -282,127 +283,70 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------------------ camera back
 
     /**
-     * The bottom row is only what the roll wants next: load one, shoot it, develop it, look back at
-     * rolls. Everything else is in Settings, the gear at the row's end (backSel == items.size()).
+     * The camera back with a roll in it has one thing to do: shoot (the centre button or a half-press),
+     * or develop once the roll is finished or a develop was paused. Everything else is behind MENU.
      */
-    private List<String> backItems() {
-        List<String> items = new ArrayList<String>();
-        if (current == null) {
-            items.add("Load film");
-        } else if (Roll.DEVELOPING.equals(current.state)) {
-            items.add("Continue developing");
-        } else {
-            int shown = Math.min(exposed, current.length);
-            if (shown < current.length) items.add("Shoot");
-            if (shown > 0) items.add("Develop");
-        }
-        items.add("Rolls");
-        return items;
-    }
-
     private void backKey(int k) {
-        List<String> items = backItems();
-        if (k == K_UP || k == K_DOWN) { if (ready) setCamMode(1); }
-        else if (k == K_LEFT) backSel = Math.max(0, backSel - 1);
-        else if (k == K_RIGHT) backSel = Math.min(items.size(), backSel + 1);   // one past the words: the gear
-        else if (k == K_ENTER && ready) {
-            if (backSel >= items.size()) { openSettings(); screen.invalidate(); return; }
-            String item = items.get(backSel);
-            if (item.equals("Load film")) {
-                openLoad();
-            } else if (item.equals("Shoot")) {
-                goShoot();
-            } else if (item.equals("Develop") || item.equals("Continue developing")) {
-                startDevelop(current);
-            } else if (item.equals("Rolls")) {
-                Roll r = firstRollWithFrames();
-                if (r == null) toast("No rolls yet");
-                else openSheet(r);
-            }
-        }
-        screen.invalidate();
+        if (k != K_ENTER || !ready || current == null) return;
+        if (wantsDeveloping(current)) startDevelop(current);
+        else goShoot();
     }
 
+    /** A finished roll, or one part-way through developing. (An endless roll develops by itself.) */
+    private boolean wantsDeveloping(Roll r) {
+        return !r.endless() && (Roll.DEVELOPING.equals(r.state) || Math.min(exposed, r.length) >= r.length);
+    }
+
+    /** Choosing film: the home screen when the camera is empty, or Change film from the menu. */
     private void openLoad() {
         if (stocks.isEmpty()) { toast("No looks in LATENT/LUTS"); return; }
+        if (mode != LOAD) {   // opens on the film and length you chose last
+            String last = prefs.getString("lastStock", "");
+            for (int i = 0; i < stocks.size(); i++) if (stocks.get(i).id.equals(last)) stockSel = i;
+            lengthSel = Math.max(0, Math.min(LENGTHS.length - 1, prefs.getInt("lastLength", 1)));
+        }
         stockSel = Math.min(stockSel, stocks.size() - 1);
         mode = LOAD;
         renderSamples();
+        renderHero();
     }
 
-    // ------------------------------------------------------------------------------ photo mode
+    /** The home screen: the camera back with its roll, or choosing film when there is none. */
+    private int home() { return current == null ? LOAD : BACK; }
 
-    /**
-     * Film or Photo, remembered. Photo shoots neutral too (your own style would sit under every look),
-     * so switching changes the camera; it waits a moment, so flicking back and forth writes nothing.
-     */
-    private void setCamMode(int m) {
-        if (m == camMode) { mode = m == 1 ? PHOTO : BACK; return; }
-        camMode = m;
-        prefs.edit().putInt("camMode", m).commit();
-        mode = m == 1 ? PHOTO : BACK;
-        if (m == 1) { lookSel = lookIndex(); showLook(); renderPhotoPreview(); }
-        ui.removeCallbacks(neutralLater);
-        neutralQueued = true;
-        ui.postDelayed(neutralLater, 1500);
-        screen.invalidate();
+    private void goHome() {
+        if (home() == LOAD && !stocks.isEmpty()) openLoad();
+        else mode = BACK;
+        developWaiting();
     }
 
-    private final Runnable neutralLater = new Runnable() { public void run() { neutralQueued = false; matchNeutral(); } };
-    private boolean neutralQueued;     // a switch of mode is about to change the camera's settings
-    private int neutralBusy;           // settings being changed right now (worker)
+    // ------------------------------------------------------------------------------ the film under the wheel, full screen
 
-    /** The look Photo mode uses: remembered by name, so new looks on the card don't shift it. */
-    private int lookIndex() {
-        String id = prefs.getString("photoLook", "");
-        for (int i = 0; i < stocks.size(); i++) if (stocks.get(i).id.equals(id)) return i;
-        return 0;
-    }
+    private Bitmap hero;               // the reference in the film under the wheel, full screen
+    private String heroFor = "";
+    private int heroGen;
 
-    private void photoKey(int k) {
-        if (!ready) return;
-        if (k == K_UP || k == K_DOWN) { setCamMode(0); return; }
-        if (stocks.isEmpty()) { toast("No looks in LATENT/LUTS"); return; }
-        if (k == K_LEFT || k == K_RIGHT) {
-            int n = stocks.size();
-            lookSel = (Math.min(lookSel, n - 1) + (k == K_RIGHT ? 1 : n - 1)) % n;
-            prefs.edit().putString("photoLook", stocks.get(lookSel).id).commit();
-            showLook();
-            renderPhotoPreview();
-        } else if (k == K_ENTER) {   // your photos: the newest photo roll's contact sheet
-            for (Roll r : rolls) if (r.isPhoto() && !r.developed().isEmpty()) { openSheet(r); return; }
-            toast("No photos yet. Half-press the shutter to shoot.");
-        }
-        screen.invalidate();
-    }
-
-    private void showLook() {
-        lookShown = true;
-        ui.removeCallbacks(hideLook);
-        ui.postDelayed(hideLook, 1300);
-    }
-
-    /** The reference in the chosen look at full screen size; until it's ready the small sample stands in. */
-    private void renderPhotoPreview() {
+    /** The reference in the chosen film at full screen size; until it's ready the small sample stands in. */
+    private void renderHero() {
         if (reference == null || stocks.isEmpty()) return;
-        final Stock st = stocks.get(Math.min(lookSel, stocks.size() - 1));
+        final Stock st = stocks.get(Math.min(stockSel, stocks.size() - 1));
         final File ref = reference;
         final String key = ref.getPath() + "|" + st.id;
-        if (key.equals(photoPreviewFor)) return;
-        final int gen = ++photoGen;
+        if (key.equals(heroFor)) return;
+        final int gen = ++heroGen;
         worker.execute(new Runnable() {
             public void run() {
-                if (gen != photoGen) return;   // the wheel moved on
+                if (gen != heroGen) return;   // the wheel moved on
                 int[] px = new int[720 * 480], size = new int[2];
                 int[] p = params(ref, st.highlight, st.shadow, 0, 1);
                 if (FilmCore.preview(ref.getPath(), st.lut.getPath(), p, FilmCore.PREVIEW_FIT, px, 720, 480, size) != 0) return;
                 final Bitmap b = Bitmap.createBitmap(px, size[0], size[1], Bitmap.Config.ARGB_8888);
                 ui.post(new Runnable() {
                     public void run() {
-                        if (gen != photoGen) { b.recycle(); return; }
-                        Bitmap old = photoPreview;
-                        photoPreview = b;
-                        photoPreviewFor = key;
+                        if (gen != heroGen) { b.recycle(); return; }
+                        Bitmap old = hero;
+                        hero = b;
+                        heroFor = key;
                         if (old != null) old.recycle();
                         screen.invalidate();
                     }
@@ -411,13 +355,7 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** Leaving for the camera from Photo mode: a photo roll starts here and collects what you shoot. Worker thread. */
-    private void startPhotoRoll() throws java.io.IOException {
-        for (Roll r : Roll.list(card)) if (r.isPhoto() && r.isOpen() && Roll.LOADED.equals(r.state)) return;   // one already waiting
-        String look = stocks.isEmpty() ? "" : stocks.get(Math.min(lookSel, stocks.size() - 1)).id;
-        Roll r = Roll.create(card, Roll.PHOTO, look, Roll.PHOTO_LENGTH, 0, Roll.highest(Library.photos(card)));
-        devLog("photo mode: " + r.label() + " in " + look + " from " + r.afterNo);
-    }
+    private int neutralBusy;           // settings being changed right now (worker)
 
     // ------------------------------------------------------------------------------ settings
 
@@ -427,12 +365,16 @@ public class MainActivity extends Activity {
     /** Each row: {label, value, action}. Value "on"/"off" is a switch, "›" opens something, "" is a heading. */
     private List<String[]> settingsRows() {
         List<String[]> rows = new ArrayList<String[]>();
+        rows.add(new String[] { current != null ? "This roll" : "Latent", "", "" });
+        if (current != null && Roll.LOADED.equals(current.state) && !current.endless() && exposed > 0 && exposed < current.length)
+            rows.add(new String[] { "Develop now", "›", "develop" });
+        if (current != null && !Roll.DEVELOPING.equals(current.state)) rows.add(new String[] { "Change film", "›", "change" });
+        rows.add(new String[] { "Rolls", "›", "rolls" });
         rows.add(new String[] { "Developing", "", "" });
         rows.add(new String[] { "Use three cores", developCores() > 1 ? "on" : "off", "cores" });
         rows.add(new String[] { "Shoot neutral while a roll is loaded", neutralOn() ? "on" : "off", "neutral" });
-        rows.add(new String[] { "Film", "", "" });
+        rows.add(new String[] { "Looks", "", "" });
         rows.add(new String[] { "Try looks on a photo", "›", "lab" });
-        if (current != null && !Roll.DEVELOPING.equals(current.state)) rows.add(new String[] { "Unload this roll", "›", "unload" });
         rows.add(new String[] { "Camera", "", "" });
         rows.add(new String[] { "Settings check", "›", "settingsCheck" });
         rows.add(new String[] { "Speed test", "›", "speedTest" });
@@ -444,14 +386,15 @@ public class MainActivity extends Activity {
     private String settingsFooter(String action) {
         if (action.equals("cores")) return prefs.getBoolean("multicoreOk", false) ? "Develops on cores 1 and 2 as well. Core 0 is left to the camera." : "Run the Speed test first: it checks the other cores.";
         if (action.equals("neutral")) return "Every look starts from the same picture. Your settings come back after.";
-        if (action.equals("unload")) return "Keeps the frames shot so far, then load another film.";
+        if (action.equals("develop")) return "Ends the roll here and develops the " + exposed + " shot so far.";
+        if (action.equals("change")) return current != null && current.endless() ? "This roll's photos keep developing." : "Keeps the frames shot so far for developing.";
         return "Latent " + versionName();
     }
 
     private boolean neutralOn() { return prefs.getBoolean("neutral", true); }
 
-    /** The camera shoots neutral while a film roll is loaded, and in Photo mode: every look starts from a plain picture. */
-    private boolean neutralWanted(boolean filmLoaded) { return neutralOn() && (filmLoaded || camMode == 1); }
+    /** The camera shoots neutral while a roll is loaded: every look starts from a plain picture. */
+    private boolean neutralWanted(boolean filmLoaded) { return neutralOn() && filmLoaded; }
 
     private void openSettings() {
         mode = SETTINGS;
@@ -478,8 +421,14 @@ public class MainActivity extends Activity {
             } else if (action.equals("lab")) {
                 openLab();
                 fromSettings = true;
-            } else if (action.equals("unload")) {
+            } else if (action.equals("develop")) {
+                startDevelop(current);
+            } else if (action.equals("change")) {
                 openLoad();
+            } else if (action.equals("rolls")) {
+                Roll r = firstRollWithFrames();
+                if (r == null) toast("No rolls yet");
+                else openSheet(r);
             } else if (action.equals("settingsCheck") || action.equals("speedTest") || action.equals("liveTest")) {
                 mode = PROBE;
                 probeStage = 0;
@@ -505,7 +454,6 @@ public class MainActivity extends Activity {
     /** Sets the camera neutral, or gives your settings back, to match what's wanted now. */
     private void matchNeutral() {
         final boolean on = neutralWanted(current != null);
-        ui.removeCallbacks(neutralLater);
         neutralBusy++;   // shooting waits for this (and then the usual settle time)
         worker.execute(new Runnable() {
             public void run() {
@@ -641,31 +589,10 @@ public class MainActivity extends Activity {
             toast("Finishing a photo…");
             return;
         }
-        if (neutralQueued) { neutralQueued = false; matchNeutral(); }   // shoot with the settings this mode wants
         if (neutralBusy > 0) {   // never start shooting while settings are being written: check again shortly
             if (!shootPending) { shootPending = true; toast("Setting up the camera…"); }
             ui.removeCallbacks(shootWhenSettled);
             ui.postDelayed(shootWhenSettled, 300);
-            return;
-        }
-        if (camMode == 1 && !photoRollReady) {
-            if (photoRollStarting) return;
-            photoRollStarting = true;
-            worker.execute(new Runnable() {
-                public void run() {
-                    String why = null;
-                    try { startPhotoRoll(); } catch (Exception e) { why = Probe.why(e); devLog("photo mode: no photo roll (" + why + ")"); }
-                    final String w = why;
-                    ui.post(new Runnable() {
-                        public void run() {
-                            photoRollStarting = false;
-                            if (w != null) { toast("Couldn't start: " + w); return; }
-                            photoRollReady = true;
-                            goShoot();
-                        }
-                    });
-                }
-            });
             return;
         }
         long since = NeutralSettings.sinceLastWrite();
@@ -676,7 +603,6 @@ public class MainActivity extends Activity {
             return;
         }
         shootPending = false;
-        photoRollReady = false;
         // a breadcrumb: if the camera restarts on the way to shooting, the next start shows it came right after this
         devLog("shoot: handing over to the camera" + (current != null ? " (" + current.label() + ", " + exposed + " exposed)" : " (no roll)")
                 + (since >= 0 ? ", settings last changed " + since / 1000 + " s before" : ""));
@@ -690,8 +616,6 @@ public class MainActivity extends Activity {
         finish();
     }
 
-    private boolean photoRollStarting, photoRollReady;   // Photo mode's roll for this trip to the camera
-
     private void toast(String msg) {
         status = msg == null ? "" : msg;
         ui.removeCallbacks(clearToast);
@@ -704,12 +628,14 @@ public class MainActivity extends Activity {
     private volatile boolean loading;   // a roll is being loaded: one press is enough, the rest wait
 
     private void loadKey(int k) {
-        if (loading) return;
+        if (loading || !ready || stocks.isEmpty()) return;
+        if (k == K_ENTER && developing != null && devQuiet) { paused = true; loadAfter = true; toast("Finishing a photo…"); return; }
         if (k == K_LEFT) stockSel = (stockSel + stocks.size() - 1) % stocks.size();
         else if (k == K_RIGHT) stockSel = (stockSel + 1) % stocks.size();
-        else if (k == K_UP) lengthSel = Math.min(LENGTHS.length - 1, lengthSel + 1);   // up = more exposures
+        else if (k == K_UP) lengthSel = Math.min(LENGTHS.length - 1, lengthSel + 1);   // up = more exposures (∞ last)
         else if (k == K_DOWN) lengthSel = Math.max(0, lengthSel - 1);
         else if (k == K_ENTER) loadRoll();
+        if (k == K_LEFT || k == K_RIGHT) renderHero();
         screen.invalidate();
     }
 
@@ -720,6 +646,7 @@ public class MainActivity extends Activity {
      */
     private void loadRoll() {
         final Stock stock = stocks.get(stockSel);
+        prefs.edit().putString("lastStock", stock.id).putInt("lastLength", lengthSel).commit();
         final Roll previous = current;
         final List<File> ph = photos;
         final int length = LENGTHS[lengthSel];
@@ -760,8 +687,7 @@ public class MainActivity extends Activity {
                     public void run() {
                         loading = false;
                         if (r != null) { current = r; exposed = 0; }   // the camera back shows it now; the card is re-read behind it
-                        setCamMode(0);
-                        mode = BACK; backSel = 0;
+                        mode = BACK;
                         toast(m);
                         refresh(null);
                     }
@@ -817,7 +743,7 @@ public class MainActivity extends Activity {
         }
         if (r.frames.isEmpty()) for (File f : r.exposures(photos)) r.frames.add(f.getPath());
         if (r.frames.isEmpty()) { toast("No exposures on this roll yet. Go shoot."); return; }
-        r.state = Roll.DEVELOPING;
+        if (!quiet) r.state = Roll.DEVELOPING;   // an endless roll stays loaded while its photos develop
         try { r.save(); } catch (Exception e) { toast("Could not write the roll: " + e.getMessage()); return; }
         r.cleanTemp();
         developing = r;
@@ -882,7 +808,7 @@ public class MainActivity extends Activity {
     private void developNext() {
         final Roll r = developing;
         if (devQuiet && !quietAllowed()) paused = true;
-        if (paused) { stopDevelop(devQuiet ? null : "Paused. Continue any time from the camera back."); return; }
+        if (paused) { stopDevelop(devQuiet ? null : "Paused. Press the centre button to carry on."); return; }
         int next = -1;
         for (int i = 0; i < r.frames.size() && next < 0; i++) if (!failed.contains(i) && r.developed(i) == null) next = i;
         if (next < 0) { finishDevelop(); return; }   // the last originals are filed in the background (refresh)
@@ -971,13 +897,17 @@ public class MainActivity extends Activity {
                     }
                 }
                 if (made != null) loadThumb(made);
+                final File print = made;
                 final String error = err;
                 final long frameMs = System.currentTimeMillis() - t0;
                 ui.post(new Runnable() {
                     public void run() {
                         if (error != null) { devFailed++; failed.add(frame); toast((devQuiet ? "Photo " : "Frame ") + (frame + 1) + ": " + error); }
                         else {
-                            if (devQuiet) quietLeft = Math.max(0, quietLeft - 1);
+                            if (devQuiet) {
+                                quietLeft = Math.max(0, quietLeft - 1);
+                                if (r == current && print != null) endlessPrints.add(0, print);
+                            }
                             if (t[FilmCore.T_TOTAL] > 0) adaptThreads(t, p[FilmCore.THREADS]);
                             learnFrameTime((int) frameMs);
                         }
@@ -1094,7 +1024,7 @@ public class MainActivity extends Activity {
 
     private void finishDevelop() {
         final Roll r = developing;
-        if (devFailed == 0) {
+        if (devFailed == 0 && !(r.endless() && r.isOpen())) {   // an endless roll in the camera is never finished
             r.state = Roll.DEVELOPED;
             if (r.dir.getName().equals(prefs.getString("roll", ""))) prefs.edit().remove("roll").commit();
         }
@@ -1102,39 +1032,61 @@ public class MainActivity extends Activity {
         if (devQuiet) {   // nothing to announce: the photos are in the camera roll, the next trip's develop next
             final int n = r.frames.size();
             endDarkroom();
-            refresh(new Runnable() { public void run() { afterQuiet(); if (mode == PHOTO) toast(n == 1 ? "Photo developed" : n + " photos developed"); } });
+            refresh(new Runnable() { public void run() { afterQuiet(); } });
             return;
         }
         long secs = (System.currentTimeMillis() - devStarted) / 1000;
         final String msg = devFailed == 0 ? r.label() + " developed in " + secs / 60 + " min " + secs % 60 + " s"
                 : devFailed + " frame(s) could not be developed";
         endDarkroom();
-        refresh(new Runnable() { public void run() { openSheet(r); toast(msg); } });
+        refresh(new Runnable() {
+            public void run() {
+                if (shootAfterFrame) { shootAfterFrame = false; goShoot(); return; }   // the shutter was pressed on the last frame
+                openSheet(r);
+                toast(msg);
+            }
+        });
     }
 
     private void stopDevelop(final String msg) {
         boolean quiet = devQuiet;
         endDarkroom();
         if (quiet) { refresh(new Runnable() { public void run() { afterQuiet(); } }); return; }
-        refresh(new Runnable() { public void run() { mode = BACK; toast(msg); } });
+        refresh(new Runnable() {
+            public void run() {
+                mode = BACK;
+                if (shootAfterFrame) { shootAfterFrame = false; goShoot(); }   // the shutter paused it
+                else toast(msg);
+            }
+        });
     }
+
+    private boolean loadAfter, shootAfterLoad;   // Load was pressed during a quiet develop: load once the frame in hand is done
 
     /** A quiet develop has stopped or finished: what was waiting for it goes now. */
     private void afterQuiet() {
+        if (loadAfter) {
+            loadAfter = false;
+            if (mode == LOAD && !loading) { loadRoll(); if (shootAfterLoad) goShoot(); }
+            shootAfterLoad = false;
+            return;
+        }
         if (shootAfterFrame) { shootAfterFrame = false; goShoot(); return; }
         if (developAfter != null) { Roll f = developAfter; developAfter = null; startDevelop(f, false); }
     }
 
     /** Photos develop quietly on these screens; the Lab, the tests, Load film and the darkroom want the camera to themselves. */
     private boolean quietAllowed() {
-        return resumed && (mode == PHOTO || mode == BACK || mode == SHEET || mode == VIEW || mode == SETTINGS);
+        return resumed && !loading && (mode == BACK || mode == LOAD || mode == SHEET || mode == VIEW || mode == SETTINGS);
     }
 
-    /** Photo rolls waiting to develop start as soon as nothing else needs the camera. */
-    private void developPhotosIfWaiting() {
-        if (developing != null || shootPending || shootAfterFrame || photoRollStarting || !ready || !quietAllowed()) return;
-        List<Roll> waiting = Roll.undevelopedPhotos(rolls);
-        if (!waiting.isEmpty()) startDevelop(waiting.get(0), true);
+    private List<File> endlessPrints = new ArrayList<File>();   // the endless roll in the camera: its prints, newest first
+    private List<Roll> endlessWaiting = new ArrayList<Roll>();   // endless rolls with frames to develop (from the last card read)
+
+    /** An endless roll's new photos start developing as soon as nothing else needs the camera. */
+    private void developWaiting() {
+        if (developing != null || shootPending || shootAfterFrame || !ready || !quietAllowed() || endlessWaiting.isEmpty()) return;
+        startDevelop(endlessWaiting.get(0), true);
     }
 
     private void endDarkroom() {
@@ -1449,13 +1401,10 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Where MENU comes back to: the camera back, or Photo. */
-    private int home() { return camMode == 1 ? PHOTO : BACK; }
-
     private String modeName() {
         switch (mode) {
             case BACK: return "camera back"; case LOAD: return "Load film"; case DARKROOM: return "darkroom"; case SHEET: return "contact sheet";
-            case VIEW: return "viewer"; case LAB: return "Lab"; case SETTINGS: return "Settings"; case PHOTO: return "Photo"; default: return "tests";
+            case VIEW: return "viewer"; case LAB: return "Lab"; case SETTINGS: return "menu"; default: return "tests";
         }
     }
 
@@ -1474,7 +1423,7 @@ public class MainActivity extends Activity {
         // the newest neutral original; failing that (nothing shot with Latent yet), the newest photo
         final File latest = reference != null ? reference : photos.isEmpty() ? null : photos.get(0);
         if (latest == null) return;
-        if (mode == PHOTO || camMode == 1) renderPhotoPreview();
+        if (mode == LOAD) renderHero();
         if (latest.getPath().equals(samplesFor) && samples.size() == stocks.size()) return;
         samplesFor = latest.getPath();
         final List<Stock> st = stocks;
@@ -1645,7 +1594,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean shootAllowed() {
-        return mode != DARKROOM && !labBusy && !(mode == PROBE && probeStage == 1);
+        return !labBusy && !(mode == PROBE && probeStage == 1);   // in the darkroom it pauses after the frame, then shoots
     }
 
     @Override
@@ -1662,7 +1611,6 @@ public class MainActivity extends Activity {
         if (e.getRepeatCount() == 0) keyAt = SystemClock.uptimeMillis();
         switch (mode) {
             case BACK: backKey(k); break;
-            case PHOTO: photoKey(k); break;
             case LOAD: loadKey(k); break;
             case SHEET: sheetKey(k); break;
             case VIEW: viewKey(k); break;
@@ -1678,23 +1626,32 @@ public class MainActivity extends Activity {
     public boolean onKeyUp(int keyCode, KeyEvent e) {
         int sc = e.getScanCode();
         if (shutterKey(sc, keyCode)) {
-            if (shutterDown && shootAllowed()) goShoot();   // mid-load, it goes once the camera is ready
+            if (shutterDown && shootAllowed()) {
+                // choosing film, a half-press loads it and goes to shoot: one press from an empty camera to shooting
+                if (mode == LOAD && !loading && ready && !stocks.isEmpty()) {
+                    if (developing != null && devQuiet) { paused = true; loadAfter = true; shootAfterLoad = true; toast("Finishing a photo…"); }
+                    else { loadRoll(); goShoot(); }   // mid-load, it goes once the camera is ready
+                } else if (mode == DARKROOM) {
+                    if (!shootAfterFrame) { paused = true; shootAfterFrame = true; toast("Pausing after this frame, then shooting"); }
+                } else goShoot();
+            }
             shutterDown = false;
             return true;
         }
         boolean menu = sc == SC_MENU || sc == SC_SK1 || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_BACK;
         if (!menu) return true;
         switch (mode) {
-            case BACK: case PHOTO: goShoot(); break;   // leaving starts the camera's shooting mode too
-            case SETTINGS: mode = BACK; break;
+            case BACK: openSettings(); break;
+            case LOAD: if (loading) break; if (current != null) mode = BACK; else openSettings(); break;   // MENU: back to the roll, or the menu
+            case SETTINGS: goHome(); break;
             case DARKROOM: paused = true; toast("Pausing after this frame"); break;
             case VIEW: mode = SHEET; break;
-            case LAB: if (!labBusy) { mode = fromSettings ? SETTINGS : home(); developPhotosIfWaiting(); } break;
+            case LAB: if (!labBusy) { if (fromSettings) mode = SETTINGS; else goHome(); developWaiting(); } break;
             case PROBE:
                 if (liveRun != null) liveRun.close();   // MENU stops the live view test at once
-                else if (probeStage != 1) { mode = fromSettings ? SETTINGS : home(); developPhotosIfWaiting(); }
+                else if (probeStage != 1) { if (fromSettings) mode = SETTINGS; else goHome(); developWaiting(); }
                 break;
-            default: mode = home(); developPhotosIfWaiting(); break;
+            default: goHome(); break;
         }
         screen.invalidate();
         return true;
@@ -1723,25 +1680,12 @@ public class MainActivity extends Activity {
                     s.exposed = exposed;
                     if (Roll.DEVELOPING.equals(current.state)) s.developed = current.developedCount();
                 }
-                s.nav = backItems();
-                s.navSel = Math.min(backSel, s.nav.size());
-                s.gear = true;
-                s.camSwitch = true;
-                break;
-            case PHOTO: {
-                for (Stock st : stocks) s.looks.add(film(st));
-                s.lookSel = Math.min(lookSel, Math.max(0, stocks.size() - 1));
-                Stock st = stocks.isEmpty() ? null : stocks.get(s.lookSel);
-                if (st != null && reference != null) {
-                    // the full-size preview once it's this look; meanwhile this look's small sample, scaled up
-                    s.liveImage = photoPreviewFor.equals(reference.getPath() + "|" + st.id) ? photoPreview : samples.get(st.id);
+                if (current != null && current.endless()) {
+                    s.endless = true;
+                    for (int i = 0; i < endlessPrints.size() && i < 8; i++) s.thumbs.add(thumb(endlessPrints.get(i)));
                 }
-                s.liveCaption = reference == null ? "" : "On your last photo";
-                s.loading = !ready;   // no "shoot a photo" while the card is still being read
-                s.lookShown = lookShown;
                 s.developing = devQuiet && developing != null ? quietLeft : 0;
                 break;
-            }
             case SETTINGS: {
                 List<String[]> rows = settingsRows();
                 int sel = Math.min(settingsSel, rows.size() - 1);
@@ -1754,8 +1698,13 @@ public class MainActivity extends Activity {
                 for (Stock st : stocks) s.films.add(film(st));
                 s.filmSel = stockSel;
                 s.lengthSel = lengthSel;
-                s.lengths = LENGTHS;
                 s.loading = loading;
+                s.cancelable = current != null;
+                if (!stocks.isEmpty() && reference != null) {   // the full-size picture once it's this film; meanwhile its sample
+                    Stock st = stocks.get(Math.min(stockSel, stocks.size() - 1));
+                    s.liveImage = heroFor.equals(reference.getPath() + "|" + st.id) ? hero : null;
+                }
+                s.liveCaption = reference != null || !photos.isEmpty() ? "on" : "";   // there is a photo to show looks on
                 break;
             case DARKROOM: {
                 Roll r = developing;
@@ -1789,7 +1738,6 @@ public class MainActivity extends Activity {
                     s.film = film(st);
                     if (s.film == null) { s.film = new UiState.Film(); s.film.title = sheetRoll.stock; s.film.accent = Ui.INK; }
                     s.rollNumber = sheetRoll.number;
-                    s.sheetPhotos = sheetRoll.isPhoto();
                     s.sheetUndeveloped = !Roll.DEVELOPED.equals(sheetRoll.state);
                     for (File f : sheetFrames) s.thumbs.add(thumb(f));
                 }
