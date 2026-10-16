@@ -805,32 +805,62 @@ final class ShootingTest implements SurfaceHolder.Callback {
     }
 
     /**
-     * The system log (logcat) to LATENT/LOGCAT.TXT: Android 2.3 lets an app with READ_LOGS read it, and
-     * the camera service may say there why the capture hook was refused. Waits at most 5 s.
+     * The system log to LATENT/LOGCAT.TXT, read straight from the kernel's log device (/dev/log/main),
+     * since this camera won't start another program (logcat hung in v0.26.3, as sync did in v0.12).
+     * READ_LOGS lets an app read it on Android 2.3. Each read gives one entry: a 20-byte header
+     * (payload length, pid, tid, time) then priority, tag and message. The camera service may say
+     * there why the capture hook was refused. Reads for at most 3 s.
      */
     private void saveSystemLog() {
         final File out = new File(Library.home(card), "LOGCAT.TXT");
+        final StringBuilder text = new StringBuilder();
+        final int[] entries = { 0 };
+        final String[] problem = { null };
         Thread t = new Thread(new Runnable() {
             public void run() {
-                Process p = null;
+                java.io.FileInputStream in = null;
                 try {
-                    p = Runtime.getRuntime().exec(new String[] { "logcat", "-d", "-v", "time" });
-                    java.io.InputStream in = p.getInputStream();
-                    FileOutputStream o = new FileOutputStream(out);
-                    try {
-                        byte[] b = new byte[16384];
-                        for (int n; (n = in.read(b)) > 0; ) o.write(b, 0, n);
-                    } finally { o.close(); in.close(); }
+                    in = new java.io.FileInputStream("/dev/log/main");
+                    byte[] b = new byte[5 * 1024 + 20];
+                    for (int n; (n = in.read(b)) > 20; ) {
+                        int len = (b[0] & 0xff) | (b[1] & 0xff) << 8;
+                        int pid = le(b, 4), sec = le(b, 12);
+                        int end = Math.min(n, 20 + len), p = 20;
+                        int prio = b[p++];
+                        int tagEnd = p;
+                        while (tagEnd < end && b[tagEnd] != 0) tagEnd++;
+                        String tag = new String(b, p, tagEnd - p, "UTF-8");
+                        int msgEnd = tagEnd + 1;
+                        while (msgEnd < end && b[msgEnd] != 0) msgEnd++;
+                        String msg = msgEnd > tagEnd + 1 ? new String(b, tagEnd + 1, msgEnd - tagEnd - 1, "UTF-8") : "";
+                        synchronized (text) {
+                            text.append(sec).append(' ').append(pid).append(' ').append("VDIWEF".charAt(Math.max(0, Math.min(5, prio - 2))))
+                                    .append('/').append(tag).append(": ").append(msg.trim()).append("\r\n");
+                            entries[0]++;
+                        }
+                    }
                 } catch (Throwable e) {
-                    note("system log: " + Probe.why(e));
+                    problem[0] = Probe.why(e);
                 } finally {
-                    if (p != null) p.destroy();
+                    try { if (in != null) in.close(); } catch (Throwable ignored) { }
                 }
             }
-        }, "logcat");
+        }, "log-reader");
         t.start();
-        try { t.join(5000); } catch (InterruptedException ignored) { }
-        note("system log: " + (out.exists() ? out.length() / 1024 + " KB in LATENT/LOGCAT.TXT" : "none") + (t.isAlive() ? " (still reading after 5 s)" : ""));
+        try { t.join(3000); } catch (InterruptedException ignored) { }   // the device blocks once it has given all it holds
+        synchronized (text) {
+            try {
+                FileOutputStream o = new FileOutputStream(out);
+                try { o.write(text.toString().getBytes("UTF-8")); } finally { o.close(); }
+            } catch (Exception e) {
+                note("system log: " + Probe.why(e));
+            }
+            note("system log: " + entries[0] + " entries in LATENT/LOGCAT.TXT" + (problem[0] != null ? " (" + problem[0] + ")" : ""));
+        }
+    }
+
+    private static int le(byte[] b, int i) {
+        return (b[i] & 0xff) | (b[i + 1] & 0xff) << 8 | (b[i + 2] & 0xff) << 16 | (b[i + 3] & 0xff) << 24;
     }
 
     /** The log so far onto the card, before a step that could hang the camera. */
