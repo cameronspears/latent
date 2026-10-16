@@ -132,6 +132,32 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private int frames, lookMsSum, grabFails;
     private final int[] px = new int[FRAME_W * FRAME_H], info = new int[FilmCore.L_COUNT];
     private Bitmap frame;
+    // the look as shown on the 16-bit plane: rendered on the worker at the screen's own pixels, dithered
+    // (Skia dithers into a 4444 bitmap), so it reads as fine grain rather than bands; two, swapped on the UI thread
+    private final Bitmap[] shown16 = new Bitmap[2];
+    private int front16 = -1, liveW, liveH;
+    private Bitmap work8888;
+    private final android.graphics.Paint dither = new android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG | android.graphics.Paint.DITHER_FLAG);
+
+    /** The picture's size on the screen in real pixels (the 3:2 area), so the 16-bit look is made 1:1. */
+    void setLiveSize(int w, int h) { liveW = w; liveH = h; }
+
+    /** Worker: px (w x h) into the back 16-bit picture, cropped to 3:2 as the screen shows it. Returns its index, or -1. */
+    private int render16(int w, int h) {
+        if (!SHOOT_16BIT || liveW <= 0 || liveH <= 0 || w <= 0 || h <= 0) return -1;
+        try {
+            if (work8888 == null || work8888.getWidth() != w || work8888.getHeight() != h) work8888 = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            work8888.setPixels(px, 0, w, 0, 0, w, h);
+            int back = front16 == 0 ? 1 : 0;
+            if (shown16[back] == null) shown16[back] = Bitmap.createBitmap(liveW, liveH, Bitmap.Config.ARGB_4444);
+            float sc = Math.max(liveW / (float) w, liveH / (float) h), sw = liveW / sc, sh = liveH / sc;
+            android.graphics.Rect src = new android.graphics.Rect(Math.round((w - sw) / 2), Math.round((h - sh) / 2), Math.round((w + sw) / 2), Math.round((h + sh) / 2));
+            new android.graphics.Canvas(shown16[back]).drawBitmap(work8888, src, new android.graphics.Rect(0, 0, liveW, liveH), dither);
+            return back;
+        } catch (Throwable e) {
+            return -1;
+        }
+    }
     private Method mFrames, mSize, mRead, mFrameRelease;
     boolean lookOn = true;     // the film look on live view; off: the camera's own picture
     private boolean lookFailed;
@@ -578,8 +604,11 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
                 long t = SystemClock.uptimeMillis();
                 final int rc;
-                try { rc = FilmCore.live(jpeg, jpeg.length, l, p, px, FRAME_W, FRAME_H, info); }
-                finally { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT); }
+                final int made;
+                try {
+                    rc = FilmCore.live(jpeg, jpeg.length, l, p, px, FRAME_W, FRAME_H, info);
+                    made = rc == 0 ? render16(info[FilmCore.L_W], info[FilmCore.L_H]) : -1;
+                } finally { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT); }
                 final long ms = SystemClock.uptimeMillis() - t;
                 final String err = rc == 0 ? null : FilmCore.lastError();
                 ui.post(new Runnable() {
@@ -587,6 +616,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                         inFlight = false;
                         if (closed) return;
                         if (err != null) { if (frames == 0) noLook(err); return; }
+                        if (made >= 0) front16 = made;
                         show(ms);
                     }
                 });
@@ -1265,7 +1295,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         long now = SystemClock.uptimeMillis();
         s.mode = UiState.PHOTO;
         boolean look = lookOn && frame != null && !sequenceStopped && now >= quietUntil;   // frames stopped, or a picture being written: the camera's own view
-        s.liveImage = look ? frame : null;
+        boolean exact = look && front16 >= 0 && shown16[front16] != null;
+        s.liveImage = !look ? null : exact ? shown16[front16] : frame;
+        s.liveExact = exact;
         s.liveThrough = previewing && !look;   // the camera's own live view shows through
         s.lookLive = look;
         s.afState = release.state;
@@ -1371,6 +1403,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         ui.removeCallbacksAndMessages(null);
         for (; stored < shots; stored++) host.shot(null, nextFilm());   // taken but not yet named: still exposures on the roll
         if (frame != null) { frame.recycle(); frame = null; }
+        for (int i = 0; i < 2; i++) if (shown16[i] != null) { shown16[i].recycle(); shown16[i] = null; }
+        front16 = -1;
         if (print != null) { print.recycle(); print = null; }
         if (pendingPrint != null) { pendingPrint.recycle(); pendingPrint = null; }
         host.closed(why);

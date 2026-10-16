@@ -117,6 +117,15 @@ final class AndroidGfx implements Gfx {
         c.drawBitmap(b, src, rf, red ? safelight : bitmap);
     }
 
+    private final Paint exact = new Paint();
+
+    public void imageExact(Object img, float x, float y, float w, float h) {
+        Bitmap b = (Bitmap) img;
+        if (b == null || b.isRecycled()) return;
+        rf.set(x, y, x + w, y + h);
+        c.drawBitmap(b, null, rf, exact);
+    }
+
     public int imageWidth(Object img) { return ((Bitmap) img).getWidth(); }
     public int imageHeight(Object img) { return ((Bitmap) img).getHeight(); }
 }

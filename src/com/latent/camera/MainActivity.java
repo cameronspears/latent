@@ -879,6 +879,8 @@ public class MainActivity extends Activity {
                 screen.invalidate();
             }
         });
+        // the picture's area on screen in real pixels: the 3:2 area (720 x 480 of the design space)
+        if (screen.getWidth() > 0) vf.setLiveSize(Math.round(720f * screen.getWidth() / logicalWidth), screen.getHeight());
         vf.open();
         screen.invalidate();
     }

@@ -32,6 +32,7 @@ final class UiState {
 
     // Photo mode: live view with a look on it
     Object liveImage;                  // a still standing in for live view (previews only)
+    boolean liveExact;                 // liveImage is at the screen's own pixels (16-bit, dithered): drawn 1:1
     List<Film> looks = new ArrayList<Film>();
     int lookSel;
     boolean lookShown;                 // the look's name, large, just after it changed

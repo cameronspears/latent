@@ -128,7 +128,8 @@ final class Ui {
         float iw = H * 1.5f, ix = (s.width - iw) / 2, ir = ix + iw;
         UiState.Film f = s.looks.isEmpty() ? null : s.looks.get(Math.min(s.lookSel, s.looks.size() - 1));
         int accent = f != null ? f.accent : INK;
-        if (s.liveImage != null) g.image(s.liveImage, ix, 0, iw, H, false);
+        if (s.liveImage != null && s.liveExact) g.imageExact(s.liveImage, ix, 0, iw, H);
+        else if (s.liveImage != null) g.image(s.liveImage, ix, 0, iw, H, false);
         else if (!s.liveThrough) g.rect(ix, 0, iw, H, 0xFF0B0B0A);
         if (s.flash) { g.rect(ix, 0, iw, H, 0xD0000000); }   // the shutter: a blink
 

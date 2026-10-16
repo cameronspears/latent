@@ -74,6 +74,11 @@ final class HostGfx implements Gfx {
         return w + size * tracking / 1000f * Math.max(0, s.length() - 1);
     }
 
+    public void imageExact(Object img, float x, float y, float w, float h) {
+        BufferedImage b = (BufferedImage) img;
+        g.drawImage(b, Math.round(x), Math.round(y), Math.round(x + w), Math.round(y + h), 0, 0, b.getWidth(), b.getHeight(), null);
+    }
+
     public void image(Object img, float x, float y, float w, float h, boolean red) {
         BufferedImage b = (BufferedImage) img;
         float iw = b.getWidth(), ih = b.getHeight(), sc = Math.max(w / iw, h / ih);

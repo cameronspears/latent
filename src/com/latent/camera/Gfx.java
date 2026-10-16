@@ -25,6 +25,8 @@ interface Gfx {
      * aspect ratios differ (so letterboxed thumbnails lose their bars). red = safelight tint.
      */
     void image(Object img, float x, float y, float w, float h, boolean red);
+    /** The whole image stretched into the rect, unfiltered: a picture already made at the screen's own pixels. */
+    void imageExact(Object img, float x, float y, float w, float h);
     int imageWidth(Object img);
     int imageHeight(Object img);
 }
