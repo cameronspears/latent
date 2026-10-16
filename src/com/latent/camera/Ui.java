@@ -803,6 +803,13 @@ final class Ui {
         g.text(t, s.width / 2, 46, Gfx.MEDIUM, 17, INK, Gfx.CENTER, 0);
     }
 
+    static final String[] SCREEN_PLAN = {
+            "Puts a test picture the size of the viewfinder's on the screen 40 times, as fast as it goes, with the screen in its 16-bit mode as while shooting. No camera.",
+            "Four ways: today's (Latent's screen), Latent's screen asking for a 16-bit window, a 16-bit surface of its own, and that surface drawn from a thread of its own.",
+            "Notes the fastest; the viewfinder uses it from a later version. The screen flickers with the test picture while it runs.",
+    };
+    static final String SCREEN_FOOTER = "About fifteen seconds. MENU stops it. Results go to LATENT/SCREEN.TXT.";
+
     static final String[] SPEED_PLAN = {
             "Reads how many cores the camera has, which ones Latent may use, and how busy each is while idle. Read only.",
             "Times the film look on your newest photo, decoded at half size into memory, four ways, each checked against a full-precision reference.",

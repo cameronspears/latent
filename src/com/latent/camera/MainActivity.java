@@ -151,7 +151,7 @@ public class MainActivity extends Activity {
         // Android 2.3: the camera only draws live view on a surface marked as fed by the camera itself
         liveSurface.getHolder().setType(android.view.SurfaceHolder.SURFACE_TYPE_PUSH_BUFFERS);
         liveSurface.setVisibility(View.GONE);
-        android.widget.FrameLayout root = new android.widget.FrameLayout(this);
+        root = new android.widget.FrameLayout(this);
         root.addView(liveSurface);
         root.addView(screen);
         setContentView(root);
@@ -247,6 +247,7 @@ public class MainActivity extends Activity {
         ui.removeCallbacks(shootWhenSettled);   // left some other way: don't jump to shooting later
         shootPending = false;
         if (liveRun != null) liveRun.close();    // never keep the camera when Latent isn't on screen
+        if (screenRun != null) screenRun.stop();
         if (restartRun != null) restartRun.close(false);
         final Runnable keysLog = new Runnable() { public void run() { logKeys(); } };
         worker.execute(keysLog);
@@ -498,7 +499,7 @@ public class MainActivity extends Activity {
         rows.add(new String[] { "Settings check", "›", "settingsCheck" });
         rows.add(new String[] { "Speed test", "›", "speedTest" });
         rows.add(new String[] { "Develop test", "›", "devTest" });
-        rows.add(new String[] { "Live view test", "›", "liveTest" });
+        rows.add(new String[] { "Screen test", "›", "screenTest" });   // in place of the Live view test (v0.27: answered long ago)
         rows.add(new String[] { "Shooting test", "›", "shootTest" });
         rows.add(new String[] { "Restart test", "›", "restartTest" });
         rows.add(new String[] { "Live look test", "›", "lookTest" });
@@ -576,7 +577,7 @@ public class MainActivity extends Activity {
                 Roll r = firstRollWithFrames();
                 if (r == null) toast("No rolls yet");
                 else openSheet(r);
-            } else if (action.equals("settingsCheck") || action.equals("speedTest") || action.equals("devTest") || action.equals("liveTest") || action.equals("shootTest") || action.equals("restartTest") || action.equals("lookTest")) {
+            } else if (action.equals("settingsCheck") || action.equals("speedTest") || action.equals("devTest") || action.equals("liveTest") || action.equals("shootTest") || action.equals("restartTest") || action.equals("lookTest") || action.equals("screenTest")) {
                 mode = PROBE;
                 probeStage = 0;
                 hardwareTest = false;
@@ -587,6 +588,7 @@ public class MainActivity extends Activity {
                 shootTest = action.equals("shootTest");
                 restartTest = action.equals("restartTest");
                 lookTest = action.equals("lookTest");
+                screenTest = action.equals("screenTest");
                 fromSettings = true;
             }
         }
@@ -651,13 +653,17 @@ public class MainActivity extends Activity {
     private ShootingTest shootRun;     // while it runs (it holds the camera)
     private android.view.SurfaceView liveSurface;
     private LiveViewTest liveRun;      // while it runs (it holds the camera)
+    private android.widget.FrameLayout root;
+    private boolean screenTest;        // how fast the screen takes the viewfinder's picture, four ways (no camera)
+    private ScreenTest screenRun;      // while it runs
+    private volatile boolean screenHook;
     private boolean liveOn;
     private String liveNote = "";
     private int[] probeStatus = new int[0];
     private String[] probeDetail = new String[0];
 
     private void runProbe() {
-        final String[] steps = lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : devTest ? DevelopTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
+        final String[] steps = screenTest ? ScreenTest.STEPS : lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : devTest ? DevelopTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
         probeStage = 1;
         probeStatus = new int[steps.length];
         probeDetail = new String[steps.length];
@@ -690,6 +696,25 @@ public class MainActivity extends Activity {
         if ((shootTest || liveTest || restartTest || lookTest) && vf != null) {   // the viewfinder holds the camera until Latent is left
             toast("The camera is in use. Leave Latent and open it again to run this test");
             probeStage = 0;
+            return;
+        }
+        if (screenTest) {   // the screen only, on this thread, in its 16-bit mode as while shooting
+            if (vf == null) Display.fullColour(false);
+            screenRun = new ScreenTest(this, card, prefs, listener, new ScreenTest.Host() {
+                public android.widget.FrameLayout root() { return root; }
+                public View screen() { return screen; }
+                public void windowFormat(int format) { getWindow().setFormat(format); }
+                public void hook(boolean on) { screenHook = on; }
+                public void finished() {
+                    screenRun = null;
+                    screenHook = false;
+                    if (vf == null) Display.fullColour(true);
+                    probeStage = 2;
+                    screen.invalidate();
+                }
+            });
+            screenRun.start();
+            screen.invalidate();
             return;
         }
         if (shootTest) {   // like the live view test: on this thread, which opens the camera
@@ -2259,7 +2284,8 @@ public class MainActivity extends Activity {
             case VIEW: mode = SHEET; break;
             case LAB: if (!labBusy) { if (fromSettings) mode = SETTINGS; else goHome(); developWaiting(); } break;
             case PROBE:
-                if (liveRun != null) liveRun.close();   // MENU stops the live view test at once
+                if (screenRun != null) screenRun.stop();
+                else if (liveRun != null) liveRun.close();   // MENU stops the live view test at once
                 else if (shootRun != null) shootRun.close();
                 else if (restartRun != null) restartRun.close(false);
                 else if (lookRun != null) lookRun.close();   // never with a picture on its way (it waits)
@@ -2401,10 +2427,10 @@ public class MainActivity extends Activity {
             case PROBE:
                 s.live = liveOn;
                 s.liveNote = liveNote;
-                s.probeTitle = lookTest ? "Live look test" : restartTest ? "Restart test" : shootTest ? "Shooting test" : liveTest ? "Live view test" : devTest ? "Develop test" : speedTest ? "Speed test" : settingsCheck ? "Camera settings check" : hardwareTest ? "Hardware develop test" : "Camera roll test";
-                s.probeSteps = lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : devTest ? DevelopTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
-                s.probePlan = lookTest ? Ui.LOOK_PLAN : restartTest ? Ui.RESTART_PLAN : shootTest ? Ui.SHOOT_PLAN : liveTest ? Ui.LIVE_PLAN : devTest ? Ui.DEVTEST_PLAN : speedTest ? Ui.SPEED_PLAN : settingsCheck ? Ui.SETTINGS_PLAN : hardwareTest ? Ui.HARDWARE_PLAN : Ui.PROBE_PLAN;
-                s.probeFooter = lookTest ? Ui.LOOK_FOOTER : restartTest ? Ui.RESTART_FOOTER : shootTest ? Ui.SHOOT_FOOTER : liveTest ? Ui.LIVE_FOOTER : devTest ? Ui.DEVTEST_FOOTER : speedTest ? Ui.SPEED_FOOTER : settingsCheck ? Ui.SETTINGS_FOOTER : hardwareTest ? Ui.HARDWARE_FOOTER : Ui.PROBE_FOOTER;
+                s.probeTitle = screenTest ? "Screen test" : lookTest ? "Live look test" : restartTest ? "Restart test" : shootTest ? "Shooting test" : liveTest ? "Live view test" : devTest ? "Develop test" : speedTest ? "Speed test" : settingsCheck ? "Camera settings check" : hardwareTest ? "Hardware develop test" : "Camera roll test";
+                s.probeSteps = screenTest ? ScreenTest.STEPS : lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : devTest ? DevelopTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
+                s.probePlan = screenTest ? Ui.SCREEN_PLAN : lookTest ? Ui.LOOK_PLAN : restartTest ? Ui.RESTART_PLAN : shootTest ? Ui.SHOOT_PLAN : liveTest ? Ui.LIVE_PLAN : devTest ? Ui.DEVTEST_PLAN : speedTest ? Ui.SPEED_PLAN : settingsCheck ? Ui.SETTINGS_PLAN : hardwareTest ? Ui.HARDWARE_PLAN : Ui.PROBE_PLAN;
+                s.probeFooter = screenTest ? Ui.SCREEN_FOOTER : lookTest ? Ui.LOOK_FOOTER : restartTest ? Ui.RESTART_FOOTER : shootTest ? Ui.SHOOT_FOOTER : liveTest ? Ui.LIVE_FOOTER : devTest ? Ui.DEVTEST_FOOTER : speedTest ? Ui.SPEED_FOOTER : settingsCheck ? Ui.SETTINGS_FOOTER : hardwareTest ? Ui.HARDWARE_FOOTER : Ui.PROBE_FOOTER;
                 s.probeStage = probeStage;
                 s.probeStatus = probeStatus.clone();
                 s.probeDetail = probeDetail.clone();
@@ -2456,6 +2482,8 @@ public class MainActivity extends Activity {
 
         @Override
         protected void onDraw(Canvas c) {
+            ScreenTest st = screenRun;
+            if (screenHook && st != null) { st.draw(c); return; }   // the screen test draws its frames here
             long t = SystemClock.uptimeMillis();
             c.save();
             c.scale(getWidth() / logicalWidth, getHeight() / 480f);

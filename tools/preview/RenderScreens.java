@@ -210,6 +210,10 @@ public class RenderScreens {
         s.probePlan = Ui.HARDWARE_PLAN; s.probeFooter = Ui.HARDWARE_FOOTER;
         render(s, fonts, out, "13-probe-intro");
         s = state();
+        s.mode = UiState.PROBE; s.probeStage = 0; s.probeTitle = "Screen test"; s.probeSteps = ScreenTest.STEPS;
+        s.probePlan = Ui.SCREEN_PLAN; s.probeFooter = Ui.SCREEN_FOOTER;
+        render(s, fonts, out, "13s-screen-test-intro");
+        s = state();
         s.mode = UiState.PROBE; s.probeStage = 0; s.probeTitle = "Shooting test"; s.probeSteps = ShootingTest.STEPS;
         s.probePlan = Ui.SHOOT_PLAN; s.probeFooter = Ui.SHOOT_FOOTER;
         render(s, fonts, out, "13b-shooting-intro");
