@@ -590,7 +590,15 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     // ------------------------------------------------------------------------------ keys
 
+    private int keyNotes;
+
+    /** The shutter button's edges, in the log, while a picture is being saved (and the first few). */
+    private void keyNote(String what) {
+        if (keyNotes++ < 12 || stored < shots) note("button: " + what + (stored < shots ? " (a picture being saved)" : ""));
+    }
+
     void halfDown() {
+        keyNote("half-press");
         if (!ready()) return;
         closeEv();
         release.halfDown();
@@ -612,13 +620,14 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private long lastReportAt;
     private int storeReports, captureReports;
 
-    void halfUp() { if (ready()) { release.halfUp(); host.changed(); } }
+    void halfUp() { keyNote("let go"); if (ready()) { release.halfUp(); host.changed(); } }
 
     /**
      * A full press. While the camera has the button it has taken the picture itself: Latent keeps the
      * frame as the print and watches the catalogue for it. In app mode Latent takes it (Release).
      */
     void fullDown() {
+        keyNote("full press");
         if (!ready()) return;
         if (release.locked) { say("Roll finished"); return; }
         if (!release.app) {
@@ -917,6 +926,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (status == 0) {
             shots++;
             lastAnswerAt = now;
+            letGoFocus(0);
             shotFilms.add(filmId != null ? filmId : "");
             quietUntil = now + STORE_QUIET_MS;
             flashUntil = now + FLASH_MS;
@@ -952,6 +962,81 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         watchUntil = now + STORE_WAIT_MS;
         ui.removeCallbacks(findAgain);
         ui.postDelayed(findAgain, 300);
+    }
+
+    /**
+     * v0.35.4: a picture was stored 0.5 s after the shutter when the button was let go at once, and not
+     * until the viewfinder closed (or Latent was left) when it was kept half-pressed; both times what
+     * reached the camera next was cancelAutoFocus (letting go, and closing). The one sent with the
+     * shutter's answer (Release.shot) comes while the capture is still going. So focus is let go again,
+     * 0.3, 1, 2, 4 and 8 s after the answer, until the camera lists the picture.
+     */
+    static final long[] LET_GO_MS = { 300, 1000, 2000, 4000, 8000 };
+
+    private void letGoFocus(final int i) {
+        if (i >= LET_GO_MS.length) return;
+        final int forShot = shots;
+        long wait = LET_GO_MS[i] - (i > 0 ? LET_GO_MS[i - 1] : 0);
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                if (closed || stored >= forShot) return;   // listed: nothing to do
+                try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable e) { note("cancelAutoFocus: " + Probe.why(e)); }
+                if (letGoNotes++ < 20) note("focus let go again, " + LET_GO_MS[i] + " ms after the shutter (picture " + forShot + " not listed yet)");
+                if (LET_GO_MS[i] == 4000 && !systemLogSaved) saveSystemLog("VFLOG.TXT");
+                letGoFocus(i + 1);
+            }
+        }, wait);
+    }
+
+    private int letGoNotes;
+    private boolean systemLogSaved;
+
+    /** The camera's own log as it stands, to LATENT/name (threads of their own, 3 s; never touches the camera). */
+    private void saveSystemLog(final String name) {
+        systemLogSaved = true;
+        note("saving the camera's own log to LATENT/" + name);
+        final StringBuilder text = new StringBuilder();
+        final Thread reader = new Thread(new Runnable() {
+            public void run() {
+                java.io.FileInputStream in = null;
+                try {
+                    in = new java.io.FileInputStream("/dev/log/main");
+                    byte[] b = new byte[5 * 1024 + 20];
+                    for (int n; (n = in.read(b)) > 20; ) {   // blocks once it has given all it holds
+                        int len = (b[0] & 0xff) | (b[1] & 0xff) << 8;
+                        int pid = (b[4] & 0xff) | (b[5] & 0xff) << 8, sec = (b[12] & 0xff) | (b[13] & 0xff) << 8 | (b[14] & 0xff) << 16;
+                        int end = Math.min(n, 20 + len), p = 20;
+                        int prio = b[p++];
+                        int tagEnd = p;
+                        while (tagEnd < end && b[tagEnd] != 0) tagEnd++;
+                        int msgEnd = tagEnd + 1;
+                        while (msgEnd < end && b[msgEnd] != 0) msgEnd++;
+                        synchronized (text) {
+                            text.append(sec).append(' ').append(pid).append(' ').append("VDIWEF".charAt(Math.max(0, Math.min(5, prio - 2)))).append('/')
+                                    .append(new String(b, p, tagEnd - p, "UTF-8")).append(": ")
+                                    .append(msgEnd > tagEnd + 1 ? new String(b, tagEnd + 1, msgEnd - tagEnd - 1, "UTF-8").trim() : "").append("\r\n");
+                        }
+                    }
+                } catch (Throwable e) {
+                    synchronized (text) { text.append("stopped: ").append(Probe.why(e)).append("\r\n"); }
+                } finally {
+                    try { if (in != null) in.close(); } catch (Throwable ignored) { }
+                }
+            }
+        }, "system-log");
+        reader.setDaemon(true);
+        reader.start();
+        new Thread(new Runnable() {
+            public void run() {
+                try { reader.join(3000); } catch (InterruptedException ignored) { }
+                String t;
+                synchronized (text) { t = text.toString(); }
+                try {
+                    FileOutputStream o = new FileOutputStream(new File(Library.home(card), name));
+                    try { o.write(t.getBytes("UTF-8")); } finally { o.close(); }
+                } catch (Throwable ignored) { }
+            }
+        }, "system-log-write").start();
     }
 
     /** A picture is being taken or stored (or may be): the camera mustn't be given back yet. */
