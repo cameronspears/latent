@@ -1,7 +1,7 @@
 # Latent: notes for the next session
 
-Written 2026-10-16 at **v0.30.1**, the version installed on the camera (its Shooting test checked
-out: open, live view, focus and one shot, all normal).
+Written 2026-10-16 at **v0.32.1**, the version installed on the camera (the viewfinder shoots and
+the next open develops; see "The viewfinder" below).
 `README.md` is the user guide and explains the develop pipeline. This file is the working context.
 
 ## The project in one paragraph
@@ -91,24 +91,50 @@ per screen. They like the current designs.
   Lighting's) stops the camera hardware from opening. The experiment is still in `ShootingTest`
   behind `CAPTURE_HOOK = false`. It's a closed topic; don't revisit it.
 
-## Next: the Latent viewfinder (the user's choice)
+## The viewfinder (v0.31.0-v0.32.1, on the camera)
 
-The design is already drawn in `Ui.photo` (preview scenes `8-*`).
+`Viewfinder.java` (camera, keys, catalogue), `Release.java` (the shutter button's logic),
+`Level.java` (steadying the level), `FilmCore.live` / `fl_level` in `jni/filmcore.c` (a live frame
+from memory with the look, histogram, horizon). Tests: `tools/viewfinder-test.sh` (host logic and the
+level on turned photos), `tools/test-jni.sh`, `tools/sanitize-test.sh`. Log: `LATENT/VIEWFIND.TXT`,
+written as it goes. Preview scenes `4c`, `5b`, `6c`, `8h`-`8p`.
 
-Remaining work:
-1. Wire the viewfinder:
-   - live view with the chosen look on the live frames;
-   - shutter, focus and the HUD states.
-2. Add the horizon level from the live frames.
-3. Smarter focus:
-   - retry while the shutter is half-pressed;
-   - a "focus first" option;
-   - the focus areas drawn on screen.
-4. Develop viewfinder shots the next time Latent opens, reusing the ∞-roll path.
-5. Tidy `ShootingTest`: keep only the focus, shot and live-frame checks. The capture-hook code
-   (`CAPTURE_HOOK`, the memory map, `SEQUENCE_LIVE`) can go then.
+**Works today (v0.32.1, confirmed by the user):** Shoot or a half-press opens Latent's viewfinder:
+the camera's own live view with Latent's HUD over it. Latent focuses (retries while held, Focus
+first in MENU > Shooting) and takes the picture (`burstableTakePicture`, `cancelTakePicture` in the
+shutter's answer); the camera stores it at the shutter. MENU hides the viewfinder and keeps the
+camera open (never reopened in one visit). Leaving Latent (onPause) closes it for good: camera
+released, process killed. The next open sees the new photos in the listing and develops them
+(the ∞-roll background develop, or a finished roll's darkroom).
+
+**What the camera showed (read before changing any of this):**
+- **No picture is stored once the preview sequence (live JPEG frames) has been started in that
+  camera session.** v0.31.0 (frames running, app shutter), v0.31.1 (frames stopped and released
+  before the shutter), v0.31.2 (direct shutter, the camera's own button, before the first frame had
+  even arrived): every picture lost; releasing or reopening the camera with them pending froze the
+  body (it wouldn't switch off; battery pull). Hence `Viewfinder.LIVE_LOOK = false`: no film look and
+  no level on live view. The frames themselves work: 320 px, look ~140-190 ms, level reads fine.
+- **Reopening the camera within one process froze it twice** (7-10 s after a release, with a
+  picture possibly still pending). Hence MENU only hides the viewfinder.
+- **Leaving a camera app only pauses it**: no onStop / onDestroy came. Latent kills its own process
+  in onPause once the camera has been opened, so the next open is fresh (the image memory comes back
+  only when the process ends).
+- **The catalogue doesn't show the viewfinder's pictures while the camera is open** (8 s polls, every
+  300 ms, with or without the `exist_jpeg` filter), yet the Shooting test saw its picture 0.2 s after
+  the shutter. Not understood yet; pictures still count on the next open (by photo number).
+- **Direct shutter** starts and stops fine (27 ms); with it, the camera's AF reports arrive
+  (AutoFocusDoneListener: 1 lock, 0 clear, 2 can't, areas[] indices). `DIRECT_SHUTTER = false` now.
+- Exposure listeners work: `currentShutterSpeed_n/_d`, `currentAperture` (f x 100).
+- The load average on this body is 57-78 before Latent does anything.
+
+**Open (the user wants all of these):** the film look and the level on live view again (find a way
+the preview frames and storing coexist, or another frame source); prints in the corner that
+develop instead of staying latent; the camera back saying "develops the next time you open Latent"
+while Latent is open (develop without making the user leave, e.g. Latent restarting itself once the
+camera is given back); the wheel changing the look on a roll already started (now only on a fresh
+roll); exposure compensation in the viewfinder.
 
 ## Card housekeeping
 
 `LATENT/FW` (with `FW/M0001.BIN` and `FW/MEMMAP.TXT`, the copied memory map), `LOGCAT.TXT`,
-`DARKPROC.TXT` and `LIVEFRM.JPG` are diagnostic leftovers, and the user can delete them. Roll 13 (Tri-X, 12 exposures) is loaded.
+`DARKPROC.TXT` and `LIVEFRM.JPG` are diagnostic leftovers, and the user can delete them. Roll 13 (Natural, ∞) is loaded; `LATENT/VIEWFIND.TXT` is the viewfinder's log.
