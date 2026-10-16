@@ -1,6 +1,8 @@
 /* JNI glue between com.latent.camera.FilmCore and filmcore.c. Calls are serialised by the Java
  * side (one worker thread), so the shared error buffer is safe. */
+#include <dlfcn.h>
 #include <jni.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -115,6 +117,105 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_live(JNIEnv *env, jclass 
     if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
     if (rc == 0) (*env)->SetIntArrayRegion(env, jinfo, 0, FL_LIVE_INFO, (const jint *)info);
     return rc;
+}
+
+/* ---- the viewfinder's frame composer: each look thread has its own context (frame calls run on two
+ * threads at once, so errors go through a local buffer) */
+
+/* Android's bitmap pixels, written in place: libjnigraphics, opened when first asked for (not linked, so a
+ * body without it still loads Latent; the frame then goes through a short[] and a copy). */
+typedef struct { uint32_t width, height, stride; int32_t format; uint32_t flags; } fl_bitmap_info;
+static int (*bm_info)(JNIEnv *, jobject, fl_bitmap_info *);
+static int (*bm_lock)(JNIEnv *, jobject, void **);
+static int (*bm_unlock)(JNIEnv *, jobject);
+static int bm_state;   /* 0 not tried, 1 ready, -1 unavailable */
+
+static int bitmaps(void) {
+    if (bm_state == 0) {
+        void *h = dlopen("libjnigraphics.so", RTLD_NOW);
+        if (h) {
+            bm_info = (int (*)(JNIEnv *, jobject, fl_bitmap_info *))dlsym(h, "AndroidBitmap_getInfo");
+            bm_lock = (int (*)(JNIEnv *, jobject, void **))dlsym(h, "AndroidBitmap_lockPixels");
+            bm_unlock = (int (*)(JNIEnv *, jobject))dlsym(h, "AndroidBitmap_unlockPixels");
+        }
+        bm_state = bm_info && bm_lock && bm_unlock ? 1 : -1;
+    }
+    return bm_state == 1;
+}
+
+JNIEXPORT jlong JNICALL Java_com_latent_camera_FilmCore_frameNew(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    return (jlong)(intptr_t)fl_frame_new();
+}
+
+JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_frameFree(JNIEnv *env, jclass cls, jlong ctx) {
+    (void)env; (void)cls;
+    fl_frame_free((fl_frame_ctx *)(intptr_t)ctx);
+}
+
+/* Returns 0, -1 (lastError), or -2: no Bitmap access here (pass a short[] instead). */
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_frame(JNIEnv *env, jclass cls, jlong jctx, jbyteArray jjpeg, jint len,
+        jstring jlut, jintArray jparams, jint flags, jint seq, jshortArray jout, jobject jbitmap, jint ow, jint oh,
+        jint aspect1000, jint format, jintArray jshifts, jint max_w, jint max_h, jintArray jinfo, jintArray jtm) {
+    int params[FL_PARAM_COUNT], info[FL_FRAME_INFO], tm[FL_FRAME_TIMES], shifts[4], rc, stride = ow;
+    char err[256];
+    const char *lut = NULL;
+    jbyte *jpeg = NULL;
+    jshort *out = NULL;
+    void *pixels = NULL;
+    fl_frame_ctx *ctx = (fl_frame_ctx *)(intptr_t)jctx;
+    (void)cls;
+    err[0] = 0;
+    if (!ctx || read_params(env, jparams, params) != 0 || ow <= 0 || oh <= 0
+            || !jinfo || (*env)->GetArrayLength(env, jinfo) < FL_FRAME_INFO
+            || (jtm && (*env)->GetArrayLength(env, jtm) < FL_FRAME_TIMES)
+            || (jjpeg && (len <= 0 || (*env)->GetArrayLength(env, jjpeg) < len))
+            || (format == FL_FMT_4444 && (!jshifts || (*env)->GetArrayLength(env, jshifts) < 4))
+            || (!jbitmap && (!jout || (*env)->GetArrayLength(env, jout) < ow * oh))) {
+        strcpy(g_err, "bad frame buffers");
+        return -1;
+    }
+    if (format == FL_FMT_4444) (*env)->GetIntArrayRegion(env, jshifts, 0, 4, (jint *)shifts);
+    if (jbitmap) {
+        fl_bitmap_info bi;
+        int want = format == FL_FMT_565 ? 4 : 7;   /* ANDROID_BITMAP_FORMAT_RGB_565, _RGBA_4444 */
+        if (!bitmaps()) return -2;
+        if (bm_info(env, jbitmap, &bi) != 0 || (int)bi.width != ow || (int)bi.height != oh || bi.format != want || (bi.stride & 1)) {
+            strcpy(g_err, "the screen bitmap doesn't match");
+            return -1;
+        }
+        stride = (int)bi.stride / 2;
+    }
+    if (jlut) lut = (*env)->GetStringUTFChars(env, jlut, NULL);
+    if (jjpeg) jpeg = (*env)->GetByteArrayElements(env, jjpeg, NULL);
+    if (jbitmap) {
+        if (bm_lock(env, jbitmap, &pixels) != 0 || !pixels) { pixels = NULL; }
+    } else out = (*env)->GetShortArrayElements(env, jout, NULL);
+    if (jbitmap && !pixels) { strcpy(err, "the screen bitmap couldn't be locked"); rc = -1; }
+    else rc = fl_frame(ctx, (const unsigned char *)jpeg, (unsigned long)len, lut, params, flags, seq,
+                       jbitmap ? (unsigned short *)pixels : (unsigned short *)out, ow, oh, stride, aspect1000, format,
+                       shifts, max_w, max_h, info, tm, err, sizeof err);
+    if (pixels) bm_unlock(env, jbitmap);
+    if (out) (*env)->ReleaseShortArrayElements(env, jout, out, 0);
+    if (jpeg) (*env)->ReleaseByteArrayElements(env, jjpeg, jpeg, JNI_ABORT);
+    if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
+    if (rc == 0) {
+        (*env)->SetIntArrayRegion(env, jinfo, 0, FL_FRAME_INFO, (const jint *)info);
+        if (jtm) (*env)->SetIntArrayRegion(env, jtm, 0, FL_FRAME_TIMES, (const jint *)tm);
+    } else snprintf(g_err, sizeof g_err, "%s", err);
+    return rc;
+}
+
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_setOverlay(JNIEnv *env, jclass cls, jintArray jargb, jint w, jint h) {
+    jint *px;
+    int gen;
+    (void)cls;
+    if (!jargb) return fl_set_overlay(NULL, 0, 0);
+    if (w <= 0 || h <= 0 || (*env)->GetArrayLength(env, jargb) < w * h) return -1;
+    px = (*env)->GetIntArrayElements(env, jargb, NULL);
+    gen = fl_set_overlay((const unsigned int *)px, w, h);
+    (*env)->ReleaseIntArrayElements(env, jargb, px, JNI_ABORT);
+    return gen;
 }
 
 JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_pinCore(JNIEnv *env, jclass cls, jint core) {

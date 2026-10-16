@@ -119,11 +119,32 @@ final class AndroidGfx implements Gfx {
 
     private final Paint exact = new Paint();
 
+    private final android.graphics.Matrix m = new android.graphics.Matrix(), at = new android.graphics.Matrix();
+    private final float[] pt = new float[2], v = new float[9];
+
+    /**
+     * A picture made at the screen's own pixels, drawn 1:1. Placed by an exact device-pixel translation, not
+     * through the layout's scale (which happens to come to 1:1 but isn't exactly 1.0 in floats): Skia then
+     * copies it row by row instead of sampling it (the viewfinder does this every frame).
+     */
     public void imageExact(Object img, float x, float y, float w, float h) {
         Bitmap b = (Bitmap) img;
         if (b == null || b.isRecycled()) return;
-        rf.set(x, y, x + w, y + h);
-        c.drawBitmap(b, null, rf, exact);
+        c.getMatrix(m);
+        pt[0] = x; pt[1] = y;
+        m.mapPoints(pt);
+        m.getValues(v);
+        if (v[android.graphics.Matrix.MSKEW_X] != 0 || v[android.graphics.Matrix.MSKEW_Y] != 0
+                || Math.abs(w * v[android.graphics.Matrix.MSCALE_X] - b.getWidth()) > 0.5f || Math.abs(h * v[android.graphics.Matrix.MSCALE_Y] - b.getHeight()) > 0.5f) {
+            rf.set(x, y, x + w, y + h);   // not 1:1 after all: as asked
+            c.drawBitmap(b, null, rf, exact);
+            return;
+        }
+        c.save();
+        at.setTranslate(Math.round(pt[0]), Math.round(pt[1]));
+        c.setMatrix(at);
+        c.drawBitmap(b, 0, 0, exact);
+        c.restore();
     }
 
     public int imageWidth(Object img) { return ((Bitmap) img).getWidth(); }

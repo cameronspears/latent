@@ -51,6 +51,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         void showLive(boolean on);
         /** Something on screen changed. */
         void changed();
+        /** Only the picture changed (a new live frame): redraw just its area. */
+        void frame();
         /** Live view is on: the shutter button works from now. */
         void live();
         /**
@@ -90,7 +92,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     static final boolean DIRECT_SHUTTER = false;
 
     static final int FRAME_W = 320, FRAME_H = 240;
-    static final long MIN_FRAME_MS = 90;   // at most ~11 a second (v0.37.0: the look on its own core, frames back to back)
+    static final long MIN_FRAME_MS = 45;   // at most ~22 a second (v0.38.0: two look threads, the screen copying one picture)
     /** Frame widths to ask the camera for, in turn, if frames don't come. */
     static final int[] WIDTHS = { 320, 640 };
     static final long FRAMES_WAIT_MS = 2500, FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, STORE_WAIT_MS = 8000;
@@ -106,15 +108,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private final Host host;
     private final Handler ui = new Handler();
     private final ExecutorService catalogue = Executors.newSingleThreadExecutor();
-    /**
-     * The look's own thread, on core 2. The camera starts Latent on core 3 only, so the look and the screen
-     * took turns there (v0.36.1: 230-300 ms a frame in the viewfinder, 126 ms in the Live look test with
-     * nothing drawn). Cores 1 and 2 sit almost idle (the Speed test: 10% and 1%); the darkroom's helpers
-     * already widen onto them. One thread only: FilmCore's film cache isn't shared safely between two.
-     */
-    static final int LOOK_CORE = 2;
-    private final ExecutorService looker = Executors.newSingleThreadExecutor();
-    private volatile String pinned;
     private final StringBuilder log = new StringBuilder();
     private final long t0 = SystemClock.uptimeMillis();
     final Release release;
@@ -138,23 +131,29 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private int grabs, grabMsSum, statFrames, statLookMs;
     private long lastLookMs, statCpu;
     private int slowSpells;
-    private int frames, lookMsSum, grabFails;
-    // the look thread's own: the frame being made and what the look read from it
-    private final int[] px = new int[FRAME_W * FRAME_H], info = new int[FilmCore.L_COUNT];
-    private Bitmap frame;      // the 32-bit look, only when the 16-bit one can't be made
+    private int frames, lookMsSum, grabFails, lookErrors;
+    private final long[] stageMs = new long[FilmCore.TM_COUNT];
+    private final long[] statStage = new long[FilmCore.TM_COUNT];
     /**
-     * Frames on their way: the one being looked, and the next, grabbed meanwhile, so the look thread goes
-     * from one straight to the next (v0.36.1 waited for the screen and a 40 ms poll between frames).
+     * Two look threads, on cores 2 and 1 (the camera starts Latent on core 3 only, which the screen keeps;
+     * cores 1 and 2 sit almost idle), each with its own composer (FilmCore.frame): frames go to whichever is
+     * free, so two are made at once. v0.37.0 had one, on core 2: 2.7 frames a second.
      */
-    static final int IN_FLIGHT = 2;
-    private int looking;
-    // the look as shown on the 16-bit plane: made on the worker at the screen's own pixels and ordered-dithered
-    // in native code (FilmCore.to4444: Android 2.3's own drawing didn't dither into 4444, and its scaling cost
-    // ~100 ms a frame), so it reads as fine grain rather than bands; two, swapped on the UI thread
-    private final Bitmap[] shown16 = new Bitmap[3];   // one on the screen, one on its way to it, one being made
+    static final int[] LOOK_CORES = { 2, 1 };
+    private final Looker[] lookers = new Looker[LOOK_CORES.length];
+    private int seq, shownSeq;
+    /** The look's grain moves every frame, as film's does (blue noise: it reads as grain, never a pattern). */
+    static final boolean MOVING_GRAIN = true;
+    /**
+     * The screen's pictures, made whole by the composer (the look, Latent's type and fades over it, dithered):
+     * RGB565, opaque, so the screen copies rather than blends, holding the 4-bit values the 16-bit plane
+     * shows exactly. One shown, the rest on their way or being made.
+     */
+    private final Bitmap[] shown16 = new Bitmap[4];
     private volatile int front16 = -1, posted16;   // posted16: a bit for each made and not yet shown
+    private int frontOverlay;                        // the overlay generation in the shown picture (0: none)
+    private volatile boolean bitmapsDirect = true;   // written in place (libjnigraphics), else through a short[]
     private int liveW, liveH;
-    private short[] out16;
     private static int[] shifts;
 
     /** Where ARGB_4444 keeps each channel on this Android (red, green, blue, alpha), asked once of a 1 px bitmap. */
@@ -185,28 +184,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     /** The picture's size on the screen in real pixels (the 3:2 area), so the 16-bit look is made 1:1. */
     void setLiveSize(int w, int h) { liveW = w; liveH = h; }
 
-    /** Look thread: px (w x h) into a free 16-bit picture, cropped to 3:2 as the screen shows it, dithered. Returns its index, or -1. */
-    static final int DROPPED = -2;
-
-    private int render16(int w, int h) {
-        if (!SHOOT_16BIT || liveW <= 0 || liveH <= 0 || w <= 1 || h <= 1) return -1;
-        int back = 0;
-        synchronized (shown16) {   // neither the one shown nor one made and not yet shown
-            while (back < shown16.length && (back == front16 || (posted16 & 1 << back) != 0)) back++;
-            if (back == shown16.length) return DROPPED;
-            posted16 |= 1 << back;
-        }
-        try {
-            if (shown16[back] == null) shown16[back] = Bitmap.createBitmap(liveW, liveH, Bitmap.Config.ARGB_4444);
-            if (out16 == null || out16.length != liveW * liveH) out16 = new short[liveW * liveH];
-            if (FilmCore.to4444(px, w, h, out16, liveW, liveH, 1500, shifts4444()) == 0) {   // 3:2, the panel's pixels aren't square
-                shown16[back].copyPixelsFromBuffer(java.nio.ShortBuffer.wrap(out16));
-                return back;
-            }
-        } catch (Throwable ignored) { }
-        synchronized (shown16) { posted16 &= ~(1 << back); }
-        return -1;
-    }
     private Method mFrames, mSize, mRead, mFrameRelease;
     boolean lookOn = true;     // the film look on live view; off: the camera's own picture
     private boolean lookFailed;
@@ -250,6 +227,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         this.release = new Release(this, focusFirst, !DIRECT_SHUTTER);
         this.highestKnown = highestPhoto;
         setFilm(stock);
+        overlayer.execute(new Runnable() { public void run() { FilmCore.setOverlay(null, 0, 0); } });   // none from a last visit
     }
 
     private String filmId;                                                   // the film on live view now
@@ -587,7 +565,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         public void run() {
             if (closed || sequence == null || sequenceStopped) return;
             long now = SystemClock.uptimeMillis();
-            if (now < quietUntil) { ui.postDelayed(this, 100); return; }
+            // quiet while a picture is written: 1.5 s, and on until it's in the catalogue (at most 1.5 s more), so
+            // the look threads (cores 1 and 2 since v0.38.0) never compete with the camera storing it
+            if (now < quietUntil || (stored < shots && now < quietUntil + STORE_QUIET_MS)) { ui.postDelayed(this, 50); return; }
             // with the look off the camera's own picture shows, and frames still come now and then, for the level
             // at most about 8 frames a second (each ask is a call to the camera's own processor); with the
             // look off the camera's own picture shows, and frames still come now and then, for the level
@@ -595,10 +575,17 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             // camera slowed down while just looking, with the frames going flat out)
             // the next frame as soon as the last look is drawn, at most about 8 a second (the camera's own
             // processes keep the load at 57-78; v0.31 waited twice the look's time and got ~3 a second)
-            if (lookOn ? looking < IN_FLIGHT && now - lastLookAt >= MIN_FRAME_MS : looking == 0 && now - lastLookAt >= 300) {
+            Looker free = freeLooker();
+            if (lookOn ? free != null && now - lastLookAt >= MIN_FRAME_MS : !anyLooking() && now - lastLookAt >= 300) {
                 long g = SystemClock.uptimeMillis();
                 byte[] f = grab();
-                if (f != null) { lastLookAt = now; grabMsSum += SystemClock.uptimeMillis() - g; grabs++; look(f); }
+                if (f != null) {
+                    lastLookAt = now;
+                    grabMsSum += SystemClock.uptimeMillis() - g;
+                    grabs++;
+                    if (frames == 60 && !frameSaved && !storing()) saveFrame(f);
+                    look(free, f);
+                }
             }
             if (now - statsAt >= 10000) stats(now);
             if (frames == 0 && lastFrameAt == 0 && now - framesAskedAt > FRAMES_WAIT_MS) {   // none yet: another size, or none at all
@@ -607,7 +594,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 else noLook("no frames at any size");
                 return;
             }
-            ui.postDelayed(this, looking < IN_FLIGHT ? 15 : 40);
+            ui.postDelayed(this, freeLooker() != null ? 10 : 20);
         }
     };
 
@@ -641,47 +628,128 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         }
     }
 
-    /** What the look made of one frame, for the UI thread. */
-    private static final class Looked {
-        int w, h, angle, confidence, support, made = -1;
-        long ms;
-        String err;
-        int[] hist, argb;   // argb: only when there's no 16-bit picture
+    /** One look thread: its core, its composer, what it read. */
+    private static final class Looker {
+        final int core;
+        final ExecutorService exec = Executors.newSingleThreadExecutor();
+        long ctx;
+        boolean busy;          // as the UI thread sees it
+        String pinned;
+        short[] out;           // only when bitmaps can't be written in place
+        final int[] info = new int[FilmCore.FI_COUNT], tm = new int[FilmCore.TM_COUNT];
+        Looker(int core) { this.core = core; }
     }
 
-    /** The look on one frame, on its own thread (core 2), drawn on the UI thread; the next frame waits its turn. */
-    private void look(final byte[] jpeg) {
-        looking++;
+    /** What a look thread made of one frame, for the UI thread. */
+    private static final class Looked {
+        Looker by;
+        int seq, w, h, angle = FilmCore.NO_READING, confidence, support, made = -1, overlay;
+        long ms;
+        int[] tm, hist;
+        String err;
+    }
+
+    private Looker freeLooker() {
+        for (int i = 0; i < lookers.length; i++) {
+            if (lookers[i] == null) lookers[i] = new Looker(LOOK_CORES[i]);
+            if (!lookers[i].busy) return lookers[i];
+        }
+        return null;
+    }
+
+    private boolean anyLooking() {
+        for (Looker k : lookers) if (k != null && k.busy) return true;
+        return false;
+    }
+
+    /** Look thread: a bitmap for the next picture, neither shown nor made and not yet shown; -1 if all are busy. */
+    private int takeBitmap() {
+        synchronized (shown16) {
+            for (int i = 0; i < shown16.length; i++) {
+                if (i == front16 || (posted16 & 1 << i) != 0) continue;
+                posted16 |= 1 << i;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void giveBack(int i) {
+        if (i >= 0) synchronized (shown16) { posted16 &= ~(1 << i); }
+    }
+
+    /**
+     * The look on one frame (jpeg null: that thread's last frame again, under a new overlay), made whole on a
+     * look thread straight into a screen bitmap; shown on the UI thread.
+     */
+    private void look(final Looker k, final byte[] jpeg) {
+        k.busy = true;
         final String l = lut;
         final int[] p = params.clone();
-        looker.execute(new Runnable() {
+        final int n = ++seq;
+        // the level from every other frame (about ten readings a second), the histogram only when it shows
+        final int flags = (jpeg != null && (n & 1) == 0 ? FilmCore.F_LEVEL : 0) | (jpeg != null && display == D_GRID ? FilmCore.F_HIST : 0)
+                | (MOVING_GRAIN ? FilmCore.F_TEMPORAL : 0);
+        final int w = liveW, h = liveH;
+        k.exec.execute(new Runnable() {
             public void run() {
-                if (pinned == null) pinned = FilmCore.pinCore(LOOK_CORE) == 0 ? "on core " + LOOK_CORE : "on Latent's core (" + FilmCore.lastError() + ")";
+                if (k.pinned == null) {
+                    k.pinned = FilmCore.pinCore(k.core) == 0 ? "core " + k.core : "Latent's core (" + FilmCore.lastError() + ")";
+                    k.ctx = FilmCore.frameNew();
+                }
                 // a little behind the screen and the camera's callbacks, ahead of the darkroom (v0.31's background
                 // priority starved it under the camera's own load)
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
                 final Looked r = new Looked();
+                r.by = k;
+                r.seq = n;
                 long t = SystemClock.uptimeMillis();
                 try {
                     if (closed) return;
-                    int rc = FilmCore.live(jpeg, jpeg.length, l, p, px, FRAME_W, FRAME_H, info);
-                    if (rc != 0) r.err = FilmCore.lastError();
-                    else {
-                        r.w = info[FilmCore.L_W]; r.h = info[FilmCore.L_H];
-                        r.angle = info[FilmCore.L_ANGLE]; r.confidence = info[FilmCore.L_CONFIDENCE]; r.support = info[FilmCore.L_SUPPORT];
-                        r.hist = new int[FilmCore.L_HIST_BINS];
-                        System.arraycopy(info, FilmCore.L_HIST, r.hist, 0, FilmCore.L_HIST_BINS);
-                        r.made = render16(r.w, r.h);
-                        if (r.made == -1 && r.w > 0 && r.h > 0) { r.argb = new int[r.w * r.h]; System.arraycopy(px, 0, r.argb, 0, r.argb.length); }
+                    if (k.ctx == 0) { r.err = "no memory for the look"; return; }
+                    if (w <= 0 || h <= 0) { r.err = "no screen size"; return; }
+                    r.made = takeBitmap();
+                    if (r.made < 0) return;   // every picture busy: this frame goes
+                    Bitmap b = shown16[r.made];
+                    if (b == null || b.isRecycled()) b = shown16[r.made] = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565);
+                    int len = jpeg == null ? 0 : jpeg.length, rc = -2;
+                    if (bitmapsDirect) {
+                        rc = FilmCore.frame(k.ctx, jpeg, len, l, p, flags, n, null, b, w, h, 1500, FilmCore.FMT_565, null, FRAME_W, FRAME_H, k.info, k.tm);
+                        if (rc == -2) bitmapsDirect = false;
                     }
+                    if (rc == -2) {   // no bitmap access: through a short[] and a copy
+                        if (k.out == null || k.out.length != w * h) k.out = new short[w * h];
+                        rc = FilmCore.frame(k.ctx, jpeg, len, l, p, flags, n, k.out, null, w, h, 1500, FilmCore.FMT_565, null, FRAME_W, FRAME_H, k.info, k.tm);
+                        if (rc == 0) b.copyPixelsFromBuffer(java.nio.ShortBuffer.wrap(k.out));
+                    }
+                    if (rc != 0) { r.err = FilmCore.lastError(); giveBack(r.made); r.made = -1; return; }
+                    r.w = k.info[0];
+                    r.h = k.info[1];
+                    r.angle = k.info[FilmCore.L_ANGLE];
+                    r.confidence = k.info[FilmCore.L_CONFIDENCE];
+                    r.support = k.info[FilmCore.L_SUPPORT];
+                    r.overlay = k.info[FilmCore.FI_OVERLAY];
+                    r.tm = k.tm.clone();
+                    if ((flags & FilmCore.F_HIST) != 0) {
+                        r.hist = new int[FilmCore.L_HIST_BINS];
+                        System.arraycopy(k.info, FilmCore.L_HIST, r.hist, 0, FilmCore.L_HIST_BINS);
+                    }
+                } catch (Throwable e) {
+                    r.err = Probe.why(e);
+                    giveBack(r.made);
+                    r.made = -1;
                 } finally {
                     android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
                     r.ms = SystemClock.uptimeMillis() - t;
                     ui.post(new Runnable() {
                         public void run() {
-                            looking--;
-                            if (closed) return;
-                            if (r.err != null) { if (frames == 0) noLook(r.err); return; }
+                            k.busy = false;
+                            if (closed) { giveBack(r.made); return; }
+                            if (r.err != null) {
+                                if (frames == 0) noLook(r.err);
+                                else if (lookErrors++ < 3) note("look: " + r.err);
+                                return;
+                            }
                             show(r);
                         }
                     });
@@ -691,63 +759,121 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     }
 
     private void show(Looked r) {
-        if (r.w <= 0 || r.h <= 0) return;
-        if (r.made >= 0) {
-            synchronized (shown16) { front16 = r.made; posted16 &= ~(1 << r.made); }
-        } else if (r.made == DROPPED) {
-            return;   // every picture busy: this frame goes
-        } else if (r.argb != null) {
-            if (frame == null || frame.getWidth() != r.w || frame.getHeight() != r.h) frame = Bitmap.createBitmap(r.w, r.h, Bitmap.Config.ARGB_8888);
-            frame.setPixels(r.argb, 0, r.w, 0, 0, r.w, r.h);
+        if (r.made < 0) return;
+        if (r.seq < shownSeq) { giveBack(r.made); return; }   // a later frame is already up
+        shownSeq = r.seq;
+        synchronized (shown16) { front16 = r.made; posted16 &= ~(1 << r.made); }
+        frontOverlay = r.overlay;
+        long now = SystemClock.uptimeMillis();
+        if (r.tm == null) return;
+        if (frames++ == 0) {
+            note("first frame " + r.w + "x" + r.h + " after " + (now - framesAskedAt) + " ms; " + r.ms + " ms on " + r.by.pinned
+                    + (bitmapsDirect ? "" : ", through a copy"));
+            flushLog();
         }
-        if (frames == 40 && !snapped && !storing() && r.made >= 0) snapScreen();
-        if (frames++ == 0) { note("first frame " + r.w + "x" + r.h + " after " + (SystemClock.uptimeMillis() - framesAskedAt) + " ms; look " + r.ms + " ms, " + pinned); flushLog(); }
         lookMsSum += r.ms;
         lastLookMs = r.ms;
-        level.frame(r.angle, r.confidence, r.support, SystemClock.uptimeMillis());
-        hist = r.hist;
-        host.changed();
+        for (int i = 0; i < stageMs.length; i++) stageMs[i] += r.tm[i];
+        if (r.angle != FilmCore.NO_READING) level.frame(r.angle, r.confidence, r.support, now); else level.tick(now);
+        if (r.hist != null) hist = r.hist;
+        host.frame();
     }
 
-    private boolean snapped;
+    /** A frame of the look is ready to show. */
+    private boolean hasLook() {
+        int f = front16;
+        return f >= 0 && shown16[f] != null && !shown16[f].isRecycled();
+    }
+
+    // ---- Latent's type over the picture: drawn once when it changes (not every frame), laid into each frame natively
+
+    private final ExecutorService overlayer = Executors.newSingleThreadExecutor();
+    private final Object overlayLock = new Object();
+    private String overlayKey = "";
+    private UiState overlayWanted;   // the latest asked for: the overlay thread takes it
+    private int overlaysMade, statOverlays;
+    private long overlayMsSum;
+    private AndroidGfx overlayGfx;
+    private Bitmap overlayBitmap;
+    private int[] overlayPx;
 
     /**
-     * Once a visit, a copy of the screen as the camera shows it (the framebuffer, Latent's own plane over
-     * live view) to LATENT/SCREEN.RAW, so the look's grain, banding and shape can be judged off the camera.
+     * The screen, about to draw (UI thread): which layer to draw, and a new overlay when Latent's type over
+     * the picture changed. With the overlay in the frames, the screen draws only what moves (the level, focus,
+     * the print) over one opaque picture.
      */
-    private void snapScreen() {
-        snapped = true;
-        final File to = new File(Library.home(card), "SCREEN.RAW");
-        new Thread(new Runnable() {
+    void layer(UiState s) {
+        if (!s.liveExact) { s.vfLayer = UiState.LAYER_ALL; return; }
+        String key = Ui.overlayKey(s) + liveW + "x" + liveH;
+        if (!key.equals(overlayKey)) {
+            overlayKey = key;
+            UiState o = s.copy();
+            o.vfLayer = UiState.LAYER_OVERLAY;
+            synchronized (overlayLock) { overlayWanted = o; }
+            overlayer.execute(renderOverlay);
+        }
+        s.vfLayer = frontOverlay > 0 ? UiState.LAYER_SCREEN : UiState.LAYER_ALL;
+    }
+
+    private final Runnable renderOverlay = new Runnable() {
+        public void run() {
+            UiState s;
+            synchronized (overlayLock) { s = overlayWanted; overlayWanted = null; }
+            final int w = liveW, h = liveH;
+            if (s == null || closed || w <= 0 || h <= 0) return;   // a later one was already made
+            long t = SystemClock.uptimeMillis();
+            try {
+                if (overlayGfx == null) overlayGfx = new AndroidGfx(activity.getAssets());
+                if (overlayBitmap == null || overlayBitmap.getWidth() != w || overlayBitmap.getHeight() != h) {
+                    overlayBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                    overlayPx = new int[w * h];
+                }
+                android.graphics.Canvas c = new android.graphics.Canvas(overlayBitmap);
+                c.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR);
+                c.scale(w / 720f, h / 480f);           // the picture's 720 x 480 of Latent's layout
+                c.translate(-(s.width - 720) / 2, 0);
+                overlayGfx.begin(c);
+                Ui.draw(overlayGfx, s);
+                overlayBitmap.getPixels(overlayPx, 0, w, 0, 0, w, h);
+                final int gen = FilmCore.setOverlay(overlayPx, w, h);
+                final long ms = SystemClock.uptimeMillis() - t;
+                ui.post(new Runnable() {
+                    public void run() {
+                        overlaysMade++;
+                        overlayMsSum += ms;
+                        if (gen > 0) overlayReady();
+                    }
+                });
+            } catch (Throwable e) {
+                note("overlay: " + Probe.why(e));
+            }
+        }
+    };
+
+    /** A new overlay: frames from now on carry it; while none come (a picture being written), the last one again. */
+    private void overlayReady() {
+        long now = SystemClock.uptimeMillis();
+        if (closed || frames == 0 || (now >= quietUntil && !(stored < shots && now < quietUntil + STORE_QUIET_MS))) return;
+        Looker k = freeLooker();
+        if (k != null && k.ctx != 0) look(k, null);
+    }
+
+    private boolean frameSaved;
+
+    /** Once a visit, one live frame as the camera sends it, to LATENT/LIVE.JPG: to judge its quality off the camera. */
+    private void saveFrame(final byte[] jpeg) {
+        frameSaved = true;
+        catalogue.execute(new Runnable() {
             public void run() {
                 try {
-                    File fb = new File("/dev/graphics/fb0");
-                    String geo = sysfs("virtual_size") + " " + sysfs("bits_per_pixel") + " bpp, stride " + sysfs("stride");
-                    byte[] buf = new byte[640 * 480 * 4 * 2];
-                    int n = 0;
-                    java.io.FileInputStream in = new java.io.FileInputStream(fb);
-                    try { int got; while (n < buf.length && (got = in.read(buf, n, buf.length - n)) > 0) n += got; } finally { in.close(); }
-                    FileOutputStream o = new FileOutputStream(to);
-                    try { o.write(buf, 0, n); } finally { o.close(); }
-                    note("screen kept: " + n + " bytes of fb0 (" + geo + ", " + liveW + "x" + liveH + " look) as SCREEN.RAW");
+                    FileOutputStream o = new FileOutputStream(new File(Library.home(card), "LIVE.JPG"));
+                    try { o.write(jpeg); } finally { o.close(); }
                 } catch (Throwable e) {
-                    note("screen: " + Probe.why(e));
+                    note("live frame not kept: " + Probe.why(e));
                 }
             }
-        }, "screen").start();
+        });
     }
-
-    private static String sysfs(String name) {
-        try {
-            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader("/sys/class/graphics/fb0/" + name));
-            try { String l = r.readLine(); return l == null ? "?" : l.trim(); } finally { r.close(); }
-        } catch (Throwable e) {
-            return "?";
-        }
-    }
-
-    /** A frame of the look is ready to show (16-bit or 32-bit). */
-    private boolean hasLook() { return (front16 >= 0 && shown16[front16] != null) || frame != null; }
 
     // ------------------------------------------------------------------------------ keys
 
@@ -1112,7 +1238,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private Bitmap pendingPrint;   // the frame at the full press, the print once the shutter answers
 
     private void keepPrint() {
-        Bitmap src = front16 >= 0 && shown16[front16] != null ? shown16[front16] : frame;
+        Bitmap src = hasLook() ? shown16[front16] : null;
         if (src == null) return;
         if (pendingPrint != null) pendingPrint.recycle();
         try {   // half size and filtered: the 16-bit picture's dither averages away, as a print is smooth
@@ -1414,8 +1540,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         long now = SystemClock.uptimeMillis();
         s.mode = UiState.PHOTO;
         boolean look = lookOn && hasLook() && !sequenceStopped;   // frames stopped (the camera struggling): the camera's own view; while a picture is written, the last frame holds
-        boolean exact = look && front16 >= 0 && shown16[front16] != null;
-        s.liveImage = !look ? null : exact ? shown16[front16] : frame;
+        boolean exact = look;
+        s.liveImage = look ? shown16[front16] : null;
         s.liveExact = exact;
         s.liveThrough = previewing && !look;   // the camera's own live view shows through
         s.lookLive = look;
@@ -1515,14 +1641,19 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         Thread.setDefaultUncaughtExceptionHandler(previousHandler);
         long liveMs = Math.max(1, (lastFrameAt > 0 ? lastFrameAt : SystemClock.uptimeMillis()) - framesAskedAt);
         note("closed: " + shots + " picture(s), " + stored + " in the catalogue, " + frames + " live frames (" + String.format(Locale.US, "%.1f", frames * 1000.0 / liveMs)
-                + " a second, look " + (frames > 0 ? lookMsSum / frames : 0) + " ms each), Latent's focus " + locks + " locked / " + misses
+                + " a second, " + (frames > 0 ? lookMsSum / frames : 0) + " ms each on " + lookers.length + " threads), Latent's focus " + locks + " locked / " + misses
                 + " missed, level sure on " + level.sure + " of " + level.frames + " frames");
         flushLog();
         catalogue.shutdown();
-        looker.shutdown();
+        for (final Looker k : lookers) {   // each composer freed on its own thread, after any frame it's making
+            if (k == null) continue;
+            k.exec.execute(new Runnable() { public void run() { if (k.ctx != 0) { FilmCore.frameFree(k.ctx); k.ctx = 0; } } });
+            k.exec.shutdown();
+        }
+        overlayer.execute(new Runnable() { public void run() { FilmCore.setOverlay(null, 0, 0); } });
+        overlayer.shutdown();
         ui.removeCallbacksAndMessages(null);
         for (; stored < shots; stored++) host.shot(null, nextFilm());   // taken but not yet named: still exposures on the roll
-        if (frame != null) { frame.recycle(); frame = null; }
         synchronized (shown16) {
             for (int i = 0; i < shown16.length; i++) if (shown16[i] != null) { shown16[i].recycle(); shown16[i] = null; }
             front16 = -1; posted16 = 0;
@@ -1587,8 +1718,17 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             Runtime rt = Runtime.getRuntime();
             long cpu = cpuMs();
             int look = n > 0 ? lm / n : 0, grab = grabs > 0 ? grabMsSum / grabs : 0;
-            note("live: " + n + " frames in " + (now - statsAt) / 1000 + " s, look " + look + " ms, grab " + grab + " ms, "
-                    + draws + " draws of " + (draws > 0 ? drawMsSum / draws : 0) + " ms, Latent's CPU "
+            StringBuilder st = new StringBuilder();
+            String[] names = { "decode", "level", "look", "compose" };
+            for (int i = 0; i < stageMs.length; i++) {
+                st.append(i == 0 ? "" : ", ").append(names[i]).append(' ').append(n > 0 ? (stageMs[i] - statStage[i]) / n : 0);
+                statStage[i] = stageMs[i];
+            }
+            String cores = "";
+            for (Looker k : lookers) if (k != null && k.pinned != null) cores += (cores.length() > 0 ? "+" : "") + k.pinned;
+            note("live: " + n + " frames in " + (now - statsAt) / 1000 + " s, " + look + " ms each (" + st + ") on " + cores + ", grab " + grab + " ms, "
+                    + draws + " draws of " + (draws > 0 ? drawMsSum / draws : 0) + " ms, " + (overlaysMade - statOverlays) + " overlays of "
+                    + (overlaysMade > 0 ? overlayMsSum / overlaysMade : 0) + " ms, Latent's CPU "
                     + (cpu >= 0 && statCpu >= 0 ? (cpu - statCpu) * 100 / Math.max(1, now - statsAt) + "%" : "?") + ", load " + loadAvg()
                     + ", heap " + (rt.totalMemory() - rt.freeMemory()) / 1024 + " of " + rt.maxMemory() / 1024 + " KB");
             statCpu = cpu;
@@ -1602,6 +1742,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         statsAt = now;
         statFrames = frames;
         statLookMs = lookMsSum;
+        statOverlays = overlaysMade;
         grabs = 0;
         grabMsSum = 0;
         draws = 0;

@@ -173,6 +173,11 @@ public class RenderScreens {
         s.ev = -2; s.exposed = 7; s.printImage = img(samples, "HOUSE-CLASSNEG.png"); s.printProgress = 0.7f; s.levelShown = true; s.levelAngle = 3.1f;
         s.shutter = "1/250"; s.aperture = "F8"; s.iso = "400"; s.isoAuto = true;
         render(s, fonts, out, "8u-vf-live-look-print-level");
+        layers(s, fonts, out, "8w-vf-layers");
+        s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
+        s.evEdit = true; s.ev = 4; s.afState = 2; s.levelShown = true; s.levelAngle = -0.2f; s.levelOk = true; s.grid = true; s.hist = new int[64];
+        for (int i = 0; i < 64; i++) s.hist[i] = 20 + (i * 37 % 50);
+        layers(s, fonts, out, "8x-vf-layers-ev-grid");
 
         s = state();
         s.mode = UiState.DARKROOM; s.film = cuban; s.devFrame = 4; s.devTotal = 12; s.devDone = 4;
@@ -273,6 +278,56 @@ public class RenderScreens {
     }
 
     static void render(UiState s, File fonts, File out, String name) throws Exception { renderOver(s, fonts, out, name, null); }
+
+    /**
+     * The viewfinder in layers (v0.38.0), as the camera builds it: the picture with the overlay layer laid in
+     * (the composer's job), then the screen layer over it. Written beside the whole drawing, with the share of
+     * pixels that differ, which must stay small (only the stacking order of type and focus marks may differ).
+     */
+    static void layers(UiState s, File fonts, File out, String name) throws Exception {
+        int w = Math.round(s.width);
+        BufferedImage base = new BufferedImage(720, 480, BufferedImage.TYPE_INT_RGB);   // the picture at the layout's own size
+        Graphics2D bg = base.createGraphics();
+        bg.drawImage((BufferedImage) s.liveImage, 0, 0, 720, 480, null);
+        bg.dispose();
+        s.liveImage = base;
+        BufferedImage all = new BufferedImage(w, 480, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = all.createGraphics();
+        s.vfLayer = UiState.LAYER_ALL;
+        Ui.draw(new HostGfx(g, fonts), s);
+        g.dispose();
+        // the composer's picture: the live image, then the overlay drawn alone over it
+        BufferedImage pic = new BufferedImage(720, 480, BufferedImage.TYPE_INT_RGB);
+        g = pic.createGraphics();
+        g.drawImage(base, 0, 0, null);
+        g.translate(-(s.width - 720) / 2, 0);
+        UiState o = s.copy();
+        o.vfLayer = UiState.LAYER_OVERLAY;
+        Ui.draw(new HostGfx(g, fonts), o);
+        g.dispose();
+        BufferedImage lay = new BufferedImage(w, 480, BufferedImage.TYPE_INT_RGB);
+        g = lay.createGraphics();
+        UiState sc = s.copy();
+        sc.vfLayer = UiState.LAYER_SCREEN;
+        sc.liveImage = pic;
+        Ui.draw(new HostGfx(g, fonts), sc);
+        g.dispose();
+        int diff = 0;
+        for (int y = 0; y < 480; y++) for (int x = 0; x < w; x++) {
+            int p = all.getRGB(x, y), q = lay.getRGB(x, y);
+            if (Math.abs((p >> 16 & 255) - (q >> 16 & 255)) + Math.abs((p >> 8 & 255) - (q >> 8 & 255)) + Math.abs((p & 255) - (q & 255)) > 24) diff++;
+        }
+        ImageIO.write(lay, "png", new File(out, name + ".png"));
+        BufferedImage dm = new BufferedImage(w, 480, BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < 480; y++) for (int x = 0; x < w; x++) {
+            int p = all.getRGB(x, y), q = lay.getRGB(x, y);
+            int d = Math.abs((p >> 16 & 255) - (q >> 16 & 255)) + Math.abs((p >> 8 & 255) - (q >> 8 & 255)) + Math.abs((p & 255) - (q & 255));
+            dm.setRGB(x, y, d > 24 ? 0xFF0000 : (p & 0xFEFEFE) >> 1);
+        }
+        ImageIO.write(dm, "png", new File(out, name + "-diff.png"));
+        System.out.println(name + ": layered differs from whole on " + String.format("%.2f", diff * 100.0 / (w * 480)) + "% of pixels");
+        if (diff * 100.0 / (w * 480) > 1.0) throw new IllegalStateException(name + ": the layers don't add up to the viewfinder");
+    }
 
     /** With 'video' drawn first where the camera's live view would be (3:2, full height, centred). */
     static void renderOver(UiState s, File fonts, File out, String name, Object video) throws Exception {

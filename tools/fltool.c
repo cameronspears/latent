@@ -161,6 +161,26 @@ int main(int argc, char **argv) {
             fprintf(stderr, "16-bit 540x480 in %.1f ms\n", (now() - t2) * 1000);
             free(o16);
         }
+        {   /* the frame composer (v0.38.0), as the viewfinder runs it: overlay, 565 and 4444, the last frame again */
+            static const int sh[4] = { 12, 8, 4, 0 };
+            fl_frame_ctx *fc = fl_frame_new();
+            unsigned short *o16 = malloc(sizeof(unsigned short) * 540 * 480);
+            unsigned int *ov = calloc(540 * 480, sizeof(unsigned int));
+            int fi[FL_FRAME_INFO], tm[FL_FRAME_TIMES], n;
+            double t3;
+            for (y = 0; y < 90; y++) for (x = 0; x < 540; x++) ov[y * 540 + x] = (unsigned int)(0x78 - y) << 24;
+            for (y = 200; y < 230; y++) for (x = 100; x < 400; x++) ov[y * 540 + x] = 0xFFF4F1EA;
+            if (!fc || !o16 || fl_set_overlay(ov, 540, 480) <= 0) { fprintf(stderr, "error: composer\n"); return 1; }
+            t3 = now();
+            for (n = 0; n < 10; n++)
+                if (fl_frame(fc, jpg, (unsigned long)len, lut, params, FL_F_LEVEL | FL_F_HIST | FL_F_TEMPORAL, n, o16, 540, 480, 540, 1500,
+                             n & 1 ? FL_FMT_565 : FL_FMT_4444, sh, 320, 240, fi, tm, err, sizeof err) != 0) { fprintf(stderr, "error: %s\n", err); return 1; }
+            fprintf(stderr, "composed 540x480 in %.2f ms (decode %d, read %d, look %d, compose %d)\n", (now() - t3) * 100, tm[0], tm[1], tm[2], tm[3]);
+            if (fl_frame(fc, NULL, 0, lut, params, 0, 3, o16, 540, 480, 540, 1500, FL_FMT_565, sh, 320, 240, fi, tm, err, sizeof err) != 0) { fprintf(stderr, "error: again: %s\n", err); return 1; }
+            fl_set_overlay(NULL, 0, 0);
+            fl_frame_free(fc);
+            free(o16); free(ov);
+        }
         f = fopen(argv[3], "wb");
         fprintf(f, "P6\n%d %d\n255\n", info[0], info[1]);
         for (y = 0; y < info[1]; y++)

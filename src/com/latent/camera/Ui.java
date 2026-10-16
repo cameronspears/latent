@@ -25,7 +25,8 @@ final class Ui {
             liveOverlay(g, s);
             return;
         }
-        if (s.mode == UiState.PHOTO && s.liveThrough) {   // the camera's own live view shows in the picture: black bars only
+        if (s.mode == UiState.PHOTO && s.vfLayer == UiState.LAYER_OVERLAY) { photo(g, s); return; }   // the type over the picture, alone
+        if (s.mode == UiState.PHOTO && (s.liveThrough || s.liveImage != null)) {   // the picture fills its area: black bars only
             float iw = H * 1.5f, ix = (s.width - iw) / 2;
             g.rect(0, 0, ix, H, BG);
             g.rect(ix + iw, 0, s.width - ix - iw, H, BG);
@@ -128,11 +129,23 @@ final class Ui {
         float iw = H * 1.5f, ix = (s.width - iw) / 2, ir = ix + iw;
         UiState.Film f = s.looks.isEmpty() ? null : s.looks.get(Math.min(s.lookSel, s.looks.size() - 1));
         int accent = f != null ? f.accent : INK;
-        if (s.liveImage != null && s.liveExact) g.imageExact(s.liveImage, ix, 0, iw, H);
-        else if (s.liveImage != null) g.image(s.liveImage, ix, 0, iw, H, false);
-        else if (!s.liveThrough) g.rect(ix, 0, iw, H, 0xFF0B0B0A);
-        if (s.flash) { g.rect(ix, 0, iw, H, 0xD0000000); }   // the shutter: a blink
+        // layers: 'over' is Latent's type and fades over the picture (in the frames themselves when the screen
+        // draws SCREEN), 'under' the picture and what moves with it
+        boolean over = s.vfLayer != UiState.LAYER_SCREEN, under = s.vfLayer != UiState.LAYER_OVERLAY;
+        if (under) {
+            if (s.liveImage != null && s.liveExact) g.imageExact(s.liveImage, ix, 0, iw, H);
+            else if (s.liveImage != null) g.image(s.liveImage, ix, 0, iw, H, false);
+            else if (!s.liveThrough) g.rect(ix, 0, iw, H, 0xFF0B0B0A);
+            if (s.flash) { g.rect(ix, 0, iw, H, 0xD0000000); }   // the shutter: a blink
+        }
+        if (over) photoType(g, s, f, accent, ix, iw, ir);
+        if (under) photoMoving(g, s, f, ix, iw, ir);
+        // ---- the look, large, for a moment after the wheel turns (a Fuji film simulation answering its dial)
+        if (under && s.lookShown && f != null) lookCard(g, s, f);
+    }
 
+    /** Over the picture and still: the fades, the film, the counter, the battery, exposure (the viewfinder's overlay). */
+    private static void photoType(Gfx g, UiState s, UiState.Film f, int accent, float ix, float iw, float ir) {
         // soft fades top and bottom, so the type reads over any picture
         for (int y = 0; y < 92; y += 2) g.rect(ix, y, iw, 2, ((int) (0x78 * (1 - y / 92f) * (1 - y / 92f))) << 24);
         for (int y = 352; y < H; y += 2) { float t = (y - 352) / 128f; g.rect(ix, y, iw, 2, ((int) (0xB8 * t * t)) << 24); }
@@ -155,26 +168,13 @@ final class Ui {
         }
         frameWindow(g, s, s.width / 2, 36, accent);
         if (s.battery >= 0) battery2(g, s.battery, ir - 18, 36);
-        if (s.hist != null) histogram(g, s.hist, ir - 18 - 112, 54, 112, 40);
         if (s.vfNote.length() > 0) {   // a word under the counter, for a moment
             float tw = g.textWidth(s.vfNote, Gfx.MEDIUM, 15, 0) + 30;
             g.roundRect(s.width / 2 - tw / 2, 58, tw, 28, 14, 0xB0000000);
             g.text(s.vfNote, s.width / 2, 77, Gfx.MEDIUM, 15, INK, Gfx.CENTER, 0);
         }
 
-        // ---- the side bars: focus mode on the left, photos left on the card on the right
-        if (!s.clean) {
-            sideLabel(g, ix / 2, 214, s.afMode, "FOCUS");
-            sideLabel(g, ix / 2, 268, s.afArea, "AREA");
-            sideLabel(g, ir + ix / 2, 214, s.shotsLeft >= 0 ? String.valueOf(s.shotsLeft) : "", "LEFT");
-        }
-        if (s.afLamp) lamp(g, ir + ix / 2, 268, s.afState == 1 ? INK : INK2);
-
-        // ---- the level, then focus (both out of the way while the look card is up)
-        if (s.levelShown && !s.lookShown) level(g, s, ix + iw / 2, H / 2);
-        if (!s.lookShown) afBrackets(g, s, ix, iw);
-
-        // ---- bottom: exposure, the meter, the print
+        // ---- bottom: exposure, the meter
         float by = 448;
         boolean live = s.afState == 2 || s.afState == 1;   // half-pressed: the numbers come up
         int ink = live ? INK : 0xCCF4F1EA;
@@ -188,10 +188,40 @@ final class Ui {
             x = expo(g, x + 22, by, s.iso, s.isoAuto ? "ISO A" : "ISO", ink);
             meter(g, s.width / 2 + 40, by - 6, 150, s.ev, ink, accent);
         }
-        print(g, s, ir - 18, by, accent);
+    }
 
-        // ---- the look, large, for a moment after the wheel turns (a Fuji film simulation answering its dial)
-        if (s.lookShown && f != null) lookCard(g, s, f);
+    /** What moves, drawn over the picture every frame: the histogram, the side bars, the level, focus, the print. */
+    private static void photoMoving(Gfx g, UiState s, UiState.Film f, float ix, float iw, float ir) {
+        int accent = f != null ? f.accent : INK;
+        if (s.hist != null) histogram(g, s.hist, ir - 18 - 112, 54, 112, 40);
+
+        // ---- the side bars: focus mode on the left, photos left on the card on the right
+        if (!s.clean) {
+            sideLabel(g, ix / 2, 214, s.afMode, "FOCUS");
+            sideLabel(g, ix / 2, 268, s.afArea, "AREA");
+            sideLabel(g, ir + ix / 2, 214, s.shotsLeft >= 0 ? String.valueOf(s.shotsLeft) : "", "LEFT");
+        }
+        if (s.afLamp) lamp(g, ir + ix / 2, 268, s.afState == 1 ? INK : INK2);
+
+        // ---- the level, then focus (both out of the way while the look card is up)
+        if (s.levelShown && !s.lookShown) level(g, s, ix + iw / 2, H / 2);
+        if (!s.lookShown) afBrackets(g, s, ix, iw);
+        print(g, s, ir - 18, 448, accent);
+    }
+
+    /**
+     * What the viewfinder's overlay depends on (photoType): when this changes, it's drawn again. Everything
+     * photoType reads, and nothing it doesn't, so the overlay is redrawn only when it would look different.
+     */
+    static String overlayKey(UiState s) {
+        UiState.Film f = s.looks.isEmpty() ? null : s.looks.get(Math.min(s.lookSel, s.looks.size() - 1));
+        StringBuilder k = new StringBuilder(96);
+        k.append(s.width).append('|').append(f == null ? "-" : f.title + "/" + f.accent + "/" + f.body + "/" + f.band).append('|')
+                .append(s.lookLive).append(s.grid).append(s.clean).append(s.flash).append(s.endless).append('|')
+                .append(s.exposed).append('/').append(s.length).append('|').append(s.battery).append('|').append(s.vfNote).append('|')
+                .append(s.afState).append(s.evEdit).append(s.ev).append('|').append(s.shutter).append('|').append(s.aperture).append('|')
+                .append(s.iso).append(s.isoAuto);
+        return k.toString();
     }
 
     /** The frame counter as a film camera's window: "09 / 24", or "∞ 23" on an endless roll. */

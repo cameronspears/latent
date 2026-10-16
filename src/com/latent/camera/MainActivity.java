@@ -863,6 +863,10 @@ public class MainActivity extends Activity {
                 screen.invalidate();
             }
             public void changed() { screen.invalidate(); }
+            public void frame() {   // a new live frame: only the picture's area
+                int w = screen.getWidth(), side = Math.round((logicalWidth - 720) / 2 * w / logicalWidth);
+                if (w <= 0 || side <= 0) screen.invalidate(); else screen.invalidate(side - 1, 0, w - side + 1, screen.getHeight());
+            }
             public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
             public void shot(File photo, String film) { vfShot(photo, film); }
             public void hud(boolean on) { screen.setVisibility(on ? View.VISIBLE : View.INVISIBLE); }
@@ -2353,7 +2357,9 @@ public class MainActivity extends Activity {
             c.save();
             c.scale(getWidth() / logicalWidth, getHeight() / 480f);
             gfx.begin(c);
-            Ui.draw(gfx, state());
+            UiState s = state();
+            if (mode == PHOTO && vf != null) vf.layer(s);   // the type over the picture comes in the frames themselves
+            Ui.draw(gfx, s);
             c.restore();
             drawn();
             if (mode == PHOTO && vf != null) vf.drew(SystemClock.uptimeMillis() - t);

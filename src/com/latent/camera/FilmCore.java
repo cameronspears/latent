@@ -77,4 +77,30 @@ final class FilmCore {
 
     /** The calling thread onto one core of the camera's four (Latent starts on core 3 only). 0, or -1 (lastError). */
     static native int pinCore(int core);
+
+    // ---- the viewfinder's frame composer (v0.38.0): one live JPEG to the screen's 16-bit picture in one go
+    static final int F_LEVEL = 1, F_HIST = 2, F_TEMPORAL = 4;
+    static final int FMT_565 = 0, FMT_4444 = 1;
+    static final int NO_READING = -999999, FI_OVERLAY = 69, FI_COUNT = 70;
+    static final int TM_DECODE = 0, TM_READ = 1, TM_LOOK = 2, TM_COMPOSE = 3, TM_COUNT = 4;
+
+    /** A composer for one thread (its buffers and its film); 0 if there's no memory. */
+    static native long frameNew();
+    static native void frameFree(long ctx);
+
+    /**
+     * One frame: jpeg decoded (fitted inside maxW x maxH), the level and histogram read when flags ask,
+     * the look, then for each of ow x oh screen pixels the 3:2 (aspect1000) crop stretched, the overlay
+     * laid in, dithered (blue noise, moving with seq under F_TEMPORAL) to 4 bits a channel in format
+     * (FMT_565 opaque, or FMT_4444 with shifts). Written into bitmap (an android.graphics.Bitmap, ow x oh, that format) when given,
+     * else into out. jpeg null: the last frame again, with the overlay as it is now. info[FI_COUNT]: frame
+     * size, level (NO_READING when not read), histogram, FI_OVERLAY the overlay generation laid in; tm
+     * [TM_COUNT] ms per stage. Returns 0, -1 (lastError), or -2 when bitmaps can't be written here.
+     */
+    static native int frame(long ctx, byte[] jpeg, int len, String lutPath, int[] params, int flags, int seq,
+                            short[] out, Object bitmap, int ow, int oh, int aspect1000, int format,
+                            int[] shifts, int maxW, int maxH, int[] info, int[] tm);
+
+    /** Latent's type and fades laid over every frame from now on (argb as getPixels gives it, ow x oh); null clears. Its generation. */
+    static native int setOverlay(int[] argb, int w, int h);
 }

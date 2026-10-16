@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include "jpeglib.h"
+#include "bluenoise.h"
 
 #define LUT_MAX 65
 /* LUTs are resampled to this grid when loaded: 17^3 entries x 3 shorts = 29 KB, which fits the
@@ -1521,6 +1522,349 @@ int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, 
     info[1] = oh;
     free(row); free(rgb);
     thumb_free(&P);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* the viewfinder's frame composer                                                               */
+/*
+ * One live frame, start to finish, for the camera's 16-bit screen: the JPEG decoded straight into a
+ * kept buffer, the level and histogram read (when asked), the film's look, then for every screen pixel
+ * one pass that stretches (bilinear), lays Latent's own type and fades over it (the overlay, drawn by
+ * the screen only when it changes), and dithers to 4 bits a channel with blue noise. The screen then
+ * copies one opaque picture a frame. A context per look thread: its own buffers and its own film.
+ */
+
+struct fl_frame_ctx {
+    struct { char path[512]; int highlight, shadow, ready; fl_look L; } film;
+    unsigned char *rgb, *row;
+    int rgb_cap, row_cap, sw, sh;          /* the last frame, decoded and looked */
+    unsigned short *hrow;
+    int *xi, *xw, cap_ow;
+    unsigned char *line;
+};
+
+fl_frame_ctx *fl_frame_new(void) { return (fl_frame_ctx *)calloc(1, sizeof(fl_frame_ctx)); }
+
+void fl_frame_free(fl_frame_ctx *c) {
+    if (!c) return;
+    if (c->film.ready) free(c->film.L.data);
+    free(c->rgb); free(c->row); free(c->hrow); free(c->xi); free(c->line);
+    free(c);
+}
+
+static const fl_look *frame_film(fl_frame_ctx *c, const char *lut_path, const int *params, char *err, int errlen) {
+    const char *p = lut_path ? lut_path : "";
+    fl_look L;
+    if (c->film.ready && strcmp(c->film.path, p) == 0 && c->film.highlight == params[FL_PARAM_HIGHLIGHT]
+            && c->film.shadow == params[FL_PARAM_SHADOW]) return &c->film.L;
+    if (strlen(p) >= sizeof c->film.path) { set_err(err, errlen, "LUT path too long"); return NULL; }
+    if (look_init(&L, lut_path, params, err, errlen) != 0) return NULL;
+    if (c->film.ready) free(c->film.L.data);
+    c->film.ready = 0;
+    c->film.L = L;
+    c->film.L.data = NULL;
+    if (L.data) {
+        size_t bytes = sizeof(short) * 3 * (size_t)L.n * L.n * L.n;
+        c->film.L.data = (short *)malloc(bytes);
+        if (!c->film.L.data) { look_free(&L); set_err(err, errlen, "out of memory"); return NULL; }
+        memcpy(c->film.L.data, L.data, bytes);
+    }
+    c->film.L.shared = 1;
+    look_free(&L);
+    strcpy(c->film.path, p);
+    c->film.highlight = params[FL_PARAM_HIGHLIGHT];
+    c->film.shadow = params[FL_PARAM_SHADOW];
+    c->film.ready = 1;
+    return &c->film.L;
+}
+
+/* ---- the overlay: Latent's type and fades over the picture, premultiplied, with the runs where it shows */
+
+typedef struct {
+    int w, h, gen, refs, retired;
+    unsigned char *px;      /* per pixel: red, green, blue (premultiplied), 255 - alpha */
+    int *row_runs;          /* h + 1 offsets into runs */
+    unsigned short *runs;   /* x0, x1 pairs: where alpha > 0 */
+} fl_overlay;
+
+static pthread_mutex_t g_ovl_mu = PTHREAD_MUTEX_INITIALIZER;
+static fl_overlay *g_ovl;
+static int g_ovl_gen;
+
+static void ovl_free(fl_overlay *o) { if (o) { free(o->px); free(o->row_runs); free(o->runs); free(o); } }
+
+static fl_overlay *ovl_acquire(void) {
+    fl_overlay *o;
+    pthread_mutex_lock(&g_ovl_mu);
+    o = g_ovl;
+    if (o) o->refs++;
+    pthread_mutex_unlock(&g_ovl_mu);
+    return o;
+}
+
+static void ovl_release(fl_overlay *o) {
+    int gone = 0;
+    if (!o) return;
+    pthread_mutex_lock(&g_ovl_mu);
+    if (--o->refs == 0 && o->retired) gone = 1;
+    pthread_mutex_unlock(&g_ovl_mu);
+    if (gone) ovl_free(o);
+}
+
+/* x / 255, rounded, for x up to 65535: no divide (the camera's core has none) */
+static inline int div255(int x) { x += 128; return (x + (x >> 8)) >> 8; }
+
+int fl_set_overlay(const unsigned int *argb, int w, int h) {
+    fl_overlay *o = NULL, *old;
+    int gen;
+    if (argb) {
+        int x, y, n = 0, cap = 1024;
+        if (w < 1 || h < 1 || w > 4096 || h > 4096) return -1;
+        o = (fl_overlay *)calloc(1, sizeof *o);
+        if (!o) return -1;
+        o->w = w; o->h = h;
+        o->px = (unsigned char *)malloc((size_t)w * h * 4);
+        o->row_runs = (int *)malloc(sizeof(int) * (h + 1));
+        o->runs = (unsigned short *)malloc(sizeof(unsigned short) * 2 * cap);
+        if (!o->px || !o->row_runs || !o->runs) { ovl_free(o); return -1; }
+        for (y = 0; y < h; y++) {
+            const unsigned int *r = argb + (size_t)y * w;
+            unsigned char *d = o->px + (size_t)y * w * 4;
+            int in = 0;
+            o->row_runs[y] = n;
+            for (x = 0; x <= w; x++) {
+                unsigned int p = x < w ? r[x] : 0;
+                int a = (int)(p >> 24);
+                if (x < w) {
+                    d[x * 4]     = (unsigned char)div255(((p >> 16) & 255) * a);
+                    d[x * 4 + 1] = (unsigned char)div255(((p >> 8) & 255) * a);
+                    d[x * 4 + 2] = (unsigned char)div255((p & 255) * a);
+                    d[x * 4 + 3] = (unsigned char)(255 - a);
+                }
+                if (a > 0 && !in) {
+                    if (n >= cap) {
+                        unsigned short *more = (unsigned short *)realloc(o->runs, sizeof(unsigned short) * 4 * cap);
+                        if (!more) { ovl_free(o); return -1; }
+                        o->runs = more; cap *= 2;
+                    }
+                    o->runs[n * 2] = (unsigned short)x; in = 1;
+                } else if (a == 0 && in) { o->runs[n * 2 + 1] = (unsigned short)x; n++; in = 0; }
+            }
+        }
+        o->row_runs[h] = n;
+    }
+    pthread_mutex_lock(&g_ovl_mu);
+    old = g_ovl;
+    gen = ++g_ovl_gen;
+    if (o) o->gen = gen;
+    g_ovl = o;
+    if (old) { old->retired = 1; if (old->refs > 0) old = NULL; }
+    pthread_mutex_unlock(&g_ovl_mu);
+    ovl_free(old);
+    return gen;
+}
+
+/* ---- decode: straight into the kept buffer when the frame already fits, else resampled */
+
+static int frame_decode(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, int max_w, int max_h, char *err, int errlen) {
+    struct jpeg_decompress_struct d;
+    struct fl_jerr je;
+    fl_thumb P;
+    int volatile thumbing = 0;
+    int ow, oh;
+    memset(&P, 0, sizeof P);
+    fl_jerr_init(&je);
+    d.err = &je.pub;
+    if (setjmp(je.jump)) {
+        set_err(err, errlen, "%s", je.msg);
+        jpeg_destroy_decompress(&d);
+        if (thumbing) thumb_free(&P);
+        return -1;
+    }
+    jpeg_create_decompress(&d);
+    jpeg_mem_src(&d, (unsigned char *)jpeg, len);
+    jpeg_read_header(&d, TRUE);
+    d.out_color_space = JCS_RGB;
+    d.dct_method = JDCT_IFAST;
+    d.do_fancy_upsampling = TRUE;   /* chroma eased between samples, not in 2-pixel steps (cheap for 4:2:2) */
+    d.scale_num = 1;
+    d.scale_denom = 8;
+    while (d.scale_denom > 1 && (int)(d.image_width / d.scale_denom) < max_w && (int)(d.image_height / d.scale_denom) < max_h)
+        d.scale_denom /= 2;
+    jpeg_start_decompress(&d);
+    if ((int)d.output_width <= max_w && (int)d.output_height <= max_h) { ow = (int)d.output_width; oh = (int)d.output_height; }
+    else {
+        if (thumb_init(&P, (int)d.output_width, (int)d.output_height, max_w, max_h, 0) != 0) longjmp(je.jump, 1);
+        thumbing = 1;
+        ow = P.W; oh = P.H;
+    }
+    if (c->rgb_cap < ow * oh * 3) {
+        free(c->rgb); c->rgb_cap = 0;
+        c->rgb = (unsigned char *)malloc((size_t)ow * oh * 3);
+        if (!c->rgb) longjmp(je.jump, 1);
+        c->rgb_cap = ow * oh * 3;
+    }
+    if (thumbing && c->row_cap < (int)d.output_width * 3) {
+        free(c->row); c->row_cap = 0;
+        c->row = (unsigned char *)malloc(d.output_width * 3);
+        if (!c->row) longjmp(je.jump, 1);
+        c->row_cap = (int)d.output_width * 3;
+    }
+    while (d.output_scanline < d.output_height) {
+        int y = (int)d.output_scanline;
+        JSAMPROW r = thumbing ? c->row : c->rgb + (size_t)y * ow * 3;
+        jpeg_read_scanlines(&d, &r, 1);
+        if (thumbing) thumb_row(&P, c->row, y);
+    }
+    jpeg_finish_decompress(&d);
+    jpeg_destroy_decompress(&d);
+    if (thumbing) { thumb_rgb(&P, c->rgb); thumb_free(&P); }
+    c->sw = ow; c->sh = oh;
+    return 0;
+}
+
+/* ---- compose: stretch, overlay, dither, pack; every screen pixel once */
+
+static void stretch_row24(const unsigned char *r, const int *xi, const int *xw, int ow, unsigned short *h) {
+    int x;
+    for (x = 0; x < ow; x++, h += 3) {
+        const unsigned char *a = r + xi[x] * 3;
+        int wx = xw[x], ux = 256 - wx;
+        h[0] = (unsigned short)(a[0] * ux + a[3] * wx);
+        h[1] = (unsigned short)(a[1] * ux + a[4] * wx);
+        h[2] = (unsigned short)(a[2] * ux + a[5] * wx);
+    }
+}
+
+static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, int ow, int oh, int stride,
+                         int aspect1000, int format, const int *shifts, int ox, int oy) {
+    const int w = c->sw, h = c->sh;
+    int x, y, held[2], rs = 11, gs = 5, bs = 0, as = 0, use_ovl;
+    unsigned short *hrow[2], alpha = 0;
+    unsigned short pr[16], pg[16], pb[16];
+    double sw, sh, sx0, sy0;
+    if (!c->rgb || w < 2 || h < 2 || ow < 1 || oh < 1 || ow > 4096 || oh > 4096 || stride < ow) return -1;
+    q4_init();
+    if (format == FL_FMT_4444) {
+        if (!shifts) return -1;
+        rs = shifts[0]; gs = shifts[1]; bs = shifts[2]; as = shifts[3];
+        if (rs < 0 || rs > 12 || gs < 0 || gs > 12 || bs < 0 || bs > 12 || as < 0 || as > 12) return -1;
+        alpha = (unsigned short)(15 << as);
+        for (x = 0; x < 16; x++) { pr[x] = (unsigned short)(x << rs); pg[x] = (unsigned short)(x << gs); pb[x] = (unsigned short)(x << bs); }
+    } else {   /* RGB565 carrying 4-bit values exactly: Skia widens them back to n * 17 within a step */
+        for (x = 0; x < 16; x++) {
+            pr[x] = (unsigned short)(((x << 1) | (x >> 3)) << 11);
+            pg[x] = (unsigned short)(((x << 2) | (x >> 2)) << 5);
+            pb[x] = (unsigned short)((x << 1) | (x >> 3));
+        }
+    }
+    use_ovl = o && o->w == ow && o->h == oh;
+    if (c->cap_ow < ow) {
+        free(c->xi); free(c->hrow); free(c->line);
+        c->cap_ow = 0;
+        c->xi = (int *)malloc(sizeof(int) * ow * 2);
+        c->hrow = (unsigned short *)malloc(sizeof(unsigned short) * ow * 6);
+        c->line = (unsigned char *)malloc((size_t)ow * 3);
+        if (!c->xi || !c->hrow || !c->line) { free(c->xi); free(c->hrow); free(c->line); c->xi = NULL; c->hrow = NULL; c->line = NULL; return -1; }
+        c->cap_ow = ow;
+    }
+    c->xw = c->xi + ow;
+    hrow[0] = c->hrow; hrow[1] = c->hrow + ow * 3;
+    held[0] = held[1] = -1;
+    {
+        double want = aspect1000 > 0 ? aspect1000 / 1000.0 : (double)ow / oh;
+        if ((double)w / h > want) { sh = h; sw = h * want; } else { sw = w; sh = w / want; }
+        sx0 = (w - sw) / 2; sy0 = (h - sh) / 2;
+    }
+    for (x = 0; x < ow; x++) {
+        double fx = sx0 + (x + 0.5) * sw / ow - 0.5;
+        int ix = (int)fx;
+        if (fx < 0) { fx = 0; ix = 0; }
+        if (ix > w - 2) { ix = w - 2; fx = w - 1; }
+        c->xi[x] = ix;
+        c->xw[x] = (int)((fx - ix) * 256 + 0.5);
+    }
+    for (y = 0; y < oh; y++) {
+        double fy = sy0 + (y + 0.5) * sh / oh - 0.5;
+        int iy = (int)fy, wy, uy;
+        const unsigned short *h0, *h1;
+        const unsigned char *bn = fl_bluenoise + (((y + oy) & 63) << 6);
+        unsigned char *ln = c->line;
+        unsigned short *o16 = out + (size_t)y * stride;
+        if (fy < 0) { fy = 0; iy = 0; }
+        if (iy > h - 2) { iy = h - 2; fy = h - 1; }
+        wy = (int)((fy - iy) * 256 + 0.5);
+        uy = 256 - wy;
+        if (held[0] != iy) {
+            if (held[1] == iy) { unsigned short *t = hrow[0]; hrow[0] = hrow[1]; hrow[1] = t; held[0] = iy; held[1] = -1; }
+            else { stretch_row24(c->rgb + (size_t)iy * w * 3, c->xi, c->xw, ow, hrow[0]); held[0] = iy; }
+        }
+        if (held[1] != iy + 1) { stretch_row24(c->rgb + (size_t)(iy + 1) * w * 3, c->xi, c->xw, ow, hrow[1]); held[1] = iy + 1; }
+        h0 = hrow[0]; h1 = hrow[1];
+        for (x = 0; x < ow * 3; x++) ln[x] = (unsigned char)((h0[x] * uy + h1[x] * wy + 32768) >> 16);
+        if (use_ovl) {   /* the type and fades, only where they are */
+            int k, k1 = o->row_runs[y + 1];
+            const unsigned char *op = o->px + (size_t)y * ow * 4;
+            for (k = o->row_runs[y]; k < k1; k++) {
+                int x0 = o->runs[k * 2], x1 = o->runs[k * 2 + 1];
+                for (x = x0; x < x1; x++) {
+                    const unsigned char *q = op + x * 4;
+                    unsigned char *p = ln + x * 3;
+                    int ia = q[3] + (q[3] >> 7), v;   /* 0..256 */
+                    v = ((p[0] * ia) >> 8) + q[0]; p[0] = (unsigned char)(v > 255 ? 255 : v);
+                    v = ((p[1] * ia) >> 8) + q[1]; p[1] = (unsigned char)(v > 255 ? 255 : v);
+                    v = ((p[2] * ia) >> 8) + q[2]; p[2] = (unsigned char)(v > 255 ? 255 : v);
+                }
+            }
+        }
+        for (x = 0; x < ow; x++, ln += 3) {
+            const unsigned char *t = g_q4[bn[(x + ox) & 63] >> 4];
+            o16[x] = (unsigned short)(pr[t[ln[0]]] | pg[t[ln[1]]] | pb[t[ln[2]]] | alpha);
+        }
+    }
+    return 0;
+}
+
+int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
+             int flags, int seq, unsigned short *out, int ow, int oh, int stride, int aspect1000, int format,
+             const int *shifts, int max_w, int max_h, int *info, int *tm, char *err, int errlen) {
+    long t0 = now_ms(), t;
+    fl_overlay *o;
+    int rc, i, ox = 0, oy = 0;
+    memset(info, 0, sizeof(int) * FL_FRAME_INFO);
+    if (tm) memset(tm, 0, sizeof(int) * FL_FRAME_TIMES);
+    if (!c) { set_err(err, errlen, "no frame context"); return -1; }
+    if (jpeg) {
+        const fl_look *L = frame_film(c, lut_path, params, err, errlen);
+        if (!L) return -1;
+        if (frame_decode(c, jpeg, len, max_w, max_h, err, errlen) != 0) return -1;
+        t = now_ms(); if (tm) tm[FL_TM_DECODE] = (int)(t - t0); t0 = t;
+        if (flags & FL_F_LEVEL) fl_level(c->rgb, c->sw, c->sh, info + 2);
+        else info[2] = info[3] = info[4] = FL_NO_READING;
+        if (flags & FL_F_HIST) {
+            const unsigned char *p = c->rgb;
+            for (i = 0; i < c->sw * c->sh; i++, p += 3) info[5 + ((p[0] * 77 + p[1] * 150 + p[2] * 29) >> 10)]++;
+        }
+        t = now_ms(); if (tm) tm[FL_TM_READ] = (int)(t - t0); t0 = t;
+        look_row(L, &(fl_grain){ 0 }, c->rgb, c->sw * c->sh, 0);
+        t = now_ms(); if (tm) tm[FL_TM_LOOK] = (int)(t - t0); t0 = t;
+    } else {
+        if (!c->rgb) { set_err(err, errlen, "no frame yet"); return -1; }
+        info[2] = info[3] = info[4] = FL_NO_READING;
+    }
+    if (flags & FL_F_TEMPORAL) {   /* the grain moves each frame, as film's does */
+        unsigned int hsh = hash32((unsigned int)seq * 2654435761u + 1);
+        ox = (int)(hsh & 63); oy = (int)((hsh >> 8) & 63);
+    }
+    o = ovl_acquire();
+    rc = frame_compose(c, o, out, ow, oh, stride, aspect1000, format, shifts, ox, oy);
+    info[FL_FI_OVERLAY] = o && o->w == ow && o->h == oh ? o->gen : 0;
+    ovl_release(o);
+    if (rc != 0) { set_err(err, errlen, "bad screen size"); return -1; }
+    if (tm) tm[FL_TM_COMPOSE] = (int)(now_ms() - t0);
+    info[0] = c->sw;
+    info[1] = c->sh;
     return 0;
 }
 

@@ -69,6 +69,38 @@ int fl_level(const unsigned char *rgb, int w, int h, int *out);
  * shifts[0..3] (red, green, blue, alpha; fully opaque). Returns 0, or -1 on bad sizes. */
 int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int ow, int oh, int aspect1000, const int *shifts);
 
+/* The viewfinder's frame composer (v0.38.0): one live JPEG to the screen's 16-bit picture in one go.
+ * A context per thread (its buffers and film). fl_frame decodes (fitted inside max_w x max_h), reads the
+ * level (flags & FL_F_LEVEL) and histogram (FL_F_HIST), applies the look, then for each of ow x oh screen
+ * pixels (rows stride pixels apart): bilinear stretch of the centre aspect1000 crop, the overlay
+ * (fl_set_overlay) where it shows, blue-noise dither to 4 bits a channel (moving with seq when
+ * FL_F_TEMPORAL), packed as format: FL_FMT_565 (opaque RGB565 holding the 4-bit values exactly) or
+ * FL_FMT_4444 (nibbles at shifts[0..3]). jpeg NULL: the last frame again (the overlay changed).
+ * info[FL_FRAME_INFO]: 0, 1 frame size; 2..4 level (FL_NO_READING when not read); 5..68 histogram;
+ * FL_FI_OVERLAY the overlay generation laid in (0: none). tm[FL_FRAME_TIMES]: ms per stage. */
+typedef struct fl_frame_ctx fl_frame_ctx;
+#define FL_F_LEVEL 1
+#define FL_F_HIST 2
+#define FL_F_TEMPORAL 4
+#define FL_FMT_565 0
+#define FL_FMT_4444 1
+#define FL_NO_READING (-999999)
+#define FL_FI_OVERLAY 69
+#define FL_FRAME_INFO 70
+#define FL_TM_DECODE 0
+#define FL_TM_READ 1
+#define FL_TM_LOOK 2
+#define FL_TM_COMPOSE 3
+#define FL_FRAME_TIMES 4
+fl_frame_ctx *fl_frame_new(void);
+void fl_frame_free(fl_frame_ctx *c);
+int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
+             int flags, int seq, unsigned short *out, int ow, int oh, int stride, int aspect1000, int format,
+             const int *shifts, int max_w, int max_h, int *info, int *tm, char *err, int errlen);
+/* The overlay for every frame from now on: argb (as Android's getPixels gives it, not premultiplied),
+ * w x h, the size of the screen picture; NULL clears it. Returns its generation (> 0), or -1. */
+int fl_set_overlay(const unsigned int *argb, int w, int h);
+
 /* The calling thread onto one core (Latent is started on core 3 only, which the screen shares).
  * Returns 0, or -1 (errno in *err_no). */
 int fl_pin_core(int core, int *err_no);
