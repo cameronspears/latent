@@ -8,3 +8,6 @@ Latent.apk.sha256
 
 # the PlayMemories installer (third-party binary; download from github.com/ma1co/Sony-PMCA-RE)
 tools/pmca/
+
+# leftovers from the first sessions (Recipe Lab files, installer downloads)
+archive/
