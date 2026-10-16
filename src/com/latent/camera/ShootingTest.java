@@ -26,7 +26,9 @@ import java.lang.reflect.Proxy;
  * frames and times a film look on one.
  *
  * Changes no camera setting: no exposure, focus or drive setting, no direct shutter, Auto Review
- * left as it is. Every camera call is on the UI thread, which opened the camera, and the camera is
+ * left as it is. The capture-hook experiment (CAPTURE_HOOK, off) loaded the firmware's memory map and
+ * set an allocation policy while the test ran, both undone after the camera was released. Every camera
+ * call is on the UI thread, which opened the camera, and the camera is
  * always released at the end, on MENU, when Latent is left, or if Latent crashes. The calls follow
  * apps verified on the A5100 and the A5000 (BetterManual, FocusBracket, sony-remote-reboot).
  * Log: LATENT/SHOOTING.TXT, one frame: LATENT/LIVEFRM.JPG.
@@ -97,6 +99,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         new Thread(new Runnable() {
             public void run() {
                 copyFirmware();
+                if (CAPTURE_HOOK) copyMemoryMaps();
                 ui.post(new Runnable() { public void run() { startCamera(); } });
             }
         }, "firmware-copy").start();
@@ -151,15 +154,23 @@ final class ShootingTest implements SurfaceHolder.Callback {
 
     private void startCamera() {
         // if anything goes badly wrong, the camera is still given back (a held camera can freeze the body)
-        previousHandler = Thread.getDefaultUncaughtExceptionHandler();
-        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
-            public void uncaughtException(Thread t, Throwable e) {
-                try { note("crash: " + Probe.why(e)); releaseCamera(); } catch (Throwable ignored) { }
-                if (previousHandler != null) previousHandler.uncaughtException(t, e);
-            }
-        });
+        if (!handlerSet) {   // once: a second open (another allocation policy) keeps the first handler
+            handlerSet = true;
+            previousHandler = Thread.getDefaultUncaughtExceptionHandler();
+            Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                public void uncaughtException(Thread t, Throwable e) {
+                    try { note("crash: " + Probe.why(e)); releaseCamera(); if (CAPTURE_HOOK) saveSystemLog(); } catch (Throwable ignored) { }
+                    if (previousHandler != null) previousHandler.uncaughtException(t, e);
+                }
+            });
+        }
         highestBefore = Roll.highest(Library.photos(card));
         step(S_OPEN, RUN, "opening…");
+        // before the camera opens, as an app would at start-up: the map, and how it is fitted in
+        if (CAPTURE_HOOK) {
+            loadMap();
+            setPolicy(OPEN_POLICIES[openPass]);
+        }
         long t = SystemClock.uptimeMillis();
         try {
             Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
@@ -177,12 +188,13 @@ final class ShootingTest implements SurfaceHolder.Callback {
                     options = oc.newInstance();
                     oc.getMethod("setTargetMedia", String.class).invoke(options, media);
                     try { oc.getMethod("setRecordingMode", int.class).invoke(options, 0); } catch (Throwable e) { note("recording mode: " + Probe.why(e)); }   // stills, as Sony's apps open it
+                    if (SEQUENCE_LIVE) try { oc.getMethod("setPreview", boolean.class).invoke(options, false); } catch (Throwable e) { note("preview off: " + Probe.why(e)); }
                 }
             } catch (Throwable e) {
                 note("no target media: " + Probe.why(e));
                 options = null;
             }
-            note("opening with target media " + media + ", stills");
+            note("opening with target media " + media + ", stills" + (SEQUENCE_LIVE ? ", normal preview off" : ""));
             cameraEx = open.invoke(null, 0, options);
             camera = (Camera) cx.getMethod("getNormalCamera").invoke(cameraEx);
         } catch (Throwable e) {
@@ -192,13 +204,110 @@ final class ShootingTest implements SurfaceHolder.Callback {
         }
         report(S_OPEN, OK, "opened in " + (SystemClock.uptimeMillis() - t) + " ms");
         step(S_LIVE, RUN, "starting…");
+        if (SEQUENCE_LIVE) { startLiveSequence(); return; }
         host.showLive(true);
         SurfaceHolder h = surface.getHolder();
         h.addCallback(this);
         if (h.getSurface() != null && h.getSurface().isValid()) surfaceCreated(h);
-        ui.postDelayed(new Runnable() {
-            public void run() { if (!previewing && !closed) { report(S_LIVE, FAIL, "no live view surface"); close(); } }
-        }, 4000);
+        ui.postDelayed(liveTimeout, 4000);
+    }
+
+    private final Runnable liveTimeout = new Runnable() {
+        public void run() { if (!previewing && !closed) { report(S_LIVE, FAIL, "no live view surface"); close(); } }
+    };
+
+    /**
+     * Live view failed with the map loaded (v0.28.0, under the default policy): give everything back
+     * (camera, policy, map) and open again under the next allocation policy. Returns false when none is left.
+     */
+    private boolean reopen(String why) {
+        if (!CAPTURE_HOOK || openPass + 1 >= OPEN_POLICIES.length || closed) return false;
+        ui.removeCallbacks(liveTimeout);
+        note("live view under allocation policy " + OPEN_POLICIES[openPass] + ": " + why + "; the camera goes back and opens again under policy "
+                + OPEN_POLICIES[openPass + 1]);
+        releaseCamera();   // also unloads the map and resets the policy
+        if (!SEQUENCE_LIVE) host.showLive(false);   // hidden and shown again, so the second open gets a new surface
+        openPass++;
+        ui.postDelayed(new Runnable() { public void run() { if (!closed) startCamera(); } }, 1000);
+        return true;
+    }
+
+    /**
+     * v0.30.0: the camera opened with normal preview off, live view as the preview sequence's frames
+     * (as LiveViewTest found, v0.21-0.23). Portrait Lighting's memory map may give normal preview's
+     * buffers to its own work; v0.29.0 found the camera hardware wouldn't open with the map loaded
+     * and normal preview on. Not drawn on screen: the frames are counted, to show live view runs.
+     */
+    static final boolean SEQUENCE_LIVE = false;   // only with CAPTURE_HOOK
+    static final long LIVE_WAIT_MS = 3000;
+
+    private long liveStart;
+    private int liveFrames;
+
+    private void startLiveSequence() {
+        try {
+            Class<?> cs = Class.forName("com.sony.scalar.hardware.CameraSequence");
+            Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
+            sequence = cs.getMethod("open", cx).invoke(null, cameraEx);
+            Class<?> oc = Class.forName("com.sony.scalar.hardware.CameraSequence$Options");
+            Object o = oc.newInstance();
+            option(o, (String) oc.getField("PREVIEW_FRAME_MAX_NUM").get(null), 1);
+            option(o, (String) oc.getField("PREVIEW_FRAME_WIDTH").get(null), 640);
+            option(o, (String) oc.getField("PREVIEW_FRAME_HEIGHT").get(null), 0);
+            option(o, "PREVIEW_FRAME_FORMAT", 0x100);   // JPEG
+            option(o, "JPEG_COMPRESS_RATE_DENOM", 15);
+            option(o, "JPEG_COMPRESS_MAX_SIZE", 100);
+            flushLog();   // if the camera hangs here, the card already says how far it got
+            cs.getMethod("startPreviewSequence", oc).invoke(sequence, o);
+        } catch (Throwable e) {
+            report(S_LIVE, FAIL, "no preview sequence: " + Probe.why(e));
+            stopSequence();
+            if (!reopen(Probe.why(e))) close();
+            return;
+        }
+        note("preview sequence started");
+        liveStart = SystemClock.uptimeMillis();
+        liveFrames = 0;
+        ui.post(livePoll);
+    }
+
+    /** Takes the live frames as they come (and drops them). The first one says live view runs; then the test goes on. */
+    private final Runnable livePoll = new Runnable() {
+        public void run() {
+            if (closed || sequence == null) return;
+            byte[] f = grab();
+            if (f != null && liveFrames++ == 0) {
+                lastFrame = f;
+                BitmapFactory.Options b = new BitmapFactory.Options();
+                b.inJustDecodeBounds = true;
+                BitmapFactory.decodeByteArray(f, 0, f.length, b);
+                try {   // the frame itself, to see what live view looks like with the map loaded
+                    FileOutputStream o = new FileOutputStream(new File(Library.home(card), "LIVEFRM.JPG"));
+                    try { o.write(f); } finally { o.close(); }
+                } catch (Exception e) {
+                    note("live frame: " + Probe.why(e));
+                }
+                report(S_LIVE, OK, "frames " + b.outWidth + "x" + b.outHeight + " after " + (SystemClock.uptimeMillis() - liveStart)
+                        + " ms, allocation policy " + policy);
+                liveRunning();
+            }
+            if (liveFrames == 0 && SystemClock.uptimeMillis() - liveStart > LIVE_WAIT_MS) {
+                report(S_LIVE, FAIL, "no frames in " + LIVE_WAIT_MS / 1000 + " s");
+                if (!reopen("no frames")) close();
+                return;
+            }
+            ui.postDelayed(this, liveFrames == 0 ? 30 : 100);
+        }
+    };
+
+    /** Live view runs: the hook, then the rest of the test, as with the surface. */
+    private void liveRunning() {
+        if (CAPTURE_HOOK) hookAfterLiveView(false);
+        listen();
+        focusOptions();
+        level();
+        host.note("Shooting test: point at something and hold still");
+        ui.postDelayed(new Runnable() { public void run() { focus(); } }, 2500);   // after the level's two seconds
     }
 
     public void surfaceCreated(SurfaceHolder h) {
@@ -209,11 +318,11 @@ final class ShootingTest implements SurfaceHolder.Callback {
             previewing = true;
         } catch (Throwable e) {
             report(S_LIVE, FAIL, Probe.why(e));
-            close();
+            if (!reopen(Probe.why(e))) close();
             return;
         }
-        report(S_LIVE, OK, "on screen");
-        hookAfterLiveView(false);
+        report(S_LIVE, OK, "on screen, allocation policy " + policy);
+        if (CAPTURE_HOOK) hookAfterLiveView(false);
         listen();
         focusOptions();
         level();
@@ -380,6 +489,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
     /** The camera's own autofocus; when it can't lock, cancel and go again, up to FOCUS_TRIES times. */
     private void focus() {
         if (closed) return;
+        if (hooking) { ui.postDelayed(new Runnable() { public void run() { focus(); } }, 500); return; }   // the hook tries come first
         tries++;
         focusing = true;
         focusStart = SystemClock.uptimeMillis();
@@ -586,18 +696,122 @@ final class ShootingTest implements SurfaceHolder.Callback {
      * shutter after each capture until we say so. Returns false (and the camera stores as usual) if
      * this camera won't have it.
      */
+    /**
+     * The capture-time hook, off since v0.30.1: closed on this camera (docs/CALLBACK-FINDINGS.md).
+     * Without a memory map the main processor refuses it (RESULT ERROR(2)); with the only map this body
+     * ships (Portrait Lighting's) the camera hardware won't open. With this off, nothing below runs:
+     * no map, no allocation policy, no hook, normal live view, and no system log at close.
+     */
+    static final boolean CAPTURE_HOOK = false;
+
     /** The ways tried, in order: Sony's full set; the map alone; the map with the counts. */
     static final String[] HOOK_VARIANTS = { "counts, release lock and map", "map only", "counts and map" };
 
     /**
-     * v0.26.4 read the camera's answer in the system log: message 0x120 (the hook) refused with
-     * "RESULT ERROR(2)" by the main processor, set before live view. Now tried with live view
-     * running, in each variant, and once more a second later. Stops at the first the camera takes.
+     * v0.29.0: the memory map is loaded (MemoryMapConfig.loadExtraMap, message 0x000E) and the
+     * allocation policy set before the camera opens, policy 1 first; v0.28.0 loaded the map under the
+     * default policy and live view failed. If live view fails, the camera opens again under policy 2.
+     * With live view running, each variant is tried, then again a second later. Stops at the first the
+     * camera takes. The camera's answers go to LATENT/LOGCAT.TXT at close (docs/CALLBACK-FINDINGS.md).
      */
+    static final int[] OPEN_POLICIES = { 1, 2 };   // MemoryMapConfig.ALLOCATION_POLICY_VERSION_1, _2
+
+    private int openPass;          // which of OPEN_POLICIES the camera is open under
+    private boolean handlerSet;
+    private boolean hooking;       // focus waits while the hook is tried
+
     private void hookAfterLiveView(final boolean again) {
-        for (int v = 0; v < HOOK_VARIANTS.length && !sequenced; v++) sequenced = hookCapture(v, again ? "live view 1 s on" : "live view on");
-        if (!sequenced && !again) { ui.postDelayed(new Runnable() { public void run() { if (!closed) hookAfterLiveView(true); } }, 1000); return; }
-        if (!sequenced) saveSystemLog();   // the camera's answers, all of them
+        hooking = true;
+        String when = "map " + (mapLoaded ? "loaded" : "NOT loaded") + ", policy " + policy + (again ? ", 1 s later" : "");
+        for (int v = 0; v < HOOK_VARIANTS.length && !sequenced; v++) sequenced = hookCapture(v, when);
+        if (!sequenced && !again) {
+            ui.postDelayed(new Runnable() { public void run() { if (!closed) hookAfterLiveView(true); } }, 1000);
+            return;
+        }
+        hooking = false;
+    }
+
+    // ------------------------------------------------------------------------------ the memory map (MemoryMapConfig)
+
+    private String map;           // the firmware's map for this camera, as the main processor sees it
+    private boolean mapLoaded;    // loadExtraMap succeeded: unloadExtraMap at close
+    private int policy;           // the allocation policy set now; 0 is the camera's default
+
+    /** Loads the firmware's memory map for this camera. Before the camera opens. Undone by releaseMemory. */
+    private void loadMap() {
+        map = firmwareMap();
+        if (map == null) return;
+        note("loading the memory map " + map);
+        flushLog();   // if the camera hangs here, the card already says how far it got
+        try {
+            Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("loadExtraMap", String.class).invoke(null, map);
+            mapLoaded = true;
+            note("memory map loaded");
+        } catch (Throwable e) {
+            note("memory map: " + Probe.why(e));
+        }
+        flushLog();
+    }
+
+    private void setPolicy(int p) {
+        if (p == policy) return;
+        try {
+            Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("setAllocationPolicy", int.class).invoke(null, p);
+            policy = p;
+            note("allocation policy " + p);
+        } catch (Throwable e) {
+            note("allocation policy " + p + ": " + Probe.why(e));
+        }
+    }
+
+    /** The camera's memory as it was: policy back to the default, the map unloaded. After the camera is released. */
+    private void releaseMemory() {
+        if (policy != 0) setPolicy(0);
+        if (!mapLoaded) return;
+        try {
+            Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("unloadExtraMap").invoke(null);
+            note("memory map unloaded");
+        } catch (Throwable e) {
+            note("memory map unload: " + Probe.why(e));
+        }
+        mapLoaded = false;
+    }
+
+    /** Read only: the firmware's memory maps to LATENT/FW as M0001.BIN ..., with FW/MEMMAP.TXT naming them. Background thread. */
+    private void copyMemoryMaps() {
+        File to = new File(Library.home(card), "FW");
+        if (new File(to, "MEMMAP.TXT").exists()) return;
+        to.mkdirs();
+        StringBuilder index = new StringBuilder();
+        int n = 0;
+        for (String dir : new String[] { "/system/etc/memmap", "/etc/memmap" }) {
+            File[] list = new File(dir).listFiles();
+            if (list == null || list.length == 0) continue;
+            java.util.Arrays.sort(list);
+            for (File f : list) {
+                if (!f.isFile()) continue;
+                File dst = new File(to, String.format(java.util.Locale.US, "M%04d.BIN", ++n));
+                index.append(dst.getName()).append('\t').append(f.getPath()).append('\t').append(f.length()).append("\r\n");
+                try {
+                    java.io.InputStream in = new java.io.FileInputStream(f);
+                    FileOutputStream o = new FileOutputStream(dst);
+                    try {
+                        byte[] b = new byte[65536];
+                        for (int k; (k = in.read(b)) > 0; ) o.write(b, 0, k);
+                    } finally { in.close(); o.close(); }
+                } catch (Exception e) {
+                    note("memory map copy: " + f + ": " + Probe.why(e));
+                }
+            }
+            break;   // /etc is a link to /system/etc: one copy
+        }
+        try {
+            FileOutputStream o = new FileOutputStream(new File(to, "MEMMAP.TXT"));
+            try { o.write(index.toString().getBytes("UTF-8")); } finally { o.close(); }
+        } catch (Exception e) {
+            note("memory map index: " + Probe.why(e));
+        }
+        note("memory maps: " + n + " copied to LATENT/FW (FW/MEMMAP.TXT)");
     }
 
     private boolean hookCapture(int variant, String when) {
@@ -606,7 +820,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
             Class<?> oc = Class.forName("com.sony.scalar.hardware.CameraSequence$Options");
             Class<?> cb = Class.forName("com.sony.scalar.hardware.CameraSequence$ShutterSequenceCallback");
-            sequence2 = cs.getMethod("open", cx).invoke(null, cameraEx);
+            sequence2 = sequence != null ? sequence : cs.getMethod("open", cx).invoke(null, cameraEx);   // one sequence for live view and the hook
             Object o = oc.newInstance();
             if (variant != 1) {
                 oc.getMethod("setOption", String.class, int.class).invoke(o, oc.getField("EXPOSURE_COUNT").get(null), 1);
@@ -619,14 +833,10 @@ final class ShootingTest implements SurfaceHolder.Callback {
                     return objectMethod(p, m, a);
                 }
             });
-            // v0.25: refused without a memory map, with or without options, under either allocation policy.
-            // Sony's apps give the sequence a map for this body: try the firmware's own, if it has one for this camera.
-            String map = firmwareMap();
+            // the map loaded before the camera opened (loadMap), named here as the sequence's memory map
             if (map == null) throw new IllegalStateException("no firmware memory map for this camera");
             oc.getMethod("setOption", String.class, String.class).invoke(o, "MEMORY_MAP_FILE", map);
-            Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("setAllocationPolicy", int.class).invoke(null, 1);
-            policyChanged = true;
-            note("hooking (" + when + ", " + HOOK_VARIANTS[variant] + ") with " + map + " under allocation policy 1");
+            note("hooking (" + when + ", " + HOOK_VARIANTS[variant] + ") with " + map);
             flushLog();   // if the camera hangs here, the card already says how far it got
             cs.getMethod("setShutterSequenceCallback", cb, oc).invoke(sequence2, callback, o);
             if (variant == 0) {
@@ -780,8 +990,6 @@ final class ShootingTest implements SurfaceHolder.Callback {
         locked = false;
     }
 
-    private boolean policyChanged;
-
     /**
      * The firmware's memory map for this camera, named as Sony's MemoryMapFile names them:
      * lib + device.memory + raw megapixels + "m_" + app + "_" + index + "_" + version + ".so", in
@@ -898,18 +1106,14 @@ final class ShootingTest implements SurfaceHolder.Callback {
     }
 
     private void releaseSequence() {
-        if (policyChanged) {   // back to the default, whatever happens
-            try { Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("setAllocationPolicy", int.class).invoke(null, 0); note("allocation policy back to default"); }
-            catch (Throwable e) { note("allocation policy: " + Probe.why(e)); }
-            policyChanged = false;
-        }
         if (sequence2 == null) return;
         unlockShutter("closing");
         try {
             Class<?> cb = Class.forName("com.sony.scalar.hardware.CameraSequence$ShutterSequenceCallback");
             sequence2.getClass().getMethod("setShutterSequenceCallback", cb).invoke(sequence2, (Object) null);
         } catch (Throwable ignored) { }
-        try { sequence2.getClass().getMethod("release").invoke(sequence2); } catch (Throwable e) { note("capture sequence release: " + Probe.why(e)); }
+        if (sequence2 != sequence)   // the live sequence is released by stopSequence
+            try { sequence2.getClass().getMethod("release").invoke(sequence2); } catch (Throwable e) { note("capture sequence release: " + Probe.why(e)); }
         sequence2 = null;
     }
 
@@ -1060,6 +1264,8 @@ final class ShootingTest implements SurfaceHolder.Callback {
         if (closed) return;
         if (lookRunning) { closeAfterLook = true; note("close asked during the look: after it's stored"); return; }   // never free the capture under the look
         closeCamera();
+        releaseMemory();   // also when the camera never opened
+        if (CAPTURE_HOOK) saveSystemLog();   // the camera's answers, all of them, every run
         finish();
     }
 
@@ -1073,10 +1279,13 @@ final class ShootingTest implements SurfaceHolder.Callback {
     /** cancel focus and capture, stop the sequence and live view, then release: the order the verified apps use. */
     private void releaseCamera() {
         ui.removeCallbacks(poll);
+        ui.removeCallbacks(livePoll);
+        if (liveFrames > 0) note("live frames: " + liveFrames + " in " + (SystemClock.uptimeMillis() - liveStart) / 1000 + " s");
+        liveFrames = 0;
         stopSensors();
+        releaseSequence();   // the hook first: it may be on the live sequence
         stopSequence();
-        releaseSequence();
-        if (cameraEx == null) return;
+        if (cameraEx == null) { releaseMemory(); return; }
         try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable ignored) { }
         if (shooting) safely("cancelTakePicture");
         set("setShutterListener", null, null);
@@ -1092,6 +1301,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         cameraEx = null;
         camera = null;
         previewing = false;
+        releaseMemory();   // the map goes after the camera that used it
     }
 
     private void stopSequence() {
