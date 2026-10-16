@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.SystemClock;
+import android.view.View;
 
 import java.io.File;
 
@@ -18,6 +19,8 @@ import java.io.File;
  */
 public final class Relaunch extends Activity {
     static final String EXTRA_PID = "pid", EXTRA_AT = "at", EXTRA_WHY = "why";
+    /** The darkroom getting ready, drawn as MainActivity draws it: the film's name, ISO, colours, and how many frames. */
+    static final String EXTRA_FILM = "film", EXTRA_ISO = "iso", EXTRA_ACCENT = "accent", EXTRA_BODY = "body", EXTRA_BAND = "band", EXTRA_TOTAL = "total", EXTRA_BATTERY = "battery";
     /** Up to this long for the old process to end by itself (it waits for any picture still being stored). */
     static final long WAIT_MS = 15000;
 
@@ -28,16 +31,47 @@ public final class Relaunch extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        // true black, as Latent's screens are; a word in its own type when it restarts to develop
-        android.widget.TextView v = new android.widget.TextView(this);
+        // true black; restarting to develop, the darkroom itself, getting ready, drawn by Latent's own Ui exactly
+        // as the screen before and after it, so the restart doesn't show
+        final Intent in = getIntent();
+        final boolean develop = "develop".equals(in.getStringExtra(EXTRA_WHY));
+        if (develop) {   // the darkroom's light, as before and after
+            android.view.WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.screenBrightness = 0.05f;
+            getWindow().setAttributes(lp);
+        }
+        final float aspect = Display.aspect();
+        View v = new View(this) {
+            private AndroidGfx gfx;
+            @Override
+            protected void onDraw(android.graphics.Canvas c) {
+                if (gfx == null) gfx = new AndroidGfx(getAssets());
+                float logical = 480f * (aspect > 0 ? aspect : (float) getWidth() / Math.max(1, getHeight()));
+                UiState s = new UiState();
+                s.width = logical;
+                s.mode = develop ? UiState.DARKROOM : UiState.BACK;
+                s.battery = in.getIntExtra(EXTRA_BATTERY, -1);
+                if (develop) {
+                    s.devPreparing = true;
+                    s.devTotal = Math.max(1, in.getIntExtra(EXTRA_TOTAL, 1));
+                    String title = in.getStringExtra(EXTRA_FILM);
+                    if (title != null) {
+                        s.film = new UiState.Film();
+                        s.film.title = title;
+                        s.film.iso = in.getStringExtra(EXTRA_ISO) == null ? "" : in.getStringExtra(EXTRA_ISO);
+                        s.film.accent = in.getIntExtra(EXTRA_ACCENT, Ui.RED);
+                        s.film.body = in.getIntExtra(EXTRA_BODY, 0);
+                        s.film.band = in.getIntExtra(EXTRA_BAND, 0);
+                    }
+                }
+                c.save();
+                c.scale(getWidth() / logical, getHeight() / 480f);
+                gfx.begin(c);
+                if (develop) Ui.draw(gfx, s); else c.drawColor(0xFF000000);
+                c.restore();
+            }
+        };
         v.setBackgroundColor(0xFF000000);
-        v.setGravity(android.view.Gravity.CENTER);
-        v.setTextColor(0xFF9A958B);
-        v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 30);
-        try { v.setTypeface(android.graphics.Typeface.createFromAsset(getAssets(), "fonts/inter-regular.ttf")); } catch (Throwable ignored) { }
-        float aspect = Display.aspect();   // the 640x480 buffer is stretched onto the panel: undo it, as Latent's screens do
-        if (aspect > 0) v.setTextScaleX(4f / 3 / aspect);
-        if ("develop".equals(getIntent().getStringExtra(EXTRA_WHY))) v.setText("Developing\u2026");
         setContentView(v);
         pid = getIntent().getIntExtra(EXTRA_PID, 0);
         started = SystemClock.uptimeMillis();
@@ -56,8 +90,8 @@ public final class Relaunch extends Activity {
                 return;
             }
             Intent i = new Intent(Relaunch.this, MainActivity.class);
-            i.putExtra(EXTRA_AT, getIntent().getLongExtra(EXTRA_AT, 0));
-            i.putExtra(EXTRA_WHY, getIntent().getStringExtra(EXTRA_WHY));
+            i.putExtras(getIntent());   // the film and the count too, so Latent opens on the same darkroom
+            i.removeExtra(EXTRA_PID);
             startActivity(i);
             overridePendingTransition(0, 0);
             finish();

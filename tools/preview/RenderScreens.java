@@ -181,6 +181,12 @@ public class RenderScreens {
         for (int i = 0; i < 4; i++) s.devStrip.add(thumbs.get(i));
         render(s, fonts, out, "8-darkroom");
 
+        s = new UiState();   // MENU in the viewfinder: the darkroom getting ready across the restart (v0.37.0), built as Relaunch builds it
+        s.width = W; s.battery = 82;
+        s.mode = UiState.DARKROOM; s.devTotal = 3; s.devPreparing = true;
+        s.film = new UiState.Film(); s.film.title = cuban.title; s.film.iso = cuban.iso; s.film.accent = cuban.accent; s.film.body = cuban.body; s.film.band = cuban.band;
+        render(s, fonts, out, "8v-darkroom-getting-ready");
+
         s = state();
         s.mode = UiState.SHEET; s.film = cuban; s.rollNumber = 3; s.thumbs = thumbs; s.sheetSel = 6;
         render(s, fonts, out, "9-sheet");

@@ -69,9 +69,12 @@ final class FilmCore {
     static native String lastError();
 
     /**
-     * A live frame (argb, w x h) for the 16-bit screen: cropped to ow:oh from the centre, stretched to ow x oh
-     * and ordered-dithered to 4 bits a channel, into out as 16-bit pixels, each channel's nibble at
-     * shifts[0..3] (red, green, blue, alpha). 0, or -1.
+     * A live frame (argb, w x h) for the 16-bit screen: cropped from the centre to aspect1000/1000 (0: ow:oh),
+     * stretched to ow x oh (the panel's pixels aren't square) and ordered-dithered to 4 bits a channel, into
+     * out as 16-bit pixels, each channel's nibble at shifts[0..3] (red, green, blue, alpha). 0, or -1.
      */
-    static native int to4444(int[] argb, int w, int h, short[] out, int ow, int oh, int[] shifts);
+    static native int to4444(int[] argb, int w, int h, short[] out, int ow, int oh, int aspect1000, int[] shifts);
+
+    /** The calling thread onto one core of the camera's four (Latent starts on core 3 only). 0, or -1 (lastError). */
+    static native int pinCore(int core);
 }

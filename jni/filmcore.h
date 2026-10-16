@@ -63,10 +63,15 @@ int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, 
  * weight agreeing within a degree); out[2]: how many 8x8 blocks agree. 0 on success. */
 int fl_level(const unsigned char *rgb, int w, int h, int *out);
 
-/* A live frame (argb, w x h) for a 16-bit screen: cropped to ow:oh from the centre, stretched to ow x oh
- * (bilinear), and ordered-dithered (4x4 Bayer) down to 4 bits a channel, as 16-bit pixels with each
- * channel's nibble at shifts[0..3] (red, green, blue, alpha; fully opaque). Returns 0, or -1 on bad sizes. */
-int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int ow, int oh, const int *shifts);
+/* A live frame (argb, w x h) for a 16-bit screen: cropped from the centre to aspect1000/1000 (width over
+ * height; 0 = ow:oh), stretched to ow x oh (bilinear: the screen's pixels needn't be square), and
+ * ordered-dithered (4x4 Bayer) down to 4 bits a channel, as 16-bit pixels with each channel's nibble at
+ * shifts[0..3] (red, green, blue, alpha; fully opaque). Returns 0, or -1 on bad sizes. */
+int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int ow, int oh, int aspect1000, const int *shifts);
+
+/* The calling thread onto one core (Latent is started on core 3 only, which the screen shares).
+ * Returns 0, or -1 (errno in *err_no). */
+int fl_pin_core(int core, int *err_no);
 
 /* Row access for fl_develop_uyvy: fill (write == 0) or store (write == 1) row y as packed UYVY,
  * w * 2 bytes. Returns 0 on success. */

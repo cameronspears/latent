@@ -162,6 +162,13 @@ public class MainActivity extends Activity {
         card = Environment.getExternalStorageDirectory();
         if (getIntent().getLongExtra(Relaunch.EXTRA_AT, 0) > 0) {
             developNow = "develop".equals(getIntent().getStringExtra(Relaunch.EXTRA_WHY));
+            if (developNow) {   // the same red darkroom Relaunch showed, until the develop starts
+                preparing = true;
+                prepared = getIntent();
+                if (battery < 0) battery = prepared.getIntExtra(Relaunch.EXTRA_BATTERY, -1);   // until it's read again
+                mode = DARKROOM;
+                dim(true);
+            }
             relaunched();
         }
     }
@@ -370,8 +377,9 @@ public class MainActivity extends Activity {
                         boolean back = backFromCamera;
                         backFromCamera = false;
                         // finished while you were out (or a develop was left part-way): straight to the darkroom
-                        if (back && current != null && developing == null && mode == BACK && wantsDeveloping(current)) startDevelop(current);
+                        if (back && current != null && developing == null && (mode == BACK || preparing) && wantsDeveloping(current)) startDevelop(current);
                         else developWaiting();
+                        if (preparing && developing == null && !restarting) unprepare();   // nothing to develop after all
                         screen.invalidate();
                     }
                 });
@@ -863,6 +871,7 @@ public class MainActivity extends Activity {
                 devLog("viewfinder: " + what);
                 restarting = false;
                 relaunchWhenClosed = false;
+                unprepare();
                 status = what;   // stays up: nothing else can happen until the camera is switched off
                 ui.removeCallbacks(clearToast);
                 screen.invalidate();
@@ -918,6 +927,12 @@ public class MainActivity extends Activity {
     private final Runnable closeWhenFinished = new Runnable() { public void run() { hideViewfinder(); } };
 
     private boolean restarting, relaunchWhenClosed;
+    /**
+     * The darkroom getting ready: from MENU in the viewfinder, across the restart (Relaunch draws the same),
+     * until the develop starts in the new process. One red screen throughout, as a darkroom door closing.
+     */
+    private boolean preparing;
+    private Intent prepared;   // what it shows: the film and how many frames (Relaunch's extras)
 
     /**
      * Goal 6: pictures shot here need the darkroom, and the darkroom needs Sony's image memory, which
@@ -929,11 +944,29 @@ public class MainActivity extends Activity {
         if (restarting) return;
         restarting = true;
         devLog("restarting to develop: " + why);
-        toast("Developing\u2026");
-        mode = BACK;
+        prepared = new Intent();
+        Stock st = current == null ? null : Stock.byId(stocks, current.stock);
+        if (st != null) {
+            prepared.putExtra(Relaunch.EXTRA_FILM, st.title).putExtra(Relaunch.EXTRA_ISO, st.iso).putExtra(Relaunch.EXTRA_ACCENT, st.accent)
+                    .putExtra(Relaunch.EXTRA_BODY, st.body).putExtra(Relaunch.EXTRA_BAND, st.band);
+        }
+        prepared.putExtra(Relaunch.EXTRA_TOTAL, Math.max(1, Math.max(vfWaiting, vf != null ? vf.shots : 0)));
+        prepared.putExtra(Relaunch.EXTRA_BATTERY, battery);
+        preparing = true;
+        toast("");
+        mode = DARKROOM;
+        dim(true);
         screen.invalidate();
         if (vf != null) { relaunchWhenClosed = true; vf.close(null); }
         else relaunch();
+    }
+
+    /** The darkroom wasn't reached after all (the restart failed, or nothing was left to develop): the camera back. */
+    private void unprepare() {
+        if (!preparing) return;
+        preparing = false;
+        if (mode == DARKROOM && developing == null) { mode = BACK; dim(false); }
+        screen.invalidate();
     }
 
     /** Relaunch in front; this process then ends in onPause (the camera was opened here). */
@@ -943,11 +976,13 @@ public class MainActivity extends Activity {
             i.putExtra(Relaunch.EXTRA_PID, android.os.Process.myPid());
             i.putExtra(Relaunch.EXTRA_AT, SystemClock.uptimeMillis());
             i.putExtra(Relaunch.EXTRA_WHY, "develop");
+            if (prepared != null) i.putExtras(prepared);
             startActivity(i);
             overridePendingTransition(0, 0);
         } catch (Throwable e) {   // stay put: the pictures develop the next time Latent opens
             restarting = false;
             relaunchWhenClosed = false;
+            unprepare();
             devLog("restart: " + Probe.why(e));
         }
     }
@@ -1187,6 +1222,7 @@ public class MainActivity extends Activity {
         devQuiet = quiet;
         quietLeft = r.frames.size() - devDoneAtStart;
         powerSave.hold();
+        preparing = false;
         if (!quiet) {
             mode = DARKROOM;
             toast("");
@@ -1530,7 +1566,7 @@ public class MainActivity extends Activity {
 
     /** Photos develop quietly on these screens; the Lab, the tests, Load film and the darkroom want the camera to themselves. */
     private boolean quietAllowed() {
-        return resumed && !loading && (mode == BACK || mode == LOAD || mode == SHEET || mode == VIEW || mode == SETTINGS);
+        return resumed && !loading && (preparing || mode == BACK || mode == LOAD || mode == SHEET || mode == VIEW || mode == SETTINGS);
     }
 
     private List<File> endlessPrints = new ArrayList<File>();   // the endless roll in the camera: its prints, newest first
@@ -1538,7 +1574,7 @@ public class MainActivity extends Activity {
 
     /** An endless roll's new photos start developing as soon as nothing else needs the camera. */
     private void developWaiting() {
-        if (developing != null || shootPending || shootAfterFrame || !ready || !quietAllowed() || endlessWaiting.isEmpty()) return;
+        if (developing != null || restarting || shootPending || shootAfterFrame || !ready || !quietAllowed() || endlessWaiting.isEmpty()) return;
         // an endless roll develops when you're not about to shoot: a half-press right after opening Latent
         // shoots at once, rather than waiting for a frame in the darkroom (v0.35.0: "finishing up some frames")
         long idle = SystemClock.uptimeMillis() - Math.max(lastPressAt, readyAt);
@@ -2109,7 +2145,8 @@ public class MainActivity extends Activity {
                     if (developing != null && devQuiet) { paused = true; loadAfter = true; shootAfterLoad = true; toast("Finishing a photo…"); }
                     else { loadRoll(); goShoot(); }   // mid-load, it goes once the camera is ready
                 } else if (mode == DARKROOM) {
-                    if (!shootAfterFrame) { paused = true; shootAfterFrame = true; toast("Pausing after this frame, then shooting"); }
+                    if (preparing) { /* a moment: the darkroom is getting ready */ }
+                    else if (!shootAfterFrame) { paused = true; shootAfterFrame = true; toast("Pausing after this frame, then shooting"); }
                 } else goShoot();
             }
             shutterDown = false;
@@ -2121,7 +2158,7 @@ public class MainActivity extends Activity {
             case BACK: openSettings(); break;
             case LOAD: if (loading) break; if (current != null) mode = BACK; else openSettings(); break;   // MENU: back to the roll, or the menu
             case SETTINGS: goHome(); break;
-            case DARKROOM: paused = true; toast("Pausing after this frame"); break;
+            case DARKROOM: if (!preparing) { paused = true; toast("Pausing after this frame"); } break;
             case VIEW: mode = SHEET; break;
             case LAB: if (!labBusy) { if (fromSettings) mode = SETTINGS; else goHome(); developWaiting(); } break;
             case PROBE:
@@ -2199,6 +2236,20 @@ public class MainActivity extends Activity {
                 break;
             case DARKROOM: {
                 Roll r = developing;
+                if (r == null && preparing && prepared != null) {   // getting ready: the film and the frames to come
+                    s.devPreparing = true;
+                    s.devTotal = Math.max(1, prepared.getIntExtra(Relaunch.EXTRA_TOTAL, 1));
+                    String title = prepared.getStringExtra(Relaunch.EXTRA_FILM);
+                    if (title != null) {
+                        s.film = new UiState.Film();
+                        s.film.title = title;
+                        s.film.iso = prepared.getStringExtra(Relaunch.EXTRA_ISO) == null ? "" : prepared.getStringExtra(Relaunch.EXTRA_ISO);
+                        s.film.accent = prepared.getIntExtra(Relaunch.EXTRA_ACCENT, Ui.RED);
+                        s.film.body = prepared.getIntExtra(Relaunch.EXTRA_BODY, 0);
+                        s.film.band = prepared.getIntExtra(Relaunch.EXTRA_BAND, 0);
+                    }
+                    break;
+                }
                 if (r == null) break;
                 Stock st = Stock.byId(stocks, r.stock);
                 s.film = st == null ? null : film(st);
@@ -2298,12 +2349,14 @@ public class MainActivity extends Activity {
 
         @Override
         protected void onDraw(Canvas c) {
+            long t = SystemClock.uptimeMillis();
             c.save();
             c.scale(getWidth() / logicalWidth, getHeight() / 480f);
             gfx.begin(c);
             Ui.draw(gfx, state());
             c.restore();
             drawn();
+            if (mode == PHOTO && vf != null) vf.drew(SystemClock.uptimeMillis() - t);
         }
     }
 }

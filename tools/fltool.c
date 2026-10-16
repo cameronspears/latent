@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
             static const int sh[4] = { 12, 8, 4, 0 };
             unsigned short *o16 = malloc(sizeof(unsigned short) * 540 * 480);
             double t2 = now();
-            if (!o16 || fl_to4444(px, info[0], info[1], o16, 540, 480, sh) != 0) { fprintf(stderr, "error: 16-bit frame\n"); return 1; }
+            if (!o16 || fl_to4444(px, info[0], info[1], o16, 540, 480, 1500, sh) != 0) { fprintf(stderr, "error: 16-bit frame\n"); return 1; }
             fprintf(stderr, "16-bit 540x480 in %.1f ms\n", (now() - t2) * 1000);
             free(o16);
         }

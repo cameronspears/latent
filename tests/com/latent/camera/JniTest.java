@@ -52,6 +52,23 @@ public class JniTest {
         check(rc == 0 && lp[FilmCore.L_W] == 320 && lp[FilmCore.L_H] <= 240 && lp[FilmCore.L_H] >= 200, "live frame fitted to " + lp[FilmCore.L_W] + "x" + lp[FilmCore.L_H] + " " + FilmCore.lastError());
         check(sum == lp[FilmCore.L_W] * lp[FilmCore.L_H] && (live[0] >>> 24) == 0xFF, "its histogram counts every pixel; pixels opaque");
         check(lp[FilmCore.L_CONFIDENCE] >= 0 && lp[FilmCore.L_CONFIDENCE] <= 100, "level read: " + lp[FilmCore.L_ANGLE] / 100.0 + " degrees, confidence " + lp[FilmCore.L_CONFIDENCE]);
+        {   // the film is kept between frames (v0.37.0): another film changes the look, and coming back is exact
+            String other = new java.io.File(new java.io.File(lut).getParentFile(), "TRIX400.CUB").getPath();
+            int[] again = new int[320 * 240], mono = new int[320 * 240], back = new int[320 * 240];
+            FilmCore.live(jpeg, jpeg.length, lut, p, again, 320, 240, lp);
+            check(java.util.Arrays.equals(live, again), "the same film twice: the same frame");
+            check(FilmCore.live(jpeg, jpeg.length, other, p, mono, 320, 240, lp) == 0 && !java.util.Arrays.equals(live, mono), "another film: another look");
+            int[] hp = p.clone();
+            hp[FilmCore.HIGHLIGHT] = 3;
+            int[] bright = new int[320 * 240];
+            FilmCore.live(jpeg, jpeg.length, lut, hp, bright, 320, 240, lp);
+            check(!java.util.Arrays.equals(live, bright), "the film's highlight setting changes the look");
+            FilmCore.live(jpeg, jpeg.length, lut, p, back, 320, 240, lp);
+            check(java.util.Arrays.equals(live, back), "back to the first film: exactly as before");
+            check(FilmCore.live(jpeg, jpeg.length, lut + ".missing", p, back, 320, 240, lp) != 0, "a missing film refused: " + FilmCore.lastError());
+            FilmCore.live(jpeg, jpeg.length, lut, p, back, 320, 240, lp);
+            check(java.util.Arrays.equals(live, back), "and the first film still right after it");
+        }
         rc = FilmCore.live(jpeg, jpeg.length / 3, lut, p, live, 320, 240, lp);
         check(true, "a cut-off frame doesn't crash (rc " + rc + ")");
         byte[] junk = new byte[2048];
@@ -64,7 +81,7 @@ public class JniTest {
             for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) argb[y * w + x] = 0xFF000000 | (x < 160 ? 0x808080 : 0xFF0000 | (y * 255 / (h - 1)) << 8);
             short[] o = new short[ow * oh];
             int[] sh = { 12, 8, 4, 0 };
-            check(FilmCore.to4444(argb, w, h, o, ow, oh, sh) == 0, "16-bit frame made: " + FilmCore.lastError());
+            check(FilmCore.to4444(argb, w, h, o, ow, oh, 1500, sh) == 0, "16-bit frame made: " + FilmCore.lastError());
             int sevens = 0, eights = 0, other = 0;
             for (int y = 100; y < 140; y++) for (int x = 20; x < 100; x++) {   // the grey half: 128 lies between 7 (119) and 8 (136)
                 int v = o[y * ow + x] & 0xFFFF, r = v >> 12 & 15, g = v >> 8 & 15, bl = v >> 4 & 15, al = v & 15;
@@ -73,8 +90,13 @@ public class JniTest {
             check(other == 0 && sevens > 0 && eights > 0, "mid-grey dithers between the two nearest levels (" + sevens + " 7s, " + eights + " 8s, " + other + " other)");
             int right = o[240 * ow + 500] & 0xFFFF;
             check((right >> 12 & 15) == 15 && (right & 15) == 15, "red lands in the red nibble, opaque");
-            check(FilmCore.to4444(argb, w, h, new short[100], ow, oh, sh) != 0, "a small output rejected");
-            check(FilmCore.to4444(argb, w, h, o, ow, oh, new int[] { 13, 8, 4, 0 }) != 0, "a bad channel shift rejected");
+            check(FilmCore.to4444(argb, w, h, new short[100], ow, oh, 1500, sh) != 0, "a small output rejected");
+            check(FilmCore.to4444(argb, w, h, o, ow, oh, 1500, new int[] { 13, 8, 4, 0 }) != 0, "a bad channel shift rejected");
+            // 3:2 into the 540 x 480 the screen's 720 x 480 design space is: nothing of the frame's width lost
+            int[] edge = new int[w * h];
+            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) edge[y * w + x] = x < 4 ? 0xFFFFFFFF : 0xFF000000;   // a white stripe at the left edge
+            check(FilmCore.to4444(edge, w, h, o, ow, oh, 1500, sh) == 0 && (o[240 * ow] >> 12 & 15) == 15, "a 3:2 crop keeps the frame's left edge");
+            check(FilmCore.to4444(edge, w, h, o, ow, oh, 0, sh) == 0 && (o[240 * ow] >> 12 & 15) == 0, "a crop to the pixels' own shape loses it (v0.36.1's bug)");
         }
         FilmCore.setVariant(1);
         FilmCore.setVariant(0);

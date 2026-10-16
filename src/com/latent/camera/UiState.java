@@ -79,6 +79,7 @@ final class UiState {
     float devFramePct;                 // the frame in hand, 0..1
     String devLeft = "";
     boolean paused;
+    boolean devPreparing;              // the darkroom getting ready (the camera given back, Latent starting again)
     Object devPrint;                   // the frame being developed (its camera thumbnail), or null
     List<Object> devStrip = new ArrayList<Object>();   // developed frames so far, in order
 

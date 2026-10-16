@@ -1346,21 +1346,56 @@ int fl_level(const unsigned char *rgb, int w, int h, int *out) {
     return 0;
 }
 
-int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int ow, int oh, const int *shifts) {
+/* The 4-bit value of 0..255 with an ordered-dither threshold t (0..15 of a 4-bit step): [t][v]. A table,
+ * as the camera's core has no divide instruction (three a pixel, 260K pixels a frame, were half the look). */
+static unsigned char g_q4[16][256];
+static int g_q4_ready;
+
+static void q4_init(void) {
+    int t, v;
+    if (g_q4_ready) return;
+    for (t = 0; t < 16; t++) {
+        int off = (t * 255 + 128) / 16;
+        for (v = 0; v < 256; v++) { int q = (v * 15 + off) / 255; g_q4[t][v] = (unsigned char)(q > 15 ? 15 : q); }
+    }
+    g_q4_ready = 1;
+}
+
+/* One source row stretched across: per output column and channel, the two neighbours blended (0..65280). */
+static void stretch_row(const unsigned int *r, const int *xi, const int *xw, int ow, unsigned short *h) {
+    int x;
+    for (x = 0; x < ow; x++, h += 3) {
+        unsigned int a = r[xi[x]], b = r[xi[x] + 1];
+        int wx = xw[x], ux = 256 - wx;
+        h[0] = (unsigned short)(((a >> 16) & 255) * ux + ((b >> 16) & 255) * wx);
+        h[1] = (unsigned short)(((a >> 8) & 255) * ux + ((b >> 8) & 255) * wx);
+        h[2] = (unsigned short)((a & 255) * ux + (b & 255) * wx);
+    }
+}
+
+int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int ow, int oh, int aspect1000, const int *shifts) {
     static const unsigned char bayer[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
-    int off[16], x, y, rs, gs, bs, as;
+    int x, y, rs, gs, bs, as, held[2];
     int *xi, *xw;
-    double scale, sw, sh, sx0, sy0;
+    unsigned short *hrow[2], alpha;
+    double sw, sh, sx0, sy0;
     if (!argb || !out || !shifts || w < 2 || h < 2 || ow < 1 || oh < 1 || ow > 4096 || oh > 4096) return -1;
     rs = shifts[0]; gs = shifts[1]; bs = shifts[2]; as = shifts[3];
     if (rs < 0 || rs > 12 || gs < 0 || gs > 12 || bs < 0 || bs > 12 || as < 0 || as > 12) return -1;
-    for (x = 0; x < 16; x++) off[x] = (bayer[x] * 255 + 128) / 16;   /* thresholds, in 1/255 of a 4-bit step */
-    /* the source rectangle that covers ow:oh, centred, in source pixels */
-    scale = (double)ow / w > (double)oh / h ? (double)ow / w : (double)oh / h;
-    sw = ow / scale; sh = oh / scale; sx0 = (w - sw) / 2; sy0 = (h - sh) / 2;
-    xi = (int *)malloc(sizeof(int) * ow * 2);
+    q4_init();
+    alpha = (unsigned short)(15 << as);
+    /* the source rectangle of the wanted shape (aspect1000, else ow:oh), centred, in source pixels */
+    {
+        double want = aspect1000 > 0 ? aspect1000 / 1000.0 : (double)ow / oh;
+        if ((double)w / h > want) { sh = h; sw = h * want; } else { sw = w; sh = w / want; }
+        sx0 = (w - sw) / 2; sy0 = (h - sh) / 2;
+    }
+    xi = (int *)malloc(sizeof(int) * ow * 2 + sizeof(unsigned short) * ow * 6);
     if (!xi) return -1;
     xw = xi + ow;
+    hrow[0] = (unsigned short *)(xw + ow);
+    hrow[1] = hrow[0] + ow * 3;
+    held[0] = held[1] = -1;
     for (x = 0; x < ow; x++) {   /* per column: the left source pixel and its weight (0..256) */
         double fx = sx0 + (x + 0.5) * sw / ow - 0.5;
         int ix = (int)fx;
@@ -1369,52 +1404,85 @@ int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int o
         xi[x] = ix;
         xw[x] = (int)((fx - ix) * 256 + 0.5);
     }
+    /* separable: each source row is stretched across once (the screen has ~2x the rows), then rows blend */
     for (y = 0; y < oh; y++) {
         double fy = sy0 + (y + 0.5) * sh / oh - 0.5;
-        int iy = (int)fy, wy;
-        const unsigned int *r0, *r1;
+        int iy = (int)fy, wy, uy, k;
+        const unsigned short *h0, *h1;
+        const unsigned char *q[4];
         unsigned short *o = out + (size_t)y * ow;
-        const int *od = off + (y & 3) * 4;
         if (fy < 0) { fy = 0; iy = 0; }
         if (iy > h - 2) { iy = h - 2; fy = h - 1; }
         wy = (int)((fy - iy) * 256 + 0.5);
-        r0 = argb + (size_t)iy * w;
-        r1 = r0 + w;
-        for (x = 0; x < ow; x++) {
-            unsigned int a = r0[xi[x]], b = r0[xi[x] + 1], c = r1[xi[x]], d = r1[xi[x] + 1];
-            int wx = xw[x], t = od[x & 3], ch[3], k;
-            for (k = 0; k < 3; k++) {
-                int sft = 16 - 8 * k;
-                int top = (((a >> sft) & 255) * (256 - wx) + ((b >> sft) & 255) * wx);
-                int bot = (((c >> sft) & 255) * (256 - wx) + ((d >> sft) & 255) * wx);
-                int v = (top * (256 - wy) + bot * wy + 32768) >> 16;   /* 0..255 */
-                int q = (v * 15 + t) / 255;
-                ch[k] = q > 15 ? 15 : q;
-            }
-            o[x] = (unsigned short)((ch[0] << rs) | (ch[1] << gs) | (ch[2] << bs) | (15 << as));
+        uy = 256 - wy;
+        if (held[0] != iy) {
+            if (held[1] == iy) {   /* moved down a row: the lower becomes the upper */
+                unsigned short *t = hrow[0]; hrow[0] = hrow[1]; hrow[1] = t;
+                held[0] = iy; held[1] = -1;
+            } else { stretch_row(argb + (size_t)iy * w, xi, xw, ow, hrow[0]); held[0] = iy; }
+        }
+        if (held[1] != iy + 1) { stretch_row(argb + (size_t)(iy + 1) * w, xi, xw, ow, hrow[1]); held[1] = iy + 1; }
+        h0 = hrow[0]; h1 = hrow[1];
+        for (k = 0; k < 4; k++) q[k] = g_q4[bayer[(y & 3) * 4 + k]];
+        for (x = 0; x < ow; x++, h0 += 3, h1 += 3) {
+            const unsigned char *t = q[x & 3];
+            int r = (h0[0] * uy + h1[0] * wy + 32768) >> 16;
+            int g = (h0[1] * uy + h1[1] * wy + 32768) >> 16;
+            int b = (h0[2] * uy + h1[2] * wy + 32768) >> 16;
+            o[x] = (unsigned short)((t[r] << rs) | (t[g] << gs) | (t[b] << bs) | alpha);
         }
     }
     free(xi);
     return 0;
 }
 
+/* The film for live view, kept between frames (a frame used to stat the LUT and build its tables each
+ * time): its own copy of the LUT, so a develop's cache never pulls it away. One look thread only. */
+static struct { char path[512]; int highlight, shadow, ready; fl_look L; } g_live;
+
+static const fl_look *live_look(const char *lut_path, const int *params, char *err, int errlen) {
+    const char *p = lut_path ? lut_path : "";
+    fl_look L;
+    if (g_live.ready && strcmp(g_live.path, p) == 0 && g_live.highlight == params[FL_PARAM_HIGHLIGHT]
+            && g_live.shadow == params[FL_PARAM_SHADOW]) return &g_live.L;
+    if (strlen(p) >= sizeof g_live.path) { set_err(err, errlen, "LUT path too long"); return NULL; }
+    if (look_init(&L, lut_path, params, err, errlen) != 0) return NULL;
+    if (g_live.ready) free(g_live.L.data);
+    g_live.ready = 0;
+    g_live.L = L;
+    g_live.L.data = NULL;
+    if (L.data) {
+        size_t bytes = sizeof(short) * 3 * (size_t)L.n * L.n * L.n;
+        g_live.L.data = (short *)malloc(bytes);
+        if (!g_live.L.data) { look_free(&L); set_err(err, errlen, "out of memory"); return NULL; }
+        memcpy(g_live.L.data, L.data, bytes);
+    }
+    g_live.L.shared = 1;
+    look_free(&L);
+    strcpy(g_live.path, p);
+    g_live.highlight = params[FL_PARAM_HIGHLIGHT];
+    g_live.shadow = params[FL_PARAM_SHADOW];
+    g_live.ready = 1;
+    return &g_live.L;
+}
+
 int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
             unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen) {
     struct jpeg_decompress_struct d;
     struct fl_jerr je;
-    fl_look L;
+    const fl_look *L;
     fl_thumb P;
     unsigned char *volatile row = NULL, *volatile rgb = NULL;
     int ow, oh, i;
 
     memset(&P, 0, sizeof P);
     memset(info, 0, sizeof(int) * FL_LIVE_INFO);
-    if (look_init(&L, lut_path, params, err, errlen) != 0) return -1;
+    if ((L = live_look(lut_path, params, err, errlen)) == NULL) return -1;
     fl_jerr_init(&je);
     d.err = &je.pub;
     if (setjmp(je.jump)) {
         set_err(err, errlen, "%s", je.msg);
-        jpeg_destroy_decompress(&d); free(row); free(rgb); thumb_free(&P); look_free(&L);
+        jpeg_destroy_decompress(&d); free(row); free(rgb); thumb_free(&P);
         return -1;
     }
     jpeg_create_decompress(&d);
@@ -1442,18 +1510,17 @@ int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, 
     ow = P.W;
     oh = P.H;
     rgb = (unsigned char *)malloc((size_t)ow * oh * 3);
-    if (!rgb) { thumb_free(&P); look_free(&L); free(row); set_err(err, errlen, "out of memory"); return -1; }
+    if (!rgb) { thumb_free(&P); free(row); set_err(err, errlen, "out of memory"); return -1; }
     thumb_rgb(&P, rgb);
     /* the level and the histogram read the picture as it comes from the camera, before the look */
     fl_level(rgb, ow, oh, info + 2);
     for (i = 0; i < ow * oh; i++) info[5 + ((rgb[i * 3] * 77 + rgb[i * 3 + 1] * 150 + rgb[i * 3 + 2] * 29) >> 10)]++;
-    look_row(&L, &(fl_grain){ 0 }, rgb, ow * oh, 0);
+    look_row(L, &(fl_grain){ 0 }, rgb, ow * oh, 0);
     for (i = 0; i < ow * oh; i++) argb[i] = to_argb(rgb + i * 3);
     info[0] = ow;
     info[1] = oh;
     free(row); free(rgb);
     thumb_free(&P);
-    look_free(&L);
     return 0;
 }
 
@@ -2064,6 +2131,21 @@ static int thread_cpu(int tid) {
 static int my_tid(void) {
 #ifdef __linux__
     return (int)syscall(__NR_gettid);
+#else
+    return 0;
+#endif
+}
+
+int fl_pin_core(int core, int *err_no) {
+    *err_no = 0;
+    if (core < 0 || core > 31) { *err_no = EINVAL; return -1; }
+#ifdef __linux__
+    {
+        unsigned long want = 1UL << core, got = 0;
+        if (syscall(__NR_sched_setaffinity, my_tid(), sizeof want, &want) != 0) { *err_no = errno; return -1; }
+        if (syscall(__NR_sched_getaffinity, my_tid(), sizeof got, &got) < 0 || got != want) { *err_no = EPERM; return -1; }
+    }
+    return 0;
 #else
     return 0;
 #endif

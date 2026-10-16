@@ -1,6 +1,7 @@
 /* JNI glue between com.latent.camera.FilmCore and filmcore.c. Calls are serialised by the Java
  * side (one worker thread), so the shared error buffer is safe. */
 #include <jni.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "filmcore.h"
@@ -116,8 +117,16 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_live(JNIEnv *env, jclass 
     return rc;
 }
 
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_pinCore(JNIEnv *env, jclass cls, jint core) {
+    int e = 0;
+    (void)env; (void)cls;
+    if (fl_pin_core(core, &e) == 0) return 0;
+    snprintf(g_err, sizeof g_err, "core %d refused (errno %d)", core, e);
+    return -1;
+}
+
 JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_to4444(JNIEnv *env, jclass cls, jintArray jargb, jint w, jint h,
-        jshortArray jout, jint ow, jint oh, jintArray jshifts) {
+        jshortArray jout, jint ow, jint oh, jint aspect1000, jintArray jshifts) {
     jint *argb;
     jshort *out;
     int shifts[4], rc;
@@ -131,7 +140,7 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_to4444(JNIEnv *env, jclas
     (*env)->GetIntArrayRegion(env, jshifts, 0, 4, (jint *)shifts);
     argb = (*env)->GetIntArrayElements(env, jargb, NULL);
     out = (*env)->GetShortArrayElements(env, jout, NULL);
-    rc = fl_to4444((const unsigned int *)argb, w, h, (unsigned short *)out, ow, oh, shifts);
+    rc = fl_to4444((const unsigned int *)argb, w, h, (unsigned short *)out, ow, oh, aspect1000, shifts);
     (*env)->ReleaseShortArrayElements(env, jout, out, 0);
     (*env)->ReleaseIntArrayElements(env, jargb, argb, JNI_ABORT);
     if (rc != 0) strcpy(g_err, "bad 16-bit frame sizes");

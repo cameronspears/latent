@@ -602,13 +602,13 @@ final class Ui {
         // whole roll: a bar that always moves, and an honest time estimate
         g.roundRect(L, 318, R - L, 4, 2, RED3);
         g.roundRect(L, 318, Math.max(4, (R - L) * Math.min(1f, s.devProgress)), 4, 2, RED);
-        String line = s.paused ? "Pausing after this frame" : s.devLeft;
+        String line = s.devPreparing ? "Getting the darkroom ready" : s.paused ? "Pausing after this frame" : s.devLeft;
         g.text(line, L, 356, Gfx.REGULAR, 20, RED2, Gfx.LEFT, 0);
-        g.text(Math.round(s.devProgress * 100) + "%", R, 356, Gfx.MEDIUM, 20, RED2, Gfx.RIGHT, 0);
+        if (!s.devPreparing) g.text(Math.round(s.devProgress * 100) + "%", R, 356, Gfx.MEDIUM, 20, RED2, Gfx.RIGHT, 0);
 
         // the contact strip: developed frames drop in, the one in the tray is outlined
         int slots = Math.min(s.devTotal, 12), first = Math.max(0, Math.min(s.devFrame - slots / 2, s.devTotal - slots));
-        float sh = 34, sw = 51, gap = slots > 1 ? (R - L - slots * sw) / (slots - 1) : 0;   // spread across the width
+        float sh = 34, sw = 51, gap = slots > 1 ? Math.min(14, (R - L - slots * sw) / (slots - 1)) : 0;   // a strip: spread up to the width
         for (int k = 0; k < slots; k++) {
             int i = first + k;
             float x = L + k * (sw + gap), y = 384;
@@ -617,7 +617,7 @@ final class Ui {
             if (i == s.devFrame) g.strokeRoundRect(x - 2, y - 2, sw + 4, sh + 4, 2, 1.5f, RED);
         }
         g.text("Safe to set the camera down", L, FOOT + 12, Gfx.REGULAR, 16, RED4, Gfx.LEFT, 0);
-        menuHint(g, "Pause", RED4, R, FOOT + 12);
+        if (!s.devPreparing) menuHint(g, "Pause", RED4, R, FOOT + 12);
     }
 
     // ------------------------------------------------------------------------------ contact sheet
