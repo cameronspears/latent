@@ -140,7 +140,7 @@ void fl_set_variant(int v);
  * Blocks are read and sent in order, top to bottom; a buffer is only read into after its block was sent. */
 typedef unsigned char *(*fl_block_get)(void *ctx, int y, int buf, int *n, int *stride);
 typedef int (*fl_block_put)(void *ctx, int y, int n, int buf);
-/* The look a block at a time; params[FL_PARAM_THREADS] 1..3 = this core plus helpers on cores 1 and 2. */
+/* The look a block at a time; params[FL_PARAM_THREADS] 1..4 = this core plus helpers on cores 1, 2 and 0. */
 int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_block_get get, fl_block_put put, void *ctx,
                       fl_progress_fn progress, void *pctx, char *err, int errlen);
 /* .cube rows read by Latent's own exact decimal reader (1) or sscanf (0, the default). */

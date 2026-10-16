@@ -507,7 +507,8 @@ public class MainActivity extends Activity {
 
     /** What the chosen row does, in a line at the foot of Settings. */
     private String settingsFooter(String action) {
-        if (action.equals("cores")) return prefs.getBoolean("multicoreOk", false) ? "Develops on cores 1 and 2 as well. Core 0 is left to the camera." : "Run the Speed test first: it checks the other cores.";
+        if (action.equals("cores")) return !prefs.getBoolean("multicoreOk", false) ? "Run the Speed test first: it checks the other cores."
+                : prefs.getBoolean(DevelopTest.P_CORE0, false) ? "Develops on cores 1, 2 and 0 as well, below the camera's own work." : "Develops on cores 1 and 2 as well. Core 0 is left to the camera.";
         if (action.equals("neutral")) return "Every look starts from the same picture. Your settings come back after.";
         if (action.equals("viewfinder")) return viewfinderOn() ? "Shoot stays in Latent. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
         if (action.equals("liveLook")) return liveLook() ? "Live view shows the film, with the level. Turn it off for the camera's own view."
@@ -628,9 +629,11 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** Threads for the look: 3 (Latent's core plus helpers on cores 1 and 2) once the Speed test has checked them, unless switched off. */
+    /** Threads for the look: 3 (Latent's core plus helpers on cores 1 and 2) once the Speed test has checked them, 4 (core 0 too) once the Develop test chose it, unless switched off. */
     private int developCores() {
-        return prefs.getBoolean("multicoreOk", false) ? Math.max(1, Math.min(3, prefs.getInt("cores", 3))) : 1;
+        if (!prefs.getBoolean("multicoreOk", false)) return 1;
+        int n = Math.max(1, Math.min(3, prefs.getInt("cores", 3)));
+        return n == 3 && prefs.getBoolean(DevelopTest.P_CORE0, false) ? 4 : n;   // core 0 as well, once the Develop test chose it
     }
 
     // camera roll test (phase 1)
@@ -753,7 +756,7 @@ public class MainActivity extends Activity {
         worker.execute(new Runnable() {
             public void run() {
                 if (devTest) {
-                    new DevelopTest(MainActivity.this, card, stock, prefs, developCores(), versionName(), listener).run();
+                    new DevelopTest(MainActivity.this, card, stock, prefs, versionName(), listener).run();
                 } else if (speedTest) {
                     new SpeedTest(card, stock, prefs, listener).run();
                 } else if (settingsCheck) {

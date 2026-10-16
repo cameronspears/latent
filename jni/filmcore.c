@@ -2900,10 +2900,12 @@ done:
 
 /*
  * The cores helpers may use, in order. Core 3 is Latent's own (where the camera starts it); core 0
- * carries most of the camera's own work, so it is left alone.
+ * carries most of the camera's own work, so it is only asked for with params[FL_PARAM_THREADS] = 4,
+ * once the Develop test has shown it helps (v0.41.0); at HELPER_NICE the camera's own work still
+ * comes first there.
  */
-static const int HELPER_CORES[] = { 1, 2 };
-#define MAX_HELPERS 2
+static const int HELPER_CORES[] = { 1, 2, 0 };
+#define MAX_HELPERS 3
 #define HELPER_NICE 5   /* below the camera's own work: anything it needs on those cores comes first */
 
 typedef struct {
@@ -2981,7 +2983,7 @@ static void *pool_helper(void *arg) {
 /*
  * The look over the whole picture, a block of rows at a time: get hands over the next block (read
  * once, changed in place), put sends it on. params[FL_PARAM_THREADS] = 1 develops on this core only;
- * 2 or 3 add helpers pinned to cores 1 (and 2) at lower priority. A helper that can't have its core
+ * 2, 3 or 4 add helpers pinned to cores 1, 2 and 0 in turn, at lower priority. A helper that can't have its core
  * just doesn't join: the picture is the same either way, row for row.
  */
 int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_block_get get, fl_block_put put, void *ctx,

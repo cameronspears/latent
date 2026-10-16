@@ -802,9 +802,9 @@ final class Ui {
     static final String SPEED_FOOTER = "About a minute. Nothing on the card changes; results go to LATENT/SPEED.TXT.";
 
     static final String[] DEVTEST_PLAN = {
-            "Reads every film file on the card twice, the usual way and Latent's own faster way. Each row of numbers must come out exactly the same.",
-            "Decodes your newest photo and develops it six times as the darkroom does, each time reading its film from the card, the two ways taking turns. Every picture byte is checked.",
-            "Saves nothing: no new photo, the original only read. If the faster way is faster and identical, the darkroom uses it from now on.",
+            "Decodes your newest photo in hardware and makes an output image, exactly as the darkroom does.",
+            "Develops it six times, taking turns: on cores 1, 2 and 3 as today, and with core 0 helping too, below the camera's own work there. Every picture byte is checked.",
+            "Saves nothing: no new photo, the original only read. If core 0 makes it faster and identical, the darkroom uses it from now on.",
     };
     static final String DEVTEST_FOOTER = "About a minute. If the camera hangs, remove the battery. Log: LATENT/DEVTEST.TXT.";
 
