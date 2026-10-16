@@ -92,12 +92,29 @@ public class RenderScreens {
         s.rowSel = 13; s.footer = "Latent 0.19.0";
         render(s, fonts, out, "6b-menu-scrolled");
 
-        // Photo mode, for in-app shooting (not wired yet)
-        s = state();
-        s.mode = UiState.PHOTO; s.looks = six; s.lookSel = 2; s.liveImage = img(samples, "STREET-CLASSNEG.png"); s.developing = 2;
-        render(s, fonts, out, "7-photo");
-        s.lookSel = 4; s.liveImage = img(samples, "HOUSE-TRIX400.png"); s.lookShown = true; s.developing = 0;
-        render(s, fonts, out, "7b-photo-look-change");
+        // ---- the viewfinder (in-app shooting): every focus state, a look change, a shot developing
+        classic.tagline = "Muted, hard, nostalgic.";
+        int[] hist = new int[64];
+        for (int i = 0; i < 64; i++) hist[i] = (int) (30 + 100 * Math.exp(-Math.pow((i - 22) / 9.0, 2)) + 60 * Math.exp(-Math.pow((i - 47) / 6.0, 2)));
+        s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
+        render(s, fonts, out, "8-vf-ready");
+        s.afState = 1; s.afLamp = true; s.shutter = "1/60"; s.aperture = "F3.5"; s.iso = "3200"; s.isoAuto = true;
+        render(s, fonts, out, "8b-vf-focusing");
+        s.afState = 2; s.afLamp = false;
+        s.afAreas = new float[][] { { 0.44f, 0.40f, 0.05f, 0.075f }, { 0.50f, 0.40f, 0.05f, 0.075f }, { 0.44f, 0.48f, 0.05f, 0.075f }, { 0.56f, 0.52f, 0.05f, 0.075f } };
+        render(s, fonts, out, "8c-vf-locked");
+        s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
+        s.afState = 3; s.afNote = "Too dark to focus"; s.shutter = "1/30"; s.aperture = "F3.5"; s.iso = "6400"; s.isoAuto = true; s.ev = -2; s.afLamp = true;
+        render(s, fonts, out, "8d-vf-cant-focus");
+        s = vf(six, 4, img(samples, "HOUSE-TRIX400.png"));
+        s.lookShown = true;
+        render(s, fonts, out, "8e-vf-look-trix");
+        s = vf(six, 4, img(samples, "HOUSE-TRIX400.png"));
+        s.exposed = 10; s.printImage = img(samples, "PEOPLE-TRIX400.png"); s.printProgress = 0.45f; s.developing = 2; s.grid = true; s.hist = hist;
+        render(s, fonts, out, "8f-vf-print-developing");
+        s = vf(six, 5, img(samples, "PEOPLE-PARTY800.png"));
+        s.endless = true; s.exposed = 37; s.flash = true; s.printImage = img(samples, "STREET-PARTY800.png"); s.printProgress = 0.1f; s.developing = 1;
+        render(s, fonts, out, "8g-vf-endless-shot");
 
         s = state();
         s.mode = UiState.DARKROOM; s.film = cuban; s.devFrame = 4; s.devTotal = 12; s.devDone = 4;
@@ -161,6 +178,15 @@ public class RenderScreens {
         s.labValues = new String[] { "3 of 212", "Portra 400", "-1", "-1", "4", "Fine", "Whole", "" };
         s.labRow = 1;
         render(s, fonts, out, "12-lab");
+    }
+
+    /** A viewfinder: these looks, this one chosen, live view standing in as a still. */
+    static UiState vf(List<UiState.Film> looks, int sel, Object live) {
+        UiState s = state();
+        s.mode = UiState.PHOTO; s.looks = looks; s.lookSel = sel; s.liveImage = live; s.lookLive = true;
+        s.exposed = 9; s.length = 24; s.battery = 74; s.shotsLeft = 1204; s.afMode = "AF-S"; s.afArea = "Centre";
+        s.shutter = "1/125"; s.aperture = "F5.6"; s.iso = "400"; s.isoAuto = true;
+        return s;
     }
 
     static UiState state() {

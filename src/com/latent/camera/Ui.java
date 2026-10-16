@@ -101,67 +101,246 @@ final class Ui {
         g.text(d, x - 12, FOOT - 1, Gfx.MEDIUM, 16, INK, Gfx.RIGHT, 0);
     }
 
-    /** Film | Photo, like the X Half's two ways of shooting: a quiet capsule at the top centre. UP / DOWN switch. */
-    private static void modeSwitch(Gfx g, UiState s, int on, int accent) {
-        String[] names = { "Film", "Photo" };
-        float w0 = g.textWidth(names[0], Gfx.MEDIUM, 15, 0) + 28, w1 = g.textWidth(names[1], Gfx.MEDIUM, 15, 0) + 28;
-        float x = s.width / 2 - (w0 + w1 + 6) / 2, y = TOP - 21;
-        g.roundRect(x, y, w0 + w1 + 6, 30, 15, on == 1 ? 0x99000000 : SURFACE);
-        float sx = on == 0 ? x + 3 : x + 3 + w0;
-        g.roundRect(sx, y + 3, on == 0 ? w0 : w1, 24, 12, 0xFF2C2A27);
-        g.text(names[0], x + 3 + w0 / 2, y + 20, Gfx.MEDIUM, 15, on == 0 ? INK : INK2, Gfx.CENTER, 0);
-        g.text(names[1], x + 3 + w0 + w1 / 2, y + 20, Gfx.MEDIUM, 15, on == 1 ? INK : INK2, Gfx.CENTER, 0);
-    }
+    // ------------------------------------------------------------------------------ the viewfinder
 
-    // ------------------------------------------------------------------------------ photo mode
+    static final int GREEN = 0xFF5BD68E, AMBER = 0xFFF2A63C;
 
     /**
-     * Photo: the camera's live view with the chosen look on it, nothing else in the way. The look's name
-     * and ISO sit top left; turning the wheel changes look, and its name shows large for a moment, the
-     * way a Fuji film-simulation dial answers. Photos develop in the background as you shoot.
+     * The viewfinder: Latent's own live view, with a film look on it, and the camera's information drawn
+     * the way a Fuji or a Leica shows it: quiet until it matters. The picture is 3:2, full height, so the
+     * 16:9 panel leaves a black bar each side; the steady details live there, out of the picture.
+     *
+     * Focus is the bracket in the middle. White while ready; tightening while it searches (with the AF
+     * light noted when it's on); green and snapped tight on a lock, with the focused areas marked and a
+     * green dot by the exposure (as Fuji confirms focus); amber when it can't lock, saying why.
+     * Exposure brightens on a half-press, as a camera's does. After a shot the print develops in the
+     * corner, from latent to finished.
      */
     private static void photo(Gfx g, UiState s) {
-        float R = right(s);
-        if (s.liveImage != null) {   // a 3:2 picture on the 16:9 panel: full height, black at the sides, as live view is
-            float iw = H * 1.5f;
-            g.image(s.liveImage, (s.width - iw) / 2, 0, iw, H, false);
-        } else if (s.liveCaption.length() == 0 && !s.loading) {   // nothing shot yet to preview on
-            g.text("Shoot a photo", s.width / 2, 236, Gfx.DISPLAY, 54, INK, Gfx.CENTER, -10);
-            g.text("Looks preview on your latest one.", s.width / 2, 276, Gfx.REGULAR, 20, INK2, Gfx.CENTER, 0);
+        float iw = H * 1.5f, ix = (s.width - iw) / 2, ir = ix + iw;
+        UiState.Film f = s.looks.isEmpty() ? null : s.looks.get(Math.min(s.lookSel, s.looks.size() - 1));
+        int accent = f != null ? f.accent : INK;
+        if (s.liveImage != null) g.image(s.liveImage, ix, 0, iw, H, false);
+        else g.rect(ix, 0, iw, H, 0xFF0B0B0A);
+        if (s.flash) { g.rect(ix, 0, iw, H, 0xD0000000); }   // the shutter: a blink
+
+        // soft fades top and bottom, so the type reads over any picture
+        for (int y = 0; y < 92; y += 2) g.rect(ix, y, iw, 2, ((int) (0x78 * (1 - y / 92f) * (1 - y / 92f))) << 24);
+        for (int y = 352; y < H; y += 2) { float t = (y - 352) / 128f; g.rect(ix, y, iw, 2, ((int) (0xB8 * t * t)) << 24); }
+        if (s.grid) {   // thirds
+            for (int i = 1; i < 3; i++) {
+                g.rect(ix + iw * i / 3, 0, 1, H, 0x38FFFFFF);
+                g.rect(ix, H * i / 3, iw, 1, 0x38FFFFFF);
+            }
         }
-        // labels float on small dark capsules, so they read over any picture
-        int glass = 0x99000000;
-        UiState.Film f = s.looks.isEmpty() ? null : s.looks.get(s.lookSel);
+
+        // ---- top: the film, the frame counter, the battery
         if (f != null) {
-            String t = f.title + (f.iso.length() > 0 ? " " + f.iso : "");
-            g.roundRect(L - 12, TOP - 23, 26 + g.textWidth(t, Gfx.MEDIUM, 18, 0) + 26, 32, 16, glass);
-            canisterIcon(g, f, L, TOP - 15);
-            g.text(t, L + 26, TOP, Gfx.MEDIUM, 18, INK, Gfx.LEFT, 0);
+            canisterIcon(g, f, ix + 18, 20);
+            g.text(f.title, ix + 44, 36, Gfx.MEDIUM, 17, INK, Gfx.LEFT, 0);
+            if (s.lookLive) {
+                float x = ix + 44 + g.textWidth(f.title, Gfx.MEDIUM, 17, 0) + 10;
+                g.roundRect(x, 22, 38, 18, 9, 0x40F4F1EA);
+                g.text("LIVE", x + 19, 35, Gfx.MEDIUM, 10, INK, Gfx.CENTER, 120);
+            }
         }
-        modeSwitch(g, s, 1, f != null ? f.accent : INK);
-        if (s.battery >= 0) g.roundRect(R - 92, TOP - 23, 104, 32, 16, glass);
-        battery(g, s.battery, R, INK, INK2);
-        if (s.lookShown && f != null) {   // the look, large, for a moment after the wheel turns (a Fuji film-sim pop-up)
-            float tw = g.textWidth(f.title, Gfx.DISPLAY, 58, -10) + 80;
-            g.roundRect(s.width / 2 - tw / 2, 196, tw, 124, 24, 0xB0000000);
-            g.text(f.title, s.width / 2, 268, Gfx.DISPLAY, 58, INK, Gfx.CENTER, -10);
-            float dw = 14, dx = s.width / 2 - (s.looks.size() - 1) * dw / 2;
-            for (int i = 0; i < s.looks.size(); i++) g.circle(dx + i * dw, 296, i == s.lookSel ? 3.5f : 2.5f, i == s.lookSel ? INK : 0x80F4F1EA);
+        frameWindow(g, s, s.width / 2, 36, accent);
+        if (s.battery >= 0) battery2(g, s.battery, ir - 18, 36);
+        if (s.hist != null) histogram(g, s.hist, ir - 18 - 112, 54, 112, 40);
+
+        // ---- the side bars: focus mode on the left, photos left on the card on the right
+        sideLabel(g, ix / 2, 214, s.afMode, "FOCUS");
+        sideLabel(g, ix / 2, 268, s.afArea, "AREA");
+        sideLabel(g, ir + ix / 2, 214, s.shotsLeft >= 0 ? String.valueOf(s.shotsLeft) : "", "LEFT");
+        if (s.afLamp) lamp(g, ir + ix / 2, 268, s.afState == 1 ? INK : INK2);
+
+        // ---- focus (out of the way while the look card is up)
+        if (!s.lookShown) afBrackets(g, s, ix, iw);
+
+        // ---- bottom: exposure, the meter, the print
+        float by = 448;
+        boolean live = s.afState == 2 || s.afState == 1;   // half-pressed: the numbers come up
+        int ink = live ? INK : 0xCCF4F1EA;
+        float x = ix + 22;
+        if (s.afState == 2 || s.afState == 3) { g.circle(x + 4, by - 6, 4.5f, s.afState == 2 ? GREEN : AMBER); x += 18; }
+        x = expo(g, x, by, s.shutter, "", ink);
+        x = expo(g, x + 22, by, s.aperture, "", ink);
+        x = expo(g, x + 22, by, s.iso, s.isoAuto ? "ISO A" : "ISO", ink);
+        meter(g, s.width / 2 + 40, by - 6, 150, s.ev, ink, accent);
+        print(g, s, ir - 18, by, accent);
+
+        // ---- the look, large, for a moment after the wheel turns (a Fuji film simulation answering its dial)
+        if (s.lookShown && f != null) lookCard(g, s, f);
+    }
+
+    /** The frame counter as a film camera's window: "09 / 24", or "∞ 23" on an endless roll. */
+    private static void frameWindow(Gfx g, UiState s, float cx, float y, int accent) {
+        String n = s.endless ? String.valueOf(s.exposed) : (s.exposed < 10 ? "0" : "") + s.exposed;
+        String of = s.endless ? "" : " / " + s.length;
+        float nw = g.textWidth(n, Gfx.MEDIUM, 19, 20), ow = g.textWidth(of, Gfx.REGULAR, 15, 0);
+        float w = (s.endless ? 22 : 0) + nw + ow + 30, x = cx - w / 2;
+        g.roundRect(x, y - 21, w, 30, 15, 0x66000000);
+        g.strokeRoundRect(x, y - 21, w, 30, 15, 1, 0x40F4F1EA);
+        float tx = x + 15;
+        if (s.endless) { infinity(g, tx + 8, y - 6, INK2); tx += 22; }
+        g.text(n, tx, y, Gfx.MEDIUM, 19, INK, Gfx.LEFT, 20);
+        if (of.length() > 0) g.text(of, tx + nw, y, Gfx.REGULAR, 15, INK2, Gfx.LEFT, 0);
+        if (s.flash) g.roundRect(x + 10, y + 5, w - 20, 2, 1, accent);   // the frame just advanced
+    }
+
+    /** Battery for the viewfinder: the outline and its percent, right-aligned at R. */
+    private static void battery2(Gfx g, int pct, float R, float y) {
+        boolean low = pct <= 20;
+        String t = pct + "%";
+        float tw = g.textWidth(t, Gfx.MEDIUM, 15, 0);
+        g.text(t, R, y, Gfx.MEDIUM, 15, low ? RED : INK, Gfx.RIGHT, 0);
+        float bx = R - tw - 32, by = y - 12;
+        g.strokeRoundRect(bx, by, 24, 12, 3, 1.4f, 0xCCF4F1EA);
+        g.roundRect(bx + 25, by + 4, 2, 4, 1, 0xCCF4F1EA);
+        g.roundRect(bx + 2.5f, by + 2.5f, 19 * Math.max(0.06f, pct / 100f), 7, 1.5f, low ? RED : INK);
+    }
+
+    /** A small value with its label above, centred in a side bar. */
+    private static void sideLabel(Gfx g, float cx, float y, String value, String label) {
+        if (value == null || value.length() == 0) return;
+        g.text(label, cx, y - 18, Gfx.MEDIUM, 9, INK3, Gfx.CENTER, 140);
+        g.text(value, cx, y, Gfx.MEDIUM, 14, INK2, Gfx.CENTER, 0);
+    }
+
+    /** The AF illuminator: a small lamp with rays. */
+    private static void lamp(Gfx g, float cx, float cy, int color) {
+        g.strokeCircle(cx, cy - 6, 6, 1.6f, color);
+        g.rect(cx - 3, cy + 2, 6, 2, color);
+        for (int i = -1; i <= 1; i++) g.line(cx + i * 9, cy - 18 + Math.abs(i) * 3, cx + i * 11, cy - 21 + Math.abs(i) * 3, 1.4f, color);
+        g.text("AF LIGHT", cx, cy + 20, Gfx.MEDIUM, 8, INK3, Gfx.CENTER, 120);
+    }
+
+    /** One exposure value, with a small label in front ("ISO"); returns where the next one goes. */
+    private static float expo(Gfx g, float x, float y, String value, String label, int ink) {
+        if (value == null || value.length() == 0) return x;
+        if (label.length() > 0) {
+            g.text(label, x, y - 1, Gfx.MEDIUM, 11, (ink & 0x00FFFFFF) | 0x99000000, Gfx.LEFT, 80);
+            x += g.textWidth(label, Gfx.MEDIUM, 11, 80) + 5;
         }
-        float hw = glyphWidth(g, "wheel") + 8 + g.textWidth("Look", Gfx.REGULAR, 17, 0) + 26 + glyphWidth(g, "centre") + 8
-                + g.textWidth("Photos", Gfx.REGULAR, 17, 0) + 26 + glyphWidth(g, "updown") + 8 + g.textWidth("Film", Gfx.REGULAR, 17, 0);
-        g.roundRect(L - 14, FOOT - 24, hw + 28, 34, 17, glass);
-        hints(g, s, INK, new String[] { "wheel", "Look", "centre", "Photos", "updown", "Film" }, null);
+        g.text(value, x, y, Gfx.MEDIUM, 20, ink, Gfx.LEFT, 0);
+        return x + g.textWidth(value, Gfx.MEDIUM, 20, 0);
+    }
+
+    /** The exposure scale: -3 to +3 in thirds, a mark where exposure sits (ev in thirds, 0 = metered). */
+    private static void meter(Gfx g, float cx, float y, float w, int ev, int ink, int accent) {
+        float x0 = cx - w / 2, step = w / 18;
+        for (int i = 0; i <= 18; i++) {
+            boolean major = i % 3 == 0, zero = i == 9;
+            float h = zero ? 10 : major ? 7 : 4;
+            g.rect(x0 + i * step - 0.6f, y - h / 2, 1.2f, h, zero ? ink : (ink & 0x00FFFFFF) | (major ? 0xAA000000 : 0x66000000));
+        }
+        g.text("-", x0 - 10, y + 5, Gfx.MEDIUM, 13, (ink & 0x00FFFFFF) | 0x99000000, Gfx.CENTER, 0);
+        g.text("+", x0 + w + 10, y + 5, Gfx.MEDIUM, 13, (ink & 0x00FFFFFF) | 0x99000000, Gfx.CENTER, 0);
+        int e = Math.max(-9, Math.min(9, ev));
+        float mx = cx + e * step;
+        g.line(mx - 5, y + 12, mx, y + 7, 1.6f, ev == 0 ? ink : accent);
+        g.line(mx, y + 7, mx + 5, y + 12, 1.6f, ev == 0 ? ink : accent);
+        if (ev != 0) {
+            String t = (ev > 0 ? "+" : "\u2212") + (Math.abs(ev) / 3 > 0 ? String.valueOf(Math.abs(ev) / 3) : "") + (Math.abs(ev) % 3 == 0 ? "" : (Math.abs(ev) / 3 > 0 ? " " : "") + Math.abs(ev) % 3 + "/3");
+            g.text(t, mx, y - 12, Gfx.MEDIUM, 12, accent, Gfx.CENTER, 0);
+        }
+    }
+
+    /** The last shot as a small print developing in the corner; with photos queued, how many. */
+    private static void print(Gfx g, UiState s, float R, float y, int accent) {
+        if (s.printImage == null && s.developing <= 0) return;
+        float w = 66, h = 44, x = R - w, top = y - h + 6;
+        if (s.printImage != null) {
+            g.roundRect(x - 3, top - 3, w + 6, h + 6, 4, 0xFFEDE8DE);   // a white border, like a print
+            g.image(s.printImage, x, top, w, h, false);
+            float left = 1 - Math.max(0, Math.min(1, s.printProgress));
+            if (left > 0) {   // still latent: a ghost of the picture, developing up from the bottom
+                g.rect(x, top, w, h * left, 0xB8231D17);
+                g.rect(x, top + h * left - 1, w, 2, (accent & 0x00FFFFFF) | 0xCC000000);
+            }
+        }
         if (s.developing > 0) {
-            String d = s.developing + " developing";
-            float dw = g.textWidth(d, Gfx.MEDIUM, 16, 0) + 30;
-            g.roundRect(R - dw, FOOT - 19, dw, 28, 14, 0x99000000);
-            g.circle(R - dw + 14, FOOT - 5, 3.5f, f != null ? f.accent : INK);
-            g.text(d, R - 10, FOOT, Gfx.MEDIUM, 16, INK, Gfx.RIGHT, 0);
-        } else if (s.liveCaption.length() > 0 && !s.lookShown) {   // says the picture is a preview, not live view
-            float cw = g.textWidth(s.liveCaption, Gfx.REGULAR, 15, 0) + 28;
-            g.roundRect(R - cw, FOOT - 19, cw, 28, 14, glass);
-            g.text(s.liveCaption, R - 14, FOOT, Gfx.REGULAR, 15, INK, Gfx.RIGHT, 0);
+            String d = String.valueOf(s.developing);
+            float dw = Math.max(20, g.textWidth(d, Gfx.MEDIUM, 12, 0) + 12);
+            g.roundRect(x - dw / 2, top - 10, dw, 20, 10, accent);
+            g.text(d, x, top + 4, Gfx.MEDIUM, 12, BG, Gfx.CENTER, 0);
+        }
+    }
+
+    /** The focus brackets and what they say. */
+    private static void afBrackets(Gfx g, UiState s, float ix, float iw) {
+        float cx = ix + iw / 2, cy = H / 2, w = 150, h = 100;
+        int c;
+        float k, stroke;
+        switch (s.afState) {
+            case 1: c = INK; k = 0.86f; stroke = 2f; break;          // searching: tightening
+            case 2: c = GREEN; k = 0.8f; stroke = 2.4f; break;       // locked: snapped tight
+            case 3: c = AMBER; k = 1f; stroke = 2f; break;           // no lock
+            default: c = 0xE6F4F1EA; k = 1f; stroke = 1.6f; break;   // ready
+        }
+        if (s.afState == 2 && s.afAreas != null) {   // the areas the camera focused on
+            for (float[] a : s.afAreas) {
+                float ax = ix + a[0] * iw, ay = a[1] * H, aw = a[2] * iw, ah = a[3] * H;
+                g.strokeRoundRect(ax + 0.8f, ay + 0.8f, aw, ah, 3, 3.2f, 0x55000000);
+                g.strokeRoundRect(ax, ay, aw, ah, 3, 2f, GREEN);
+            }
+        } else {
+            corners(g, cx - w * k / 2, cy - h * k / 2, w * k, h * k, 16, stroke, c);
+            if (s.afState == 1) corners(g, cx - w / 2, cy - h / 2, w, h, 16, 1, 0x40F4F1EA);   // where it started
+        }
+        if (s.afState == 2 && s.afAreas == null) g.circle(cx, cy, 2.5f, GREEN);
+        String say = s.afState == 3 ? (s.afNote.length() > 0 ? s.afNote : "Can't focus") : s.afState == 1 && s.afTry > 1 ? "Trying again \u00b7 " + s.afTry : "";
+        if (say.length() > 0) {
+            float tw = g.textWidth(say, Gfx.MEDIUM, 14, 0) + 26, ty = cy + h / 2 + 18;
+            g.roundRect(cx - tw / 2, ty, tw, 26, 13, 0x99000000);
+            g.text(say, cx, ty + 18, Gfx.MEDIUM, 14, s.afState == 3 ? AMBER : INK, Gfx.CENTER, 0);
+        }
+    }
+
+    /** Four corner marks around a rectangle, over a soft shadow so they read on any picture. */
+    private static void corners(Gfx g, float x, float y, float w, float h, float len, float stroke, int c) {
+        if ((c >>> 24) > 0x60) corners1(g, x + 0.8f, y + 0.8f, w, h, len, stroke + 1.6f, 0x55000000);
+        corners1(g, x, y, w, h, len, stroke, c);
+    }
+
+    private static void corners1(Gfx g, float x, float y, float w, float h, float len, float stroke, int c) {
+        float r = x + w, b = y + h;
+        g.line(x, y, x + len, y, stroke, c); g.line(x, y, x, y + len, stroke, c);
+        g.line(r, y, r - len, y, stroke, c); g.line(r, y, r, y + len, stroke, c);
+        g.line(x, b, x + len, b, stroke, c); g.line(x, b, x, b - len, stroke, c);
+        g.line(r, b, r - len, b, stroke, c); g.line(r, b, r, b - len, stroke, c);
+    }
+
+    /** A tiny histogram of live view's brightness. */
+    private static void histogram(Gfx g, int[] hist, float x, float y, float w, float h) {
+        g.roundRect(x - 6, y - 6, w + 12, h + 12, 6, 0x66000000);
+        int max = 1;
+        for (int v : hist) max = Math.max(max, v);
+        float bw = w / hist.length;
+        for (int i = 0; i < hist.length; i++) {
+            float bh = h * hist[i] / max;
+            if (bh >= 0.5f) g.rect(x + i * bw, y + h - bh, bw + 0.3f, bh, 0xB3F4F1EA);
+        }
+        g.rect(x, y + h, w, 1, 0x40F4F1EA);
+    }
+
+    /** The film simulation card: the film's name large, every film's canister in a row, this one raised. */
+    private static void lookCard(Gfx g, UiState s, UiState.Film f) {
+        String sub = (f.iso.length() > 0 ? "ISO " + f.iso : "") + (f.tagline.length() > 0 ? (f.iso.length() > 0 ? "  \u00b7  " : "") + f.tagline : "");
+        float tw = Math.max(Math.max(g.textWidth(f.title, Gfx.DISPLAY, 56, -10), g.textWidth(sub, Gfx.REGULAR, 15, 0)), s.looks.size() * 34f) + 70;
+        float x = s.width / 2 - tw / 2, y = 150;
+        g.roundRect(x, y, tw, 168, 26, 0xC4000000);
+        g.text(f.title, s.width / 2, y + 74, Gfx.DISPLAY, 56, INK, Gfx.CENTER, -10);
+        if (sub.length() > 0) g.text(sub, s.width / 2, y + 102, Gfx.REGULAR, 15, INK2, Gfx.CENTER, 0);
+        float cw = 34, cx0 = s.width / 2 - (s.looks.size() - 1) * cw / 2;
+        for (int i = 0; i < s.looks.size(); i++) {
+            UiState.Film o = s.looks.get(i);
+            boolean on = i == s.lookSel;
+            float cx = cx0 + i * cw, cyy = y + 128 - (on ? 4 : 0);
+            float sw = on ? 18 : 13, sh = on ? 21 : 15;
+            g.roundRect(cx - sw / 2, cyy, sw, sh, 3, on ? o.body : (o.body & 0x00FFFFFF) | 0x99000000);
+            g.rect(cx - sw / 2, cyy + sh / 3, sw, sh / 3, on ? o.band : (o.band & 0x00FFFFFF) | 0x99000000);
+            if (on) g.roundRect(cx - 8, cyy + sh + 6, 16, 3, 1.5f, o.accent);
         }
     }
 

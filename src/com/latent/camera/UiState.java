@@ -27,7 +27,6 @@ final class UiState {
     int rollNumber, exposed, length;
     int developed = -1;                // frames developed so far when a develop was paused, else -1
     boolean endless;                   // a roll with no end: it develops as you shoot
-    int camMode;                       // Photo mode's Film | Photo switch (drawn; in-app shooting is still to come)
 
     // Photo mode: live view with a look on it
     Object liveImage;                  // a still standing in for live view (previews only)
@@ -36,6 +35,22 @@ final class UiState {
     boolean lookShown;                 // the look's name, large, just after it changed
     int developing;                    // photos still developing in the background
     String liveCaption = "";           // what the picture is (a preview on your last photo)
+
+    // the viewfinder (in-app shooting)
+    int afState;                       // 0 ready, 1 searching, 2 locked, 3 can't lock
+    float[][] afAreas;                 // focused areas as {x, y, w, h}, 0..1 of the picture; null = the centre
+    boolean afLamp;                    // the AF light is on
+    int afTry;                         // which try (searching again in the dark)
+    String afNote = "";                // why it can't lock
+    String afMode = "", afArea = "";   // "AF-S", "Centre"
+    String shutter = "", aperture = "", iso = "";
+    boolean isoAuto;
+    int ev;                            // exposure, in thirds of a stop from metered
+    int shotsLeft = -1;
+    int[] hist;                        // live brightness, or null
+    boolean grid, lookLive, flash;     // thirds; the look is on live view; the shutter just blinked
+    Object printImage;                 // the last shot, developing
+    float printProgress;               // 0 latent .. 1 developed
 
     // Settings
     List<String[]> rows = new ArrayList<String[]>();   // {label, value}: value "on"/"off" draws a switch, "›" opens, "" is a heading
