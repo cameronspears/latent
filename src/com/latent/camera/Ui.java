@@ -229,7 +229,7 @@ final class Ui {
 
     /** A row of thin marks, one per frame, every sixth a little taller: the scale on a film counter. */
     private static void ticks(Gfx g, int n, int filled, int current, float x0, float x1, float y, int on, int off, int last) {
-        if (n <= 0) return;
+        if (n <= 0 || n > 72) return;   // a film counter has at most 72 frames (a half-frame 36)
         float step = (x1 - x0 - 4) / Math.max(1, n - 1);
         for (int i = 0; i < n; i++) {
             float x = x0 + i * step;

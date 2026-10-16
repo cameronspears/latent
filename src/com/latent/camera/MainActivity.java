@@ -594,6 +594,7 @@ public class MainActivity extends Activity {
             s.rollNumber = Integer.parseInt(v[5]);
             s.exposed = Integer.parseInt(v[6]);
             s.length = Integer.parseInt(v[7]);
+            s.endless = s.length >= Roll.ENDLESS;   // no ticks: a tick per frame of 9999 took the first frame over a second
             return true;
         } catch (Exception e) {
             return false;

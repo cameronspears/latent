@@ -30,7 +30,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             "Camera closed" };
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
     static final int FOCUS_TRIES = 4;
-    static final long FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, SAVE_TIMEOUT_MS = 8000, FRAMES_MS = 3000;
+    static final long FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, SAVE_TIMEOUT_MS = 30000, FRAMES_MS = 3000;
 
     private final File card;
     private final SurfaceView surface;
@@ -211,6 +211,16 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 return objectMethod(p, m, a);
             }
         });
+        for (String iface : new String[] { "com.sony.scalar.hardware.CameraEx$OnCaptureStatusListener",
+                "com.sony.scalar.hardware.CameraEx$CaptureStatusListener" }) {
+            if (set("setCaptureStatusListener", iface, new InvocationHandler() {
+                public Object invoke(Object p, Method m, Object[] a) {
+                    if (m.getName().equals("onStart") || m.getName().equals("onEnd"))
+                        note("capture " + m.getName().substring(2).toLowerCase(java.util.Locale.US) + (a != null && a.length > 1 ? ", reason " + a[1] : ""));
+                    return objectMethod(p, m, a);
+                }
+            })) break;
+        }
         boolean listening = set("setShutterListener", "com.sony.scalar.hardware.CameraEx$ShutterListener", new InvocationHandler() {
             public Object invoke(Object p, Method m, Object[] a) {
                 if (m.getName().equals("onShutter") && a != null && a.length > 0) shutter((Integer) a[0]);
@@ -256,12 +266,14 @@ final class ShootingTest implements SurfaceHolder.Callback {
         int now = Roll.highest(Library.photos(card));
         long waited = SystemClock.uptimeMillis() - since;
         if (now > highestBefore) {
+            note("new photo on the card " + waited + " ms after the shutter");
             report(3, OK, "DSC" + String.format(java.util.Locale.US, "%05d", now % 10000) + ".JPG on the card: shutter " + shutterMs + " ms, saved "
                     + waited + " ms later" + (storedName != null ? "" : " (no store report)"));
             ui.postDelayed(new Runnable() { public void run() { afterPicture(); } }, 1500);   // Auto Review, if on, has its moment
             return;
         }
-        if (waited > SAVE_TIMEOUT_MS) { report(3, FAIL, "shutter fired (" + shutterMs + " ms) but no new photo appeared"); afterPicture(); return; }
+        if (waited > SAVE_TIMEOUT_MS) { report(3, FAIL, "shutter fired (" + shutterMs + " ms) but no new photo in " + SAVE_TIMEOUT_MS / 1000 + " s"); afterPicture(); return; }
+        if (waited > 0 && waited % 3000 < 300) out.step(3, RUN, "saving… " + waited / 1000 + " s");
         ui.postDelayed(new Runnable() { public void run() { waitForFile(shutterMs, since); } }, 300);
     }
 
@@ -370,14 +382,23 @@ final class ShootingTest implements SurfaceHolder.Callback {
                     p[FilmCore.QUALITY] = 90;
                     p[FilmCore.THREADS] = 1;
                     int[] px = new int[640 * 480], size = new int[2];
-                    long best = Long.MAX_VALUE;
-                    for (int i = 0; i < 3; i++) {   // the fastest of three: the first warms the caches
-                        long t = SystemClock.uptimeMillis();
-                        if (FilmCore.preview(f.getPath(), stock.lut.getPath(), p, FilmCore.PREVIEW_FIT, px, 640, 480, size) != 0)
-                            throw new IllegalStateException(FilmCore.lastError());
-                        best = Math.min(best, SystemClock.uptimeMillis() - t);
+                    StringBuilder r = new StringBuilder(stock.title + ":");
+                    int[][] ways = { { 640, 480, 1 }, { 640, 480, 3 }, { 320, 240, 3 } };   // width, height, threads
+                    for (int k = 0; k < ways.length; k++) {
+                        int[] w = ways[k];
+                        p[FilmCore.THREADS] = w[2];
+                        long best = Long.MAX_VALUE;
+                        for (int i = 0; i < 3; i++) {   // the fastest of three: the first warms the caches
+                            long t = SystemClock.uptimeMillis();
+                            if (FilmCore.preview(f.getPath(), stock.lut.getPath(), p, FilmCore.PREVIEW_FIT, px, w[0], w[1], size) != 0)
+                                throw new IllegalStateException(FilmCore.lastError());
+                            best = Math.min(best, SystemClock.uptimeMillis() - t);
+                        }
+                        r.append(k == 0 ? " " : ", ").append(size[0]).append("x").append(size[1]).append(" on ").append(w[2])
+                                .append(w[2] == 1 ? " core " : " cores ").append(best).append(" ms");
+                        note("look " + size[0] + "x" + size[1] + " threads " + w[2] + ": " + best + " ms a frame, decode included");
                     }
-                    result = stock.title + ": " + best + " ms a frame, decode included (" + size[0] + "x" + size[1] + ", one core)";
+                    result = r.toString();
                     status = OK;
                 } catch (Throwable e) {
                     result = Probe.why(e);
@@ -417,6 +438,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         set("setAutoFocusDoneListener", null, null);
         set("setFocusLightStateListener", null, null);
         set("setStoreImageCompleteListener", null, null);
+        set("setCaptureStatusListener", null, null);
         try { if (camera != null && previewing) camera.stopPreview(); } catch (Throwable e) { note("stopPreview: " + Probe.why(e)); }
         try { cameraEx.getClass().getMethod("release").invoke(cameraEx); } catch (Throwable e) { note("release: " + Probe.why(e)); }
         try { surface.getHolder().removeCallback(this); } catch (Throwable ignored) { }
