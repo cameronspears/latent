@@ -1542,9 +1542,8 @@ public class MainActivity extends Activity {
             ui.postDelayed(developWhenIdle, Math.max(250, IDLE_BEFORE_DEVELOP_MS - idle));
             return;
         }
-        boolean show = developNow;   // started again to develop: the darkroom, so you can watch
         developNow = false;
-        startDevelop(endlessWaiting.get(0), !show);
+        startDevelop(endlessWaiting.get(0), false);   // the red darkroom, as a roll of film develops: you can watch it
     }
 
     static final long IDLE_BEFORE_DEVELOP_MS = 4000;

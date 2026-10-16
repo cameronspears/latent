@@ -346,6 +346,14 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 return objectMethod(p, m, a);
             }
         });
+        // the camera's live view back after a capture (Sony's framework: DevelopmentState waits for this, then
+        // EEState calls startPreview() again)
+        set("setPreviewStartListener", "com.sony.scalar.hardware.CameraEx$PreviewStartListener", new InvocationHandler() {
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().equals("onStart")) previewStarted();
+                return objectMethod(p, m, a);
+            }
+        });
         // the store and capture reports the Shooting and Live look tests had set (both stored their pictures)
         set("setStoreImageCompleteListener", "com.sony.scalar.hardware.CameraEx$StoreImageCompleteListener", new InvocationHandler() {
             public Object invoke(Object p, Method m, Object[] a) {
@@ -926,7 +934,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (status == 0) {
             shots++;
             lastAnswerAt = now;
-            letGoFocus(0);
+            awaitingPreview = shots;
+            ui.removeCallbacks(restartPreviewLate);
+            ui.postDelayed(restartPreviewLate, PREVIEW_LATE_MS);
             shotFilms.add(filmId != null ? filmId : "");
             quietUntil = now + STORE_QUIET_MS;
             flashUntil = now + FLASH_MS;
@@ -964,31 +974,40 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         ui.postDelayed(findAgain, 300);
     }
 
-    /**
-     * v0.35.4: a picture was stored 0.5 s after the shutter when the button was let go at once, and not
-     * until the viewfinder closed (or Latent was left) when it was kept half-pressed; both times what
-     * reached the camera next was cancelAutoFocus (letting go, and closing). The one sent with the
-     * shutter's answer (Release.shot) comes while the capture is still going. So focus is let go again,
-     * 0.3, 1, 2, 4 and 8 s after the answer, until the camera lists the picture.
-     */
-    static final long[] LET_GO_MS = { 300, 1000, 2000, 4000, 8000 };
+    /** v0.35.5 let focus go again 0.3-8 s after each shot: no picture was stored any sooner for it. */
 
-    private void letGoFocus(final int i) {
-        if (i >= LET_GO_MS.length) return;
-        final int forShot = shots;
-        long wait = LET_GO_MS[i] - (i > 0 ? LET_GO_MS[i - 1] : 0);
-        ui.postDelayed(new Runnable() {
-            public void run() {
-                if (closed || stored >= forShot) return;   // listed: nothing to do
-                try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable e) { note("cancelAutoFocus: " + Probe.why(e)); }
-                if (letGoNotes++ < 20) note("focus let go again, " + LET_GO_MS[i] + " ms after the shutter (picture " + forShot + " not listed yet)");
-                if (LET_GO_MS[i] == 4000 && !systemLogSaved) saveSystemLog("VFLOG.TXT");
-                letGoFocus(i + 1);
-            }
-        }, wait);
+    /**
+     * Sony's own capture states go Capture -> Development -> EE, and EEState.onResume calls
+     * camera.startPreview() each time: after every picture the app restarts live view, once the camera
+     * says it's back (PreviewStartListener), and Latent never did. Leaving Latent (Playback) rebuilds live
+     * view, and every waiting picture was stored then (v0.35.4, v0.35.5: within 0.3 s). So: startPreview()
+     * on the camera's word, or 1 s after the shutter's answer if it says nothing.
+     */
+    static final long PREVIEW_LATE_MS = 1000;
+    private int awaitingPreview, previewNotes;
+
+    private void previewStarted() {
+        if (previewNotes++ < 20) note("the camera's live view is back" + (awaitingPreview > 0 ? " after picture " + awaitingPreview : ""));
+        if (awaitingPreview > 0) restartPreview("on the camera's word");
     }
 
-    private int letGoNotes;
+    private final Runnable restartPreviewLate = new Runnable() {
+        public void run() { if (awaitingPreview > 0) restartPreview("1 s after the shutter, the camera said nothing"); }
+    };
+
+    private void restartPreview(String why) {
+        int n = awaitingPreview;
+        awaitingPreview = 0;
+        ui.removeCallbacks(restartPreviewLate);
+        if (closed || camera == null) return;
+        try {
+            camera.startPreview();
+            if (previewNotes++ < 30) note("live view restarted (startPreview) after picture " + n + ", " + why);
+        } catch (Throwable e) {
+            note("startPreview after picture " + n + ": " + Probe.why(e));
+        }
+        if (!systemLogSaved) ui.postDelayed(new Runnable() { public void run() { if (stored < shots && !systemLogSaved) saveSystemLog("VFLOG.TXT"); } }, 4000);
+    }
     private boolean systemLogSaved;
 
     /** The camera's own log as it stands, to LATENT/name (threads of their own, 3 s; never touches the camera). */
@@ -1327,6 +1346,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         set("setAutoISOSensitivityListener", null, null);
         set("setStoreImageCompleteListener", null, null);
         set("setCaptureStatusListener", null, null);
+        set("setPreviewStartListener", null, null);
         try { if (camera != null && previewing) camera.stopPreview(); } catch (Throwable e) { note("stopPreview: " + Probe.why(e)); }
         // Sony's own apps release the Android camera before CameraEx (their ExecutorCreator.terminate)
         try { if (camera != null) camera.release(); } catch (Throwable e) { note("camera release: " + Probe.why(e)); }
