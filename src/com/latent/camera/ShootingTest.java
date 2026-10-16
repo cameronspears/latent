@@ -93,6 +93,52 @@ final class ShootingTest implements SurfaceHolder.Callback {
 
     void start() {
         log.append("Latent shooting test\r\n");
+        out.step(S_OPEN, RUN, "copying the camera's libraries…");
+        new Thread(new Runnable() {
+            public void run() {
+                copyFirmware();
+                ui.post(new Runnable() { public void run() { startCamera(); } });
+            }
+        }, "firmware-copy").start();
+    }
+
+    /**
+     * Read only: copies Sony's camera framework and native camera libraries to LATENT/FW, so the
+     * capture hook's refusal ('setShutterSequenceCallbackMode failed') can be traced in them on a
+     * computer. Skips files already copied (same size). Background thread.
+     */
+    private void copyFirmware() {
+        File to = new File(Library.home(card), "FW");
+        int files = 0;
+        long bytes = 0;
+        String[][] what = { { "/system/framework", "" }, { "/system/lib", "camera|scalar|sony|seq|dsp|still|avindex|osal|diadem|jpeg|imag" },
+                { "/system/etc/permissions", "" }, { "/system", "build.prop" } };
+        for (String[] w : what) {
+            File[] list = new File(w[0]).listFiles();
+            if (list == null) { note("firmware: " + w[0] + " not readable"); continue; }
+            for (File f : list) {
+                if (!f.isFile() || (w[1].length() > 0 && !f.getName().toLowerCase(java.util.Locale.US).matches(".*(" + w[1] + ").*"))) continue;
+                File dst = new File(new File(to, w[0].substring(1).replace('/', '_')), f.getName());
+                if (dst.exists() && dst.length() == f.length()) continue;
+                try {
+                    dst.getParentFile().mkdirs();
+                    java.io.InputStream in = new java.io.FileInputStream(f);
+                    FileOutputStream o = new FileOutputStream(dst);
+                    try {
+                        byte[] b = new byte[65536];
+                        for (int n; (n = in.read(b)) > 0; ) o.write(b, 0, n);
+                    } finally { in.close(); o.close(); }
+                    files++;
+                    bytes += f.length();
+                } catch (Exception e) {
+                    note("firmware: " + f + ": " + Probe.why(e));
+                }
+            }
+        }
+        note("firmware: " + files + " files copied (" + bytes / 1024 + " KB) to LATENT/FW");
+    }
+
+    private void startCamera() {
         // if anything goes badly wrong, the camera is still given back (a held camera can freeze the body)
         previousHandler = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
