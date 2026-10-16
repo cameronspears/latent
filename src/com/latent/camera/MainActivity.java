@@ -137,6 +137,8 @@ public class MainActivity extends Activity {
         setupMs = SystemClock.uptimeMillis() - startAt;
         // live view (the camera's own picture) sits behind Latent's drawing, hidden until it's used
         liveSurface = new android.view.SurfaceView(this);
+        // Android 2.3: the camera only draws live view on a surface marked as fed by the camera itself
+        liveSurface.getHolder().setType(android.view.SurfaceHolder.SURFACE_TYPE_PUSH_BUFFERS);
         liveSurface.setVisibility(View.GONE);
         android.widget.FrameLayout root = new android.widget.FrameLayout(this);
         root.addView(liveSurface);
