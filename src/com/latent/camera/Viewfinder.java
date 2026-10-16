@@ -771,6 +771,11 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     }
 
     private void autoFocus() {
+        if (stored < shots && !closed) {   // a picture still being saved: focus waits (see SAVE_FIRST)
+            if (focusWaits++ < 10) note("focus waits: a picture is being saved");
+            ui.postDelayed(new Runnable() { public void run() { if (!closed && release.app && release.state == Release.SEARCHING) autoFocus(); } }, 150);
+            return;
+        }
         final int g = ++focusGen;
         focusStart = SystemClock.uptimeMillis();
         lampThisTry = lamp;
@@ -819,9 +824,23 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      * off (it is, in app mode), burstableTakePicture, and in the shutter's answer cancelTakePicture,
      * then the button goes back to the camera. The live frames keep running, as they do there.
      */
+    /**
+     * Nothing new is asked of the camera (no focus, no picture) while a picture is still being saved, as
+     * Sony's own capture states wait for theirs. Every run that lost its pictures (v0.31-v0.35.2) had
+     * Latent focusing again within 0.2 s of the shutter, the button still half-pressed; the Shooting test
+     * and the Live look test cancel focus after the shot and stored theirs, the Shooting test's listed by
+     * the camera itself 0.2 s later.
+     */
+    static final boolean SAVE_FIRST = true;
+    private int focusWaits, shootWaits;
+
     public void shoot() {
         if (closed) return;
-        if (flushingNow) { ui.postDelayed(new Runnable() { public void run() { shoot(); } }, 40); return; }   // the catalogue is looking: a moment
+        if (SAVE_FIRST && stored < shots) {   // the last picture first
+            if (shootWaits++ < 10) note("the shutter waits: a picture is being saved");
+            ui.postDelayed(new Runnable() { public void run() { shoot(); } }, 100);
+            return;
+        }
         keepPrint();
         shutterAt = SystemClock.uptimeMillis();
         note("Latent's shutter");
@@ -929,18 +948,16 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (!baselineKnown || mediaId == null) { ui.postDelayed(findAgain, 300); return; }
         catalogueBusy = true;
         final int after = highestKnown;
-        // the camera keeps a new picture in its memory until told to look (Smart Remote: "flushing the file");
-        // told too soon (v0.35.0, 0.3 s) it's lost, never told (v0.35.1) it stays there and giving the camera
-        // back freezes it. v0.34.1 told it ~2 s after the shutter and both were written. Not during a picture.
-        final boolean flushNow = stored < shots && !release.shooting && lastAnswerAt > 0 && now - lastAnswerAt >= FLUSH_AFTER_MS
-                && now - lastFlushAt >= FLUSH_EVERY_MS;
-        if (flushNow) { lastFlushAt = now; flushingNow = true; }
+        // Sony's catalogue is never told to look (loadMedia ...): v0.35.0 and v0.35.2 had it list pictures
+        // that were never written, so a listing it was told to make doesn't mean the picture is saved.
+        // The camera lists a picture itself once it's stored (the Shooting test: 0.2 s later).
+        final boolean flushNow = false;
         catalogue.execute(new Runnable() {
             public void run() {
                 final java.util.ArrayList<Probe.Row> found = new java.util.ArrayList<Probe.Row>();
                 String problem = null;
                 long ft = SystemClock.uptimeMillis();
-                if (flushNow) { try { flushCatalogue(); } finally { flushingNow = false; } }
+                if (flushNow) flushCatalogue();
                 final long flushMs = flushNow ? SystemClock.uptimeMillis() - ft : -1;
                 try {
                     Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
@@ -987,7 +1004,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     static final long FLUSH_AFTER_MS = 2500, FLUSH_EVERY_MS = 1500;
     private long lastAnswerAt, lastFlushAt;
-    private volatile boolean flushingNow;
     private int flushNotes, flushFails;
 
     /** Sony's catalogue told to look: loadMedia, Images.waitAndUpdateDatabase, waitLoadMediaComplete (Smart Remote's order). Catalogue thread. */

@@ -405,11 +405,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
                 String r = "ok";
                 int n = 0;
                 try {
-                    Class<?> store = Class.forName("com.sony.scalar.provider.AvindexStore");
-                    store.getMethod("loadMedia", String.class, int.class).invoke(null, mediaId, 1);
-                    Class.forName("com.sony.scalar.provider.AvindexStore$Images").getMethod("waitAndUpdateDatabase", android.content.ContentResolver.class, String.class)
-                            .invoke(null, activity.getContentResolver(), mediaId);
-                    store.getMethod("waitLoadMediaComplete", String.class).invoke(null, mediaId);
+                    // the camera lists a picture itself once it's stored; told to look, it listed unwritten ones (v0.35.2)
                     Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
                     android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
                     for (Probe.Row row : Probe.query(activity.getContentResolver(), uri)) if (row.folder * 10000 + row.number > highestBefore) n++;
@@ -421,7 +417,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
                 ui.post(new Runnable() {
                     public void run() {
                         listed = found;
-                        note("told the catalogue to look (" + res + "): " + found + " of " + taken + " listed, " + (SystemClock.uptimeMillis() - lastShutterAt) + " ms after the last shutter");
+                        note("the catalogue (" + res + "): " + found + " of " + taken + " listed, " + (SystemClock.uptimeMillis() - lastShutterAt) + " ms after the last shutter");
                         flush();
                         if (found >= taken) handBack();
                         else ui.postDelayed(new Runnable() { public void run() { waitListed(); } }, Viewfinder.FLUSH_EVERY_MS);
