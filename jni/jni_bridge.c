@@ -206,6 +206,19 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_frame(JNIEnv *env, jclass
     return rc;
 }
 
+JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_probe(JNIEnv *env, jclass cls, jobject jbitmap) {
+    char rep[512];
+    void *pixels = NULL;
+    fl_bitmap_info bi;
+    int bytes = 0;
+    (void)cls;
+    if (jbitmap && bitmaps() && bm_info(env, jbitmap, &bi) == 0 && bm_lock(env, jbitmap, &pixels) == 0 && pixels) bytes = (int)(bi.stride * bi.height);
+    else pixels = NULL;
+    fl_probe((unsigned char *)pixels, bytes, rep, sizeof rep);
+    if (pixels) bm_unlock(env, jbitmap);
+    return (*env)->NewStringUTF(env, rep);
+}
+
 JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_setOverlay(JNIEnv *env, jclass cls, jintArray jargb, jint w, jint h) {
     jint *px;
     int gen;

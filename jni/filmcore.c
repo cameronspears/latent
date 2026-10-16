@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdint.h>
 
 #include "jpeglib.h"
 #include "bluenoise.h"
@@ -497,6 +498,40 @@ static void look_row(const fl_look *L, const fl_grain *G, unsigned char *row, in
     }
 }
 
+/* look_row without grain, for the viewfinder: reads rgb, writes the result packed for the frame composer
+ * (red << 16 | blue a word, green apart), so the picture crosses memory once instead of three times. */
+static void look_pack(const fl_look *L, const unsigned char *rgb, int n, unsigned int *prb, unsigned char *pgo) {
+    const int sg = L->n * 3, sb = L->n * L->n * 3;
+    int x, pr = -1, pg = -1, pb = -1, r2 = 0, g2 = 0, b2 = 0;
+    for (x = 0; x < n; x++, rgb += 3) {
+        int r = rgb[0], g = rgb[1], b = rgb[2];
+        if (r != pr || g != pg || b != pb) {
+            pr = r; pg = g; pb = b;
+            if (L->n == 0) {
+                r2 = L->tone[r]; g2 = L->tone[g]; b2 = L->tone[b];
+            } else {
+                const short *c0 = L->data + L->offR[r] + L->offG[g] + L->offB[b], *c1, *c2, *c3;
+                int fr = L->frac[r], fg = L->frac[g], fb = L->frac[b], f1, f2, f3;
+                if (fr >= fg) {
+                    if (fg >= fb)      { c1 = c0 + 3;  c2 = c0 + 3 + sg;  f1 = fr; f2 = fg; f3 = fb; }
+                    else if (fr >= fb) { c1 = c0 + 3;  c2 = c0 + 3 + sb;  f1 = fr; f2 = fb; f3 = fg; }
+                    else               { c1 = c0 + sb; c2 = c0 + 3 + sb;  f1 = fb; f2 = fr; f3 = fg; }
+                } else {
+                    if (fb >= fg)      { c1 = c0 + sb; c2 = c0 + sg + sb; f1 = fb; f2 = fg; f3 = fr; }
+                    else if (fb >= fr) { c1 = c0 + sg; c2 = c0 + sg + sb; f1 = fg; f2 = fb; f3 = fr; }
+                    else               { c1 = c0 + sg; c2 = c0 + 3 + sg;  f1 = fg; f2 = fr; f3 = fb; }
+                }
+                c3 = c0 + 3 + sg + sb;
+                r2 = ((c0[0] << 8) + f1 * (c1[0] - c0[0]) + f2 * (c2[0] - c1[0]) + f3 * (c3[0] - c2[0]) + 2048) >> 12;
+                g2 = ((c0[1] << 8) + f1 * (c1[1] - c0[1]) + f2 * (c2[1] - c1[1]) + f3 * (c3[1] - c2[1]) + 2048) >> 12;
+                b2 = ((c0[2] << 8) + f1 * (c1[2] - c0[2]) + f2 * (c2[2] - c1[2]) + f3 * (c3[2] - c2[2]) + 2048) >> 12;
+            }
+        }
+        prb[x] = (unsigned int)r2 << 16 | (unsigned int)b2;
+        pgo[x] = (unsigned char)g2;
+    }
+}
+
 /* ------------------------------------------------------------------------------------------ */
 /* decoding helpers                                                                              */
 
@@ -732,6 +767,12 @@ static void patch_thumb(FILE *f, const fl_slot *slot, const unsigned char *jpg, 
 /* timing                                                                                        */
 
 static int g_timing[FL_TIME_COUNT];
+
+static long now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000000L + ts.tv_nsec / 1000;
+}
 
 static long now_ms(void) {
     struct timespec ts;
@@ -1634,6 +1675,8 @@ int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, 
  * copies one opaque picture a frame. A context per look thread: its own buffers and its own film.
  */
 
+#define FL_LIVE_GRID 17
+
 struct fl_frame_ctx {
     struct { char path[512]; int highlight, shadow, ready; fl_look L; } film;
     unsigned char *rgb, *row;
@@ -1644,6 +1687,7 @@ struct fl_frame_ctx {
     unsigned int *hrb;                     /* two stretched rows: red and blue in one word, green apart */
     unsigned char *hg;
     int *xi, *xw, cap_ow;
+    long us_blend, us_dither;               /* this compose, every eighth row */
 };
 
 fl_frame_ctx *fl_frame_new(void) { return (fl_frame_ctx *)calloc(1, sizeof(fl_frame_ctx)); }
@@ -1672,6 +1716,12 @@ static const fl_look *frame_film(fl_frame_ctx *c, const char *lut_path, const in
         if (!c->film.L.data) { look_free(&L); set_err(err, errlen, "out of memory"); return NULL; }
         memcpy(c->film.L.data, L.data, bytes);
     }
+    if (c->film.L.data && c->film.L.n > FL_LIVE_GRID) {
+        /* live view's film at 17 points (exact where the grids meet, e.g. 33 -> 17): 29 KB the core's cache
+         * holds, where 33 points (215 KB) sent every pixel's lookup out to memory */
+        short *small = resample_lut(c->film.L.data, c->film.L.n, FL_LIVE_GRID);
+        if (small) { free(c->film.L.data); c->film.L.data = small; c->film.L.n = FL_LIVE_GRID; build_index(&c->film.L); }
+    }
     c->film.L.shared = 1;
     look_free(&L);
     strcpy(c->film.path, p);
@@ -1685,17 +1735,24 @@ static const fl_look *frame_film(fl_frame_ctx *c, const char *lut_path, const in
 
 typedef struct {
     int w, h, gen, refs, retired;
-    unsigned int *rb;       /* per pixel: red << 16 | blue, premultiplied */
-    unsigned short *ga;     /* per pixel: green (premultiplied) | (255 - alpha + its top bit, 0..256) << 8 */
-    int *row_runs;          /* h + 1 offsets into runs */
-    unsigned short *runs;   /* x0, x1 pairs: where alpha > 0 */
+    /* per row: its most common pixel (a fade is one colour across the row), laid in by arithmetic alone */
+    unsigned int *base_rb;   /* red << 16 | blue, premultiplied */
+    unsigned int *base_ga;   /* green (premultiplied) | (255 - alpha, widened to 0..256) << 8; 256 << 8: nothing */
+    /* and the runs of pixels that differ from it (the type), stored and read only there */
+    int *row_runs;           /* h + 1 offsets into runs */
+    int *runs;               /* per run: x0, x1, offset of its first pixel in px_rb / px_ga */
+    unsigned int *px_rb;
+    unsigned int *px_ga;     /* 256 << 8 needs 17 bits: a clear pixel inside a fade row is one */
+    int pixels;              /* run pixels in all */
 } fl_overlay;
 
 static pthread_mutex_t g_ovl_mu = PTHREAD_MUTEX_INITIALIZER;
 static fl_overlay *g_ovl;
 static int g_ovl_gen;
 
-static void ovl_free(fl_overlay *o) { if (o) { free(o->rb); free(o->ga); free(o->row_runs); free(o->runs); free(o); } }
+static void ovl_free(fl_overlay *o) {
+    if (o) { free(o->base_rb); free(o->base_ga); free(o->row_runs); free(o->runs); free(o->px_rb); free(o->px_ga); free(o); }
+}
 
 static fl_overlay *ovl_acquire(void) {
     fl_overlay *o;
@@ -1718,42 +1775,66 @@ static void ovl_release(fl_overlay *o) {
 /* x / 255, rounded, for x up to 65535: no divide (the camera's core has none) */
 static inline int div255(int x) { x += 128; return (x + (x >> 8)) >> 8; }
 
+/* One overlay pixel encoded as the composer uses it: premultiplied, 255 - alpha widened to 0..256. */
+static void ovl_encode(unsigned int p, unsigned int *rb, unsigned int *ga) {
+    int a = (int)(p >> 24), ia = 255 - a;
+    *rb = (unsigned int)div255(((p >> 16) & 255) * a) << 16 | (unsigned int)div255((p & 255) * a);
+    *ga = (unsigned int)(div255(((p >> 8) & 255) * a) | (ia + (ia >> 7)) << 8);
+}
+
 int fl_set_overlay(const unsigned int *argb, int w, int h) {
     fl_overlay *o = NULL, *old;
     int gen;
     if (argb) {
-        int x, y, n = 0, cap = 1024;
+        int x, y, n = 0, cap = 1024, pcap = 16384;
         if (w < 1 || h < 1 || w > 4096 || h > 4096) return -1;
         o = (fl_overlay *)calloc(1, sizeof *o);
         if (!o) return -1;
         o->w = w; o->h = h;
-        o->rb = (unsigned int *)malloc(sizeof(unsigned int) * (size_t)w * h);
-        o->ga = (unsigned short *)malloc(sizeof(unsigned short) * (size_t)w * h);
+        o->base_rb = (unsigned int *)malloc(sizeof(unsigned int) * h);
+        o->base_ga = (unsigned int *)malloc(sizeof(unsigned int) * h);
         o->row_runs = (int *)malloc(sizeof(int) * (h + 1));
-        o->runs = (unsigned short *)malloc(sizeof(unsigned short) * 2 * cap);
-        if (!o->rb || !o->ga || !o->row_runs || !o->runs) { ovl_free(o); return -1; }
+        o->runs = (int *)malloc(sizeof(int) * 3 * cap);
+        o->px_rb = (unsigned int *)malloc(sizeof(unsigned int) * pcap);
+        o->px_ga = (unsigned int *)malloc(sizeof(unsigned int) * pcap);
+        if (!o->base_rb || !o->base_ga || !o->row_runs || !o->runs || !o->px_rb || !o->px_ga) { ovl_free(o); return -1; }
         for (y = 0; y < h; y++) {
             const unsigned int *r = argb + (size_t)y * w;
-            unsigned int *drb = o->rb + (size_t)y * w;
-            unsigned short *dga = o->ga + (size_t)y * w;
-            int in = 0;
+            unsigned int cand = r[0], brb, bga;
+            int votes = 0, count = 0, in = 0;
+            for (x = 0; x < w; x++) {   /* the row's majority pixel, if it has one (Boyer-Moore) */
+                if (votes == 0) { cand = r[x]; votes = 1; } else votes += r[x] == cand ? 1 : -1;
+            }
+            for (x = 0; x < w; x++) count += r[x] == cand;
+            if (count * 2 <= w || (cand >> 24) == 0) cand = 0;   /* no majority, or it's clear: nothing */
+            ovl_encode(cand, &brb, &bga);
+            o->base_rb[y] = brb;
+            o->base_ga[y] = bga;
             o->row_runs[y] = n;
             for (x = 0; x <= w; x++) {
-                unsigned int p = x < w ? r[x] : 0;
-                int a = (int)(p >> 24);
-                if (x < w) {
-                    int ia = 255 - a;
-                    drb[x] = (unsigned int)div255(((p >> 16) & 255) * a) << 16 | (unsigned int)div255((p & 255) * a);
-                    dga[x] = (unsigned short)(div255(((p >> 8) & 255) * a) | (ia + (ia >> 7)) << 8);
-                }
-                if (a > 0 && !in) {
+                int differs = x < w && r[x] != cand && !((r[x] >> 24) == 0 && cand == 0);
+                if (differs && !in) {
                     if (n >= cap) {
-                        unsigned short *more = (unsigned short *)realloc(o->runs, sizeof(unsigned short) * 4 * cap);
+                        int *more = (int *)realloc(o->runs, sizeof(int) * 6 * cap);
                         if (!more) { ovl_free(o); return -1; }
                         o->runs = more; cap *= 2;
                     }
-                    o->runs[n * 2] = (unsigned short)x; in = 1;
-                } else if (a == 0 && in) { o->runs[n * 2 + 1] = (unsigned short)x; n++; in = 0; }
+                    o->runs[n * 3] = x; o->runs[n * 3 + 2] = o->pixels; in = 1;
+                } else if (!differs && in) { o->runs[n * 3 + 1] = x; n++; in = 0; }
+                if (differs) {
+                    if (o->pixels >= pcap) {
+                        unsigned int *mrb = (unsigned int *)realloc(o->px_rb, sizeof(unsigned int) * 2 * pcap);
+                        unsigned int *mga;
+                        if (!mrb) { ovl_free(o); return -1; }
+                        o->px_rb = mrb;
+                        mga = (unsigned int *)realloc(o->px_ga, sizeof(unsigned int) * 2 * pcap);
+                        if (!mga) { ovl_free(o); return -1; }
+                        o->px_ga = mga;
+                        pcap *= 2;
+                    }
+                    ovl_encode(r[x], o->px_rb + o->pixels, o->px_ga + o->pixels);
+                    o->pixels++;
+                }
             }
         }
         o->row_runs[h] = n;
@@ -1857,15 +1938,34 @@ static void blend_rows(const unsigned int *h0rb, const unsigned int *h1rb, const
     }
 }
 
-/* The overlay over x0..x1 of the row: premultiplied, 255 - alpha widened to 0..256, so a channel never
- * passes 255 (the picture's share is at most 255 - alpha, the overlay's at most alpha). */
-static void overlay_span(unsigned int *lrb, unsigned char *lg, const unsigned int *orb, const unsigned short *oga, int x0, int x1) {
-    int x;
-    for (x = x0; x < x1; x++) {
-        unsigned int ga = oga[x], ia = ga >> 8;
-        lrb[x] = (((lrb[x] * ia) >> 8) & 0x00FF00FFu) + orb[x];
-        lg[x] = (unsigned char)(((lg[x] * ia) >> 8) + (ga & 255));
+/* The overlay over one screen row: its base by arithmetic over the gaps, its stored pixels over its runs.
+ * Premultiplied, 255 - alpha widened to 0..256, so a channel never passes 255 (the picture's share is at
+ * most 255 - alpha, the overlay's at most alpha). */
+static void base_span(unsigned int *lrb, unsigned char *lg, unsigned int brb, unsigned int bga, int x, int x1) {
+    unsigned int ia = bga >> 8, bg = bga & 255;
+    for (; x < x1; x++) {
+        lrb[x] = (((lrb[x] * ia) >> 8) & 0x00FF00FFu) + brb;
+        lg[x] = (unsigned char)(((lg[x] * ia) >> 8) + bg);
     }
+}
+
+static void overlay_row(const fl_overlay *o, int y, unsigned int *lrb, unsigned char *lg, int ow) {
+    unsigned int brb = o->base_rb[y], bga = o->base_ga[y];
+    int base = (bga >> 8) < 256, k, k1 = o->row_runs[y + 1], x = 0;
+    for (k = o->row_runs[y]; k < k1; k++) {
+        const int *rn = o->runs + k * 3;
+        const unsigned int *prb = o->px_rb + rn[2] - rn[0];
+        const unsigned int *pga = o->px_ga + rn[2] - rn[0];
+        int i;
+        if (base) base_span(lrb, lg, brb, bga, x, rn[0]);
+        for (i = rn[0]; i < rn[1]; i++) {
+            unsigned int ga = pga[i], ia = ga >> 8;
+            lrb[i] = (((lrb[i] * ia) >> 8) & 0x00FF00FFu) + prb[i];
+            lg[i] = (unsigned char)(((lg[i] * ia) >> 8) + (ga & 255));
+        }
+        x = rn[1];
+    }
+    if (base) base_span(lrb, lg, brb, bga, x, ow);
 }
 
 /*
@@ -1880,12 +1980,15 @@ static void dither_row(const unsigned int *lrb, const unsigned char *lg, const u
     int x;
     const unsigned int m = 0x000F000Fu;
     for (x = 0; x < 64; x++) { unsigned int t = bn[(x + ox) & 63] >> 4; tt[x] = t | t << 16; }   /* this row's thresholds, both lanes */
-    for (x = 0; x < ow; x++) {
-        unsigned int t = tt[x & 63];
-        unsigned int q = (((((lrb[x] * 241u) >> 8) & 0x00FF00FFu) + t) >> 4) & m;   /* red << 16 | blue, 4 bits each */
-        unsigned int n = (((lg[x] * 241u) >> 8) + t) >> 4 & 15;
-        o16[x] = (unsigned short)(trb[(q >> 12 | q) & 255] | tg[n]);
-    }
+#define DITHER_ONE(X) (trb[((((((lrb[X] * 241u) >> 8) & 0x00FF00FFu) + tt[(X) & 63]) >> 4) & m) >> 12 & 0xF0 \
+                          | (((((lrb[X] * 241u) >> 8) & 0x00FF00FFu) + tt[(X) & 63]) >> 4 & 15)]      \
+                      | tg[(((lg[X] * 241u) >> 8) + tt[(X) & 63]) >> 4 & 15])
+    if (!((uintptr_t)o16 & 3)) {   /* two pixels a store: half the writes to memory */
+        unsigned int *o32 = (unsigned int *)o16;
+        for (x = 0; x + 1 < ow; x += 2) o32[x >> 1] = (unsigned int)DITHER_ONE(x) | (unsigned int)DITHER_ONE(x + 1) << 16;
+    } else x = 0;
+    for (; x < ow; x++) o16[x] = (unsigned short)DITHER_ONE(x);
+#undef DITHER_ONE
 }
 
 /* The packing tables for dither_row: red and blue nibbles (red << 4 | blue) and green, already in place. */
@@ -1902,7 +2005,7 @@ static void pack_tables(int f565, int rs, int gs, int bs, unsigned short alpha, 
 static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, int ow, int oh, int stride,
                          int aspect1000, int format, const int *shifts, int ox, int oy) {
     const int w = c->sw, h = c->sh;
-    int x, y, i, held[2], rs = 11, gs = 5, bs = 0, as = 0, use_ovl, f565 = format != FL_FMT_4444;
+    int x, y, held[2], rs = 11, gs = 5, bs = 0, as = 0, use_ovl, f565 = format != FL_FMT_4444;
     unsigned int *hrb[2], *lrb;
     unsigned char *hg[2], *lg;
     unsigned short alpha = 0, trb[256], tg[16];
@@ -1916,14 +2019,7 @@ static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, in
     }
     pack_tables(f565, rs, gs, bs, alpha, trb, tg);
     use_ovl = o && o->w == ow && o->h == oh;
-    if (c->cap_px < w * h) {
-        free(c->prb); free(c->pg);
-        c->cap_px = 0;
-        c->prb = (unsigned int *)malloc(sizeof(unsigned int) * (size_t)w * h);
-        c->pg = (unsigned char *)malloc((size_t)w * h);
-        if (!c->prb || !c->pg) { free(c->prb); free(c->pg); c->prb = NULL; c->pg = NULL; return -1; }
-        c->cap_px = w * h;
-    }
+    if (!c->prb || c->cap_px < w * h) return -1;   /* look_pack made them */
     if (c->cap_ow < ow) {
         free(c->xi); free(c->hrb); free(c->hg);
         c->cap_ow = 0;
@@ -1932,10 +2028,6 @@ static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, in
         c->hg = (unsigned char *)malloc((size_t)ow * 3);
         if (!c->xi || !c->hrb || !c->hg) { free(c->xi); free(c->hrb); free(c->hg); c->xi = NULL; c->hrb = NULL; c->hg = NULL; return -1; }
         c->cap_ow = ow;
-    }
-    {   /* the looked frame, packed for two channels a multiply */
-        const unsigned char *p = c->rgb;
-        for (i = 0; i < w * h; i++, p += 3) { c->prb[i] = (unsigned int)p[0] << 16 | p[2]; c->pg[i] = p[1]; }
     }
     c->xw = c->xi + ow;
     hrb[0] = c->hrb; hrb[1] = c->hrb + ow;
@@ -1977,14 +2069,57 @@ static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, in
             stretch_rb(c->prb + (size_t)(iy + 1) * w, c->pg + (size_t)(iy + 1) * w, c->xi, c->xw, ow, hrb[1], hg[1]);
             held[1] = iy + 1;
         }
-        blend_rows(hrb[0], hrb[1], hg[0], hg[1], (unsigned)(256 - wy), (unsigned)wy, ow, lrb, lg);
-        if (use_ovl) {   /* the overlay's runs on this row */
-            int k, k1 = o->row_runs[y + 1];
-            for (k = o->row_runs[y]; k < k1; k++)
-                overlay_span(lrb, lg, o->rb + (size_t)y * ow, o->ga + (size_t)y * ow, o->runs[k * 2], o->runs[k * 2 + 1]);
+        if ((y & 7) == 0) {   /* every eighth row timed, for the log: blending and the overlay, then the dither */
+            long t1 = now_us(), t2;
+            blend_rows(hrb[0], hrb[1], hg[0], hg[1], (unsigned)(256 - wy), (unsigned)wy, ow, lrb, lg);
+            if (use_ovl) overlay_row(o, y, lrb, lg, ow);
+            t2 = now_us();
+            dither_row(lrb, lg, bn, ox, ow, o16, trb, tg);
+            c->us_blend += t2 - t1;
+            c->us_dither += now_us() - t2;
+            continue;
         }
+        blend_rows(hrb[0], hrb[1], hg[0], hg[1], (unsigned)(256 - wy), (unsigned)wy, ow, lrb, lg);
+        if (use_ovl) overlay_row(o, y, lrb, lg, ow);
         dither_row(lrb, lg, bn, ox, ow, o16, trb, tg);
     }
+    return 0;
+}
+
+/* How fast this core and its memory really are, for the log (once a visit, ~0.1 s): a chain of dependent
+ * multiply-adds, then 1 MB filled, read and copied in ordinary memory, and filled in 'px' (a screen
+ * bitmap's pixels, 'bytes' long) when given. */
+int fl_probe(unsigned char *px, int bytes, char *out, int len) {
+    const int MB = 1 << 20;
+    unsigned char *a = (unsigned char *)malloc(MB), *b = (unsigned char *)malloc(MB);
+    unsigned int x = 1, sum = 0, i;
+    long t, alu, fill, rd, cpy, bm = -1;
+    int k;
+    if (!a || !b) { free(a); free(b); snprintf(out, len, "no memory"); return -1; }
+    memset(a, 1, MB); memset(b, 2, MB);   /* touched once: no page faults below */
+    t = now_us();
+    for (i = 0; i < 4000000; i++) x = x * 1103515245u + 12345u;
+    alu = now_us() - t;
+    t = now_us();
+    for (k = 0; k < 4; k++) memset(a, k, MB);
+    fill = now_us() - t;
+    t = now_us();
+    for (k = 0; k < 4; k++) { const unsigned int *w = (const unsigned int *)a; for (i = 0; i < (unsigned)MB / 4; i += 8) sum += w[i]; }
+    rd = now_us() - t;
+    t = now_us();
+    for (k = 0; k < 4; k++) memcpy(b, a, MB);
+    cpy = now_us() - t;
+    if (px && bytes > 0) {
+        t = now_us();
+        for (k = 0; k < 4; k++) memset(px, 0, (size_t)bytes);
+        bm = now_us() - t;
+    }
+    snprintf(out, len, "4M multiply-adds %ld ms (~%ld M a second); 4 MB filled %ld ms (%ld MB/s), read %ld ms (%ld MB/s, a word in 8), "
+             "copied %ld ms (%ld MB/s)%s%ld%s [%u]",
+             alu / 1000, alu > 0 ? 4000000L / alu : 0, fill / 1000, fill > 0 ? 4L * 1000000 / fill : 0, rd / 1000, rd > 0 ? 4L * 1000000 / rd : 0,
+             cpy / 1000, cpy > 0 ? 4L * 1000000 / cpy : 0, bm >= 0 ? "; a screen bitmap filled at " : "",
+             bm > 0 ? (long)((4.0 * bytes / (1 << 20)) * 1000000 / bm) : 0L, bm >= 0 ? " MB/s" : "", (x + sum) & 1);
+    free(a); free(b);
     return 0;
 }
 
@@ -2009,10 +2144,18 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
             for (i = 0; i < c->sw * c->sh; i++, p += 3) info[5 + ((p[0] * 77 + p[1] * 150 + p[2] * 29) >> 10)]++;
         }
         t = now_ms(); if (tm) tm[FL_TM_READ] = (int)(t - t0); t0 = t;
-        look_row(L, &(fl_grain){ 0 }, c->rgb, c->sw * c->sh, 0);
+        if (c->cap_px < c->sw * c->sh) {
+            free(c->prb); free(c->pg);
+            c->cap_px = 0;
+            c->prb = (unsigned int *)malloc(sizeof(unsigned int) * (size_t)c->sw * c->sh);
+            c->pg = (unsigned char *)malloc((size_t)c->sw * c->sh);
+            if (!c->prb || !c->pg) { free(c->prb); free(c->pg); c->prb = NULL; c->pg = NULL; set_err(err, errlen, "out of memory"); return -1; }
+            c->cap_px = c->sw * c->sh;
+        }
+        look_pack(L, c->rgb, c->sw * c->sh, c->prb, c->pg);
         t = now_ms(); if (tm) tm[FL_TM_LOOK] = (int)(t - t0); t0 = t;
     } else {
-        if (!c->rgb) { set_err(err, errlen, "no frame yet"); return -1; }
+        if (!c->prb) { set_err(err, errlen, "no frame yet"); return -1; }
         info[2] = info[3] = info[4] = FL_NO_READING;
     }
     if (flags & FL_F_TEMPORAL) {   /* the grain moves each frame, as film's does */
@@ -2020,7 +2163,9 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
         ox = (int)(hsh & 63); oy = (int)((hsh >> 8) & 63);
     }
     o = ovl_acquire();
+    c->us_blend = c->us_dither = 0;
     rc = frame_compose(c, o, out, ow, oh, stride, aspect1000, format, shifts, ox, oy);
+    if (tm) { tm[FL_TM_BLEND] = (int)(c->us_blend * 8 / 1000); tm[FL_TM_DITHER] = (int)(c->us_dither * 8 / 1000); }
     info[FL_FI_OVERLAY] = o && o->w == ow && o->h == oh ? o->gen : 0;
     ovl_release(o);
     if (rc != 0) { set_err(err, errlen, "bad screen size"); return -1; }

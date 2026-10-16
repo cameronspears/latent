@@ -95,12 +95,17 @@ typedef struct fl_frame_ctx fl_frame_ctx;
 #define FL_TM_READ 1
 #define FL_TM_LOOK 2
 #define FL_TM_COMPOSE 3
-#define FL_FRAME_TIMES 4
+#define FL_TM_BLEND 4     /* of compose: rows blended and the overlay laid in (estimated from every eighth row) */
+#define FL_TM_DITHER 5    /* of compose: dithered and packed (likewise); the rest of compose is stretching */
+#define FL_FRAME_TIMES 6
 fl_frame_ctx *fl_frame_new(void);
 void fl_frame_free(fl_frame_ctx *c);
 int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
              int flags, int seq, unsigned short *out, int ow, int oh, int stride, int aspect1000, int format,
              const int *shifts, int max_w, int max_h, int *info, int *tm, char *err, int errlen);
+/* This core's and its memory's speed, as a line of text for the log; px: a screen bitmap's pixels to fill too, or NULL. */
+int fl_probe(unsigned char *px, int bytes, char *out, int len);
+
 /* The overlay for every frame from now on: argb (as Android's getPixels gives it, not premultiplied),
  * w x h, the size of the screen picture; NULL clears it. Returns its generation (> 0), or -1. */
 int fl_set_overlay(const unsigned int *argb, int w, int h);

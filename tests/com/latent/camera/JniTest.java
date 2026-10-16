@@ -183,8 +183,27 @@ public class JniTest {
         for (int i = 0; i < 20 * ow; i++) { da += a[i] >> 12 & 15; db += b[i] >> 12 & 15; }
         darker = db < da * 0.65 && db > da * 0.3;
         check(white, "opaque overlay: exactly its colour");
+        if (!untouched) for (int y = 20; y < oh; y++) { boolean done = false; for (int x = 0; x < ow; x++) if (!(y >= 100 && y < 140 && x >= 200 && x < 300) && a[y * ow + x] != b[y * ow + x]) { System.out.println("  first difference at " + x + "," + y + ": " + Integer.toHexString(a[y * ow + x] & 0xFFFF) + " vs " + Integer.toHexString(b[y * ow + x] & 0xFFFF)); done = true; break; } if (done) break; }
         check(untouched, "no overlay: the picture exactly");
         check(darker, "half-black overlay: about half as bright (" + db + " of " + da + ")");
+        {   // a fade row (one colour across: laid in by arithmetic) with a clear gap and opaque type in it
+            int[] fv = new int[ow * oh];
+            for (int x = 0; x < ow; x++) fv[300 * ow + x] = 0x60000000;
+            for (int x = 100; x < 110; x++) fv[300 * ow + x] = 0;
+            for (int x = 200; x < 210; x++) fv[300 * ow + x] = 0xFFFFFFFF;
+            FilmCore.setOverlay(fv, ow, oh);
+            short[] f = new short[ow * oh];
+            FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL, 2, f, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
+            boolean gap = true, type = true, faded = true, rest = true;
+            for (int x = 100; x < 110; x++) if (f[300 * ow + x] != a[300 * ow + x]) gap = false;
+            for (int x = 200; x < 210; x++) if ((f[300 * ow + x] & 0xFFFF) != 0xFFFF) type = false;
+            long fa = 0, ff = 0;
+            for (int x = 300; x < ow; x++) { fa += a[300 * ow + x] >> 12 & 15; ff += f[300 * ow + x] >> 12 & 15; }
+            faded = ff < fa * 0.8;
+            for (int y = 0; y < oh; y++) if (y != 300) for (int x = 0; x < ow; x++) if (f[y * ow + x] != a[y * ow + x]) rest = false;
+            check(gap && type && faded && rest, "a fade row: a clear gap shows the picture exactly, type exactly its colour, the rest faded ("
+                    + gap + type + faded + rest + ")");
+        }
         check(FilmCore.setOverlay(new int[10], 2, 5) > gen && FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 2, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm) == 0
                 && info[FilmCore.FI_OVERLAY] == 0, "an overlay of another size isn't laid in");
         check(FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 2, null, new Object(), ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info, tm) == -2, "no Android bitmaps here: says so");
@@ -220,6 +239,8 @@ public class JniTest {
         for (int n = 0; n < 20; n++) FilmCore.setOverlay(ov, ow, oh);
         for (Thread t : th) t.join();
         check(ok[0] && ok[1], "two composers on two threads, overlays swapped meanwhile: every picture right");
+        String pr = FilmCore.probe(null);
+        check(pr.contains("multiply-adds") && pr.contains("MB/s"), "the speed probe: " + pr);
         System.out.println("  composer times (Mac): decode " + tm[0] + ", read " + tm[1] + ", look " + tm[2] + ", compose " + tm[3] + " ms");
         FilmCore.setOverlay(null, 0, 0);
         FilmCore.frameFree(c);

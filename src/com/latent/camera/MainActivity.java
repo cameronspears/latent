@@ -901,6 +901,7 @@ public class MainActivity extends Activity {
             }
             public void closed(String why) {
                 vf = null;
+                getWindow().setFormat(android.graphics.PixelFormat.RGBA_8888);   // full colour again, the camera given back
                 screen.setVisibility(View.VISIBLE);
                 if (relaunchWhenClosed) { relaunch(); return; }   // the camera is back: Latent starts again and develops
                 if (killWhenClosed) { killNow(); return; }
@@ -913,8 +914,18 @@ public class MainActivity extends Activity {
         });
         // the picture's area on screen in real pixels: the 3:2 area (720 x 480 of the design space)
         if (screen.getWidth() > 0) vf.setLiveSize(Math.round(720f * screen.getWidth() / logicalWidth), screen.getHeight());
-        vf.open();
-        screen.invalidate();
+        // the window 16-bit while the camera is held (v0.39.2): the screen is 16-bit then anyway, and each frame's
+        // copy into the 32-bit window cost ~45 ms (writing to display memory). Changed before the camera opens:
+        // the window's new surface is made on the next pass, and the open follows it in the queue.
+        getWindow().setFormat(android.graphics.PixelFormat.RGB_565);
+        final Viewfinder opening = vf;
+        screen.post(new Runnable() {
+            public void run() {
+                if (vf != opening) return;
+                vf.open();
+                screen.invalidate();
+            }
+        });
     }
 
     /** One picture stored (photo is its file, or null when the catalogue didn't name it). */
@@ -2281,23 +2292,28 @@ public class MainActivity extends Activity {
                     break;
                 }
                 if (r == null) break;
-                Stock st = Stock.byId(stocks, r.stock);
+                // the film of the frame in the tray: on an endless roll each frame has its own (the wheel, per frame)
+                Stock st = Stock.byId(stocks, devFrame < r.frames.size() ? r.stockFor(devFrame) : r.stock);
+                if (st == null) st = Stock.byId(stocks, r.stock);
                 s.film = st == null ? null : film(st);
-                s.devFrame = devFrame;
-                s.devTotal = r.frames.size();
-                s.devDone = r.developedCount();
+                // an endless roll develops in batches: this batch counts from its own first frame ("01 of 3"), not
+                // from the roll's first (frame 29 of 31 read as 90% done before anything had developed)
+                int base = r.endless() ? Math.max(0, Math.min(devDoneAtStart, r.frames.size())) : 0;
+                s.devFrame = Math.max(0, devFrame - base);
+                s.devTotal = r.frames.size() - base;
+                s.devDone = Math.max(0, r.developedCount() - base);
                 s.devFramePct = devPct / 100f;
                 long per = msPerFrame();
                 // frames already developed, plus how far the one in hand is (counted once: when it has just
                 // finished it is both "developed" and "at 100%" until the next frame starts)
-                boolean inHandDone = devFrame < s.devTotal && r.developed(devFrame) != null;
-                float done = Math.min(s.devDone - (inHandDone ? 1 : 0) + (inHandDone ? 1f : s.devFramePct), s.devTotal);
+                boolean inHandDone = devFrame < r.frames.size() && r.developed(devFrame) != null;
+                float done = Math.max(0, Math.min(s.devDone - (inHandDone ? 1 : 0) + (inHandDone ? 1f : s.devFramePct), s.devTotal));
                 progressShown = Math.max(progressShown, done / Math.max(1, s.devTotal));   // never goes backwards
                 s.devProgress = progressShown;
                 s.paused = paused;
                 s.devLeft = timeLeft((long) ((s.devTotal - done) * per));
                 s.devPrint = devFrame < r.frames.size() ? thumb(r.source(devFrame)) : null;
-                for (int i = 0; i < s.devTotal; i++) {
+                for (int i = base; i < r.frames.size(); i++) {
                     File d = r.developed(i);
                     s.devStrip.add(d != null ? thumb(d) : null);
                 }

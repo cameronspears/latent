@@ -140,22 +140,29 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      * cores 1 and 2 sit almost idle), each with its own composer (FilmCore.frame): frames go to whichever is
      * free, so two are made at once. v0.37.0 had one, on core 2: 2.7 frames a second.
      */
-    static final int[] LOOK_CORES = { 2, 1 };
+    static final int[] LOOK_CORES = { 2, 1, 0 };
+    /**
+     * Core 0 is the camera's own (35% busy while shooting, v0.39.1): its look thread runs at background
+     * priority, so it only ever takes time the camera leaves, and only gets a frame when 2 and 1 are busy.
+     */
+    static final int LOW_PRIORITY_CORE = 0;
     private final Looker[] lookers = new Looker[LOOK_CORES.length];
     private int seq, shownSeq;
+    private volatile boolean probed;
+    private final int[] framesBy = new int[LOOK_CORES.length], statFramesBy = new int[LOOK_CORES.length];
     /**
      * The level from the picture's own lines. Off since v0.38.2: you didn't want the line, and reading it cost
      * 10-15 ms of every other frame. Level and fl_level stay (tested), ready if it comes back.
      */
     static final boolean LEVEL = false;
     /** The look's grain moves every frame, as film's does (blue noise: it reads as grain, never a pattern). */
-    static final boolean MOVING_GRAIN = true;
+    static final boolean MOVING_GRAIN = false;
     /**
      * The screen's pictures, made whole by the composer (the look, Latent's type and fades over it, dithered):
      * RGB565, opaque, so the screen copies rather than blends, holding the 4-bit values the 16-bit plane
      * shows exactly. One shown, the rest on their way or being made.
      */
-    private final Bitmap[] shown16 = new Bitmap[4];
+    private final Bitmap[] shown16 = new Bitmap[6];   // one shown, up to three on their way, up to three being made
     private volatile int front16 = -1, posted16;   // posted16: a bit for each made and not yet shown
     private int frontOverlay;                        // the overlay generation in the shown picture (0: none)
     private volatile boolean bitmapsDirect = true;   // written in place (libjnigraphics), else through a short[]
@@ -705,8 +712,21 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                     k.ctx = FilmCore.frameNew();
                 }
                 // a little behind the screen and the camera's callbacks, ahead of the darkroom (v0.31's background
-                // priority starved it under the camera's own load)
-                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
+                // priority starved it under the camera's own load); on the camera's core, only what it leaves
+                android.os.Process.setThreadPriority(k.core == LOW_PRIORITY_CORE ? android.os.Process.THREAD_PRIORITY_BACKGROUND
+                        : android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
+                if (!probed && k.core == LOOK_CORES[0] && w > 0 && h > 0) {   // once a visit: this core's and its memory's speed
+                    probed = true;
+                    Bitmap pb = null;
+                    try {
+                        pb = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565);
+                        note("speed: " + FilmCore.probe(pb));
+                    } catch (Throwable e) {
+                        note("speed: " + Probe.why(e));
+                    } finally {
+                        if (pb != null) pb.recycle();
+                    }
+                }
                 final Looked r = new Looked();
                 r.by = k;
                 r.seq = n;
@@ -780,6 +800,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         }
         lookMsSum += r.ms;
         lastLookMs = r.ms;
+        for (int i = 0; i < LOOK_CORES.length; i++) if (LOOK_CORES[i] == r.by.core) framesBy[i]++;
         for (int i = 0; i < stageMs.length; i++) stageMs[i] += r.tm[i];
         if (r.angle != FilmCore.NO_READING) level.frame(r.angle, r.confidence, r.support, now); else level.tick(now);
         if (r.hist != null) hist = r.hist;
@@ -1759,13 +1780,18 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             long cpu = cpuMs();
             int look = n > 0 ? lm / n : 0, grab = grabs > 0 ? grabMsSum / grabs : 0;
             StringBuilder st = new StringBuilder();
-            String[] names = { "decode", "level", "look", "compose" };
+            String[] names = { "decode", "level", "look", "compose", "of it blend", "dither" };
             for (int i = 0; i < stageMs.length; i++) {
                 st.append(i == 0 ? "" : ", ").append(names[i]).append(' ').append(n > 0 ? (stageMs[i] - statStage[i]) / n : 0);
                 statStage[i] = stageMs[i];
             }
             String cores = "";
-            for (Looker k : lookers) if (k != null && k.pinned != null) cores += (cores.length() > 0 ? "+" : "") + k.pinned;
+            for (int i = 0; i < lookers.length; i++) {
+                Looker k = lookers[i];
+                if (k == null || k.pinned == null) continue;
+                cores += (cores.length() > 0 ? " + " : "") + k.pinned + " (" + (framesBy[i] - statFramesBy[i]) + ")";
+                statFramesBy[i] = framesBy[i];
+            }
             note("live: " + n + " frames in " + (now - statsAt) / 1000 + " s, " + look + " ms each (" + st + ") on " + cores + ", grab " + grab + " ms, "
                     + draws + " draws of " + (draws > 0 ? drawMsSum / draws : 0) + " ms (picture " + (draws > 0 ? blitMsSum / draws : 0) + "), cores " + coreLoad() + ", "
                     + (overlaysMade - statOverlays) + " overlays of "

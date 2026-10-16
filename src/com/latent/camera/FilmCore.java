@@ -99,7 +99,7 @@ final class FilmCore {
     static final int F_LEVEL = 1, F_HIST = 2, F_TEMPORAL = 4;
     static final int FMT_565 = 0, FMT_4444 = 1;
     static final int NO_READING = -999999, FI_OVERLAY = 69, FI_COUNT = 70;
-    static final int TM_DECODE = 0, TM_READ = 1, TM_LOOK = 2, TM_COMPOSE = 3, TM_COUNT = 4;
+    static final int TM_DECODE = 0, TM_READ = 1, TM_LOOK = 2, TM_COMPOSE = 3, TM_BLEND = 4, TM_DITHER = 5, TM_COUNT = 6;
 
     /** A composer for one thread (its buffers and its film); 0 if there's no memory. */
     static native long frameNew();
@@ -117,6 +117,9 @@ final class FilmCore {
     static native int frame(long ctx, byte[] jpeg, int len, String lutPath, int[] params, int flags, int seq,
                             short[] out, Object bitmap, int ow, int oh, int aspect1000, int format,
                             int[] shifts, int maxW, int maxH, int[] info, int[] tm);
+
+    /** This core's and its memory's speed, as a line for the log; bitmap (an android.graphics.Bitmap) is filled too, or null. */
+    static native String probe(Object bitmap);
 
     /** Latent's type and fades laid over every frame from now on (argb as getPixels gives it, ow x oh); null clears. Its generation. */
     static native int setOverlay(int[] argb, int w, int h);
