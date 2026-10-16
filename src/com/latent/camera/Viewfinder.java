@@ -278,6 +278,14 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     public void surfaceDestroyed(SurfaceHolder h) { if (!closed) close(null); }
 
+    /**
+     * The exposure-change and AF-start listeners, off: the viewfinder is the only code that ever set them,
+     * and no picture it took was ever stored while it held the camera (v0.31-v0.35.3; v0.32.1's only once
+     * Latent was left), while the Shooting test and the Live look test, without them, stored theirs.
+     * Exposure is read when focus locks instead (readExposure).
+     */
+    static final boolean EXPOSURE_LISTENERS = false;
+
     /** The camera's answers: the shutter, the AF lamp, and exposure as it changes. Each is optional (bodies differ). */
     private void listen() {
         set("setShutterListener", "com.sony.scalar.hardware.CameraEx$ShutterListener", new InvocationHandler() {
@@ -310,13 +318,13 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 return objectMethod(p, m, a);
             }
         });
-        set("setAutoFocusStartListener", "com.sony.scalar.hardware.CameraEx$AutoFocusStartListener", new InvocationHandler() {
+        if (EXPOSURE_LISTENERS) set("setAutoFocusStartListener", "com.sony.scalar.hardware.CameraEx$AutoFocusStartListener", new InvocationHandler() {
             public Object invoke(Object p, Method m, Object[] a) {
                 if (m.getName().equals("onStart")) { lampThisTry = lamp; release.cameraFocus(Release.AF_WORKING); host.changed(); }
                 return objectMethod(p, m, a);
             }
         });
-        set("setShutterSpeedChangeListener", "com.sony.scalar.hardware.CameraEx$ShutterSpeedChangeListener", new InvocationHandler() {
+        if (EXPOSURE_LISTENERS) set("setShutterSpeedChangeListener", "com.sony.scalar.hardware.CameraEx$ShutterSpeedChangeListener", new InvocationHandler() {
             private boolean logged;
             public Object invoke(Object p, Method m, Object[] a) {
                 if (m.getName().startsWith("on") && a != null && a.length > 0 && a[0] != null) {
@@ -327,7 +335,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 return objectMethod(p, m, a);
             }
         });
-        set("setApertureChangeListener", "com.sony.scalar.hardware.CameraEx$ApertureChangeListener", new InvocationHandler() {
+        if (EXPOSURE_LISTENERS) set("setApertureChangeListener", "com.sony.scalar.hardware.CameraEx$ApertureChangeListener", new InvocationHandler() {
             private boolean logged;
             public Object invoke(Object p, Method m, Object[] a) {
                 if (m.getName().startsWith("on") && a != null && a.length > 0 && a[0] != null) {
@@ -355,7 +363,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 }
             })) break;
         }
-        set("setAutoISOSensitivityListener", "com.sony.scalar.hardware.CameraEx$AutoISOSensitivityListener", new InvocationHandler() {
+        if (EXPOSURE_LISTENERS) set("setAutoISOSensitivityListener", "com.sony.scalar.hardware.CameraEx$AutoISOSensitivityListener", new InvocationHandler() {
             public Object invoke(Object p, Method m, Object[] a) {
                 if (m.getName().startsWith("on") && a != null && a.length > 0 && a[0] instanceof Integer) {
                     int v = (Integer) a[0];
@@ -365,6 +373,26 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             }
         });
     }
+
+    /** Shutter speed, aperture and ISO as the camera has them now (on a focus lock; the listeners are off). Changes nothing. */
+    private void readExposure() {
+        try {
+            Camera.Parameters p = camera.getParameters();
+            Object m = cameraEx.getClass().getMethod("createParametersModifier", Camera.Parameters.class).invoke(cameraEx, p);
+            Object pair = m.getClass().getMethod("getShutterSpeed").invoke(m);
+            if (pair instanceof android.util.Pair) {
+                Object n = ((android.util.Pair<?, ?>) pair).first, d = ((android.util.Pair<?, ?>) pair).second;
+                if (n instanceof Integer && d instanceof Integer && (Integer) n > 0 && (Integer) d > 0) shutter = shutterText((Integer) n, (Integer) d);
+            }
+            Object f = m.getClass().getMethod("getAperture").invoke(m);
+            if (f instanceof Integer && (Integer) f > 0) aperture = apertureText((Integer) f);
+            host.changed();
+        } catch (Throwable e) {
+            if (exposureFails++ < 3) note("exposure: " + Probe.why(e));
+        }
+    }
+
+    private int exposureFails;
 
     /** Focus mode and area, exposure as set, and how many more photos fit on the card. Read once; changes nothing. */
     private void readSettings() {
@@ -795,7 +823,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (g != focusGen || closed) return;
         focusGen++;   // this try is answered
         long ms = SystemClock.uptimeMillis() - focusStart;
-        if (locked) locks++; else misses++;
+        if (locked) { locks++; if (!EXPOSURE_LISTENERS) readExposure(); } else misses++;
         if (locks + misses <= 12) note("Latent's focus, try " + release.tries + ": " + (locked ? "locked" : "no lock") + " in " + ms + " ms" + (lampThisTry ? ", AF lamp" : ""));
         release.focused(locked);
         host.changed();
