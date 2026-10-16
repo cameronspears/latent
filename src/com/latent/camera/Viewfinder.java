@@ -101,6 +101,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private boolean inFlight, sequenceStopped;
     private long framesAskedAt, lastFrameAt, lastLookAt, statsAt;
     private int grabs, grabMsSum, statFrames, statLookMs;
+    private long lastLookMs, statCpu;
+    private int slowSpells;
     private int frames, lookMsSum, grabFails;
     private final int[] px = new int[FRAME_W * FRAME_H], info = new int[FilmCore.L_COUNT];
     private Bitmap frame;
@@ -381,7 +383,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             // with the look off the camera's own picture shows, and frames still come now and then, for the level
             // at most about 8 frames a second (each ask is a call to the camera's own processor); with the
             // look off the camera's own picture shows, and frames still come now and then, for the level
-            if (!inFlight && now - lastLookAt >= (lookOn ? 120 : 300)) {
+            // and never more than half the time busy: as long again idle as the last frame took (v0.31.0's
+            // camera slowed down while just looking, with the frames going flat out)
+            if (!inFlight && now - lastLookAt >= Math.max(lookOn ? 150 : 300, lastLookMs * 2)) {
                 long g = SystemClock.uptimeMillis();
                 byte[] f = grab();
                 if (f != null) { lastLookAt = now; grabMsSum += SystemClock.uptimeMillis() - g; grabs++; look(f); }
@@ -434,8 +438,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         final int[] p = params.clone();
         worker.execute(new Runnable() {
             public void run() {
-                // a little behind the UI thread, which shares this core: presses come first
-                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE * 4);
+                // behind everything else on this core: the camera's own work and your presses come first
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
                 long t = SystemClock.uptimeMillis();
                 final int rc;
                 try { rc = FilmCore.live(jpeg, jpeg.length, l, p, px, FRAME_W, FRAME_H, info); }
@@ -461,6 +465,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         frame.setPixels(px, 0, w, 0, 0, w, h);
         if (frames++ == 0) { note("first frame " + w + "x" + h + " after " + (SystemClock.uptimeMillis() - framesAskedAt) + " ms; look " + ms + " ms"); flushLog(); }
         lookMsSum += ms;
+        lastLookMs = ms;
         level.frame(info[FilmCore.L_ANGLE], info[FilmCore.L_CONFIDENCE], info[FilmCore.L_SUPPORT], SystemClock.uptimeMillis());
         if (hist == null) hist = new int[FilmCore.L_HIST_BINS];
         System.arraycopy(info, FilmCore.L_HIST, hist, 0, FilmCore.L_HIST_BINS);
@@ -834,15 +839,47 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (statsAt > 0) {
             int n = frames - statFrames, lm = lookMsSum - statLookMs;
             Runtime rt = Runtime.getRuntime();
-            note("live: " + n + " frames in " + (now - statsAt) / 1000 + " s, look " + (n > 0 ? lm / n : 0) + " ms, grab "
-                    + (grabs > 0 ? grabMsSum / grabs : 0) + " ms, heap " + (rt.totalMemory() - rt.freeMemory()) / 1024 + " of " + rt.maxMemory() / 1024 + " KB");
+            long cpu = cpuMs();
+            int look = n > 0 ? lm / n : 0, grab = grabs > 0 ? grabMsSum / grabs : 0;
+            note("live: " + n + " frames in " + (now - statsAt) / 1000 + " s, look " + look + " ms, grab " + grab + " ms, Latent's CPU "
+                    + (cpu >= 0 && statCpu >= 0 ? (cpu - statCpu) * 100 / Math.max(1, now - statsAt) + "%" : "?") + ", load " + loadAvg()
+                    + ", heap " + (rt.totalMemory() - rt.freeMemory()) / 1024 + " of " + rt.maxMemory() / 1024 + " KB");
+            statCpu = cpu;
+            // the camera struggling: give it its own live view back rather than push on
+            if (lookOn && (look > 400 || grab > 150)) {
+                if (++slowSpells >= 2) { lookOn = false; lookFailed = true; say("Film look paused: the camera is busy"); note("look off: the frames slowed down"); pauseFrames(); }
+            } else slowSpells = 0;
             flushLog();
         }
+        if (statsAt == 0) statCpu = cpuMs();
         statsAt = now;
         statFrames = frames;
         statLookMs = lookMsSum;
         grabs = 0;
         grabMsSum = 0;
+    }
+
+    /** Latent's own CPU time so far, in ms (/proc/self/stat), or -1. */
+    private static long cpuMs() {
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader("/proc/self/stat"));
+            String st;
+            try { st = r.readLine(); } finally { r.close(); }
+            String[] f = st.substring(st.lastIndexOf(')') + 2).split(" ");
+            return (Long.parseLong(f[11]) + Long.parseLong(f[12])) * 10;   // utime + stime, in 1/100 s
+        } catch (Throwable e) {
+            return -1;
+        }
+    }
+
+    /** The system's load average over the last minute (/proc/loadavg). */
+    private static String loadAvg() {
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader("/proc/loadavg"));
+            try { String l = r.readLine(); return l == null ? "?" : l.split(" ")[0]; } finally { r.close(); }
+        } catch (Throwable e) {
+            return "?";
+        }
     }
 
     private int flushed;   // how much of the log is on the card already
