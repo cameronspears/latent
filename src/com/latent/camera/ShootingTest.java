@@ -119,12 +119,13 @@ final class ShootingTest implements SurfaceHolder.Callback {
                     mediaId = media;
                     options = oc.newInstance();
                     oc.getMethod("setTargetMedia", String.class).invoke(options, media);
+                    try { oc.getMethod("setRecordingMode", int.class).invoke(options, 0); } catch (Throwable e) { note("recording mode: " + Probe.why(e)); }   // stills, as Sony's apps open it
                 }
             } catch (Throwable e) {
                 note("no target media: " + Probe.why(e));
                 options = null;
             }
-            note("opening with target media " + media);
+            note("opening with target media " + media + ", stills");
             cameraEx = open.invoke(null, 0, options);
             camera = (Camera) cx.getMethod("getNormalCamera").invoke(cameraEx);
         } catch (Throwable e) {
@@ -133,6 +134,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             return;
         }
         report(S_OPEN, OK, "opened in " + (SystemClock.uptimeMillis() - t) + " ms");
+        sequenced = hookCapture();   // before live view, as Sony's apps prepare their capture sequence
         step(S_LIVE, RUN, "starting…");
         host.showLive(true);
         SurfaceHolder h = surface.getHolder();
@@ -393,7 +395,6 @@ final class ShootingTest implements SurfaceHolder.Callback {
             }
         });
         if (!listening) { report(S_SHOT, FAIL, "no shutter listener on this camera"); afterPicture(); return; }
-        sequenced = hookCapture();
         shutterStart = SystemClock.uptimeMillis();
         if (sequenced) ui.postDelayed(captureWatchdog, 15000);
         try {
@@ -545,10 +546,16 @@ final class ShootingTest implements SurfaceHolder.Callback {
                     return objectMethod(p, m, a);
                 }
             });
-            cs.getMethod("setShutterSequenceCallback", cb, oc).invoke(sequence2, callback, o);
-            cs.getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
-            locked = true;   // from the shutter until unlockShutter
-            note("capture hook set");
+            try {
+                cs.getMethod("setShutterSequenceCallback", cb, oc).invoke(sequence2, callback, o);
+                cs.getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
+                locked = true;   // from the shutter until unlockShutter
+                note("capture hook set, with options");
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                note("capture hook with options: " + Probe.why(e.getCause()) + "; trying it plain");
+                cs.getMethod("setShutterSequenceCallback", cb).invoke(sequence2, callback);
+                note("capture hook set, plain");
+            }
             return true;
         } catch (Throwable e) {
             note("capture hook: " + Probe.why(e) + "; the camera stores as usual");
