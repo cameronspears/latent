@@ -30,7 +30,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             "Camera closed" };
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
     static final int FOCUS_TRIES = 4;
-    static final long FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, SAVE_TIMEOUT_MS = 30000, FRAMES_MS = 3000;
+    static final long FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, SAVE_TIMEOUT_MS = 15000, FRAMES_MS = 3000;
 
     private final File card;
     private final SurfaceView surface;
@@ -90,8 +90,25 @@ final class ShootingTest implements SurfaceHolder.Callback {
         long t = SystemClock.uptimeMillis();
         try {
             Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
-            Method open = cx.getMethod("open", int.class, Class.forName("com.sony.scalar.hardware.CameraEx$OpenOptions"));
-            cameraEx = open.invoke(null, 0, null);
+            Class<?> oc = Class.forName("com.sony.scalar.hardware.CameraEx$OpenOptions");
+            Method open = cx.getMethod("open", int.class, oc);
+            // where pictures go: the memory card, as Sony's own apps say when they open the camera
+            // (opened without it, v0.21.0's photo reached the card only after the camera was released)
+            Object options = null;
+            String media = null;
+            try {
+                String[] ids = (String[]) Class.forName("com.sony.scalar.provider.AvindexStore").getMethod("getExternalMediaIds").invoke(null);
+                if (ids != null && ids.length > 0) {
+                    media = ids[0];
+                    options = oc.newInstance();
+                    oc.getMethod("setTargetMedia", String.class).invoke(options, media);
+                }
+            } catch (Throwable e) {
+                note("no target media: " + Probe.why(e));
+                options = null;
+            }
+            note("opening with target media " + media);
+            cameraEx = open.invoke(null, 0, options);
             camera = (Camera) cx.getMethod("getNormalCamera").invoke(cameraEx);
         } catch (Throwable e) {
             report(0, FAIL, Probe.why(e));
@@ -216,7 +233,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             if (set("setCaptureStatusListener", iface, new InvocationHandler() {
                 public Object invoke(Object p, Method m, Object[] a) {
                     if (m.getName().equals("onStart") || m.getName().equals("onEnd"))
-                        note("capture " + m.getName().substring(2).toLowerCase(java.util.Locale.US) + (a != null && a.length > 1 ? ", reason " + a[1] : ""));
+                        note("capture " + m.getName().substring(2).toLowerCase(java.util.Locale.US) + (a != null && a.length > 2 ? ", reason " + a[1] : ""));
                     return objectMethod(p, m, a);
                 }
             })) break;
@@ -267,6 +284,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         long waited = SystemClock.uptimeMillis() - since;
         if (now > highestBefore) {
             note("new photo on the card " + waited + " ms after the shutter");
+            photoSeen = true;
             report(3, OK, "DSC" + String.format(java.util.Locale.US, "%05d", now % 10000) + ".JPG on the card: shutter " + shutterMs + " ms, saved "
                     + waited + " ms later" + (storedName != null ? "" : " (no store report)"));
             ui.postDelayed(new Runnable() { public void run() { afterPicture(); } }, 1500);   // Auto Review, if on, has its moment
@@ -277,9 +295,25 @@ final class ShootingTest implements SurfaceHolder.Callback {
         ui.postDelayed(new Runnable() { public void run() { waitForFile(shutterMs, since); } }, 300);
     }
 
+    private boolean photoSeen;
+
     private void afterPicture() {
         if (closed) return;
         frames();
+    }
+
+    /** With the camera given back: does a photo the test didn't see land now? (Background thread.) */
+    private void watchAfterRelease() {
+        if (photoSeen || shutterStart == 0) return;
+        final long released = SystemClock.uptimeMillis();
+        for (int i = 0; i < 40; i++) {
+            if (Roll.highest(Library.photos(card)) > highestBefore) {
+                note("photo landed " + (SystemClock.uptimeMillis() - released) + " ms after the camera was released");
+                return;
+            }
+            try { Thread.sleep(250); } catch (InterruptedException e) { return; }
+        }
+        note("no photo within 10 s of the release either");
     }
 
     // ------------------------------------------------------------------------------ live frames
@@ -368,6 +402,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         closeCamera();   // the look runs with the camera given back already
         new Thread(new Runnable() {
             public void run() {
+                watchAfterRelease();
                 String result;
                 int status;
                 try {
