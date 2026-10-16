@@ -164,13 +164,14 @@ public class ViewfinderTest {
         touch(new File(dcim, "DSC04690.JPG"), 1700000000000L);
         touch(new File(dcim, "DSC04691.JPG"), 1700000100000L);
         List<File> listed = Library.photos(card);
-        check(Library.withShots(card, listed) == listed, "no SHOTS.TXT: the listing as it is");
+        check(Library.withShots(card, listed, null) == listed, "no SHOTS.TXT: the listing as it is");
 
         Library.recordShot(card, new File(dcim, "DSC04691.JPG"));   // the listing has it already
         Library.recordShot(card, new File(dcim, "DSC04692.JPG"));   // taken in the viewfinder, not listed yet
         Library.recordShot(card, new File(dcim, "DSC04693.JPG"));
         Library.recordShot(card, new File(dcim, "DSC04693.JPG"));   // twice: counted once
-        List<File> all = Library.withShots(card, listed);
+        java.util.Set<Integer> cat = new java.util.HashSet<Integer>(java.util.Arrays.asList(1004690, 1004691, 1004692, 1004693));
+        List<File> all = Library.withShots(card, listed, cat);
         check(all.size() == 4 && all.get(0).getName().equals("DSC04691.JPG") && all.get(2).getName().equals("DSC04692.JPG")
                 && all.get(3).getName().equals("DSC04693.JPG"), "the listing, then the pictures it doesn't show yet: " + all);
         check(all.get(2).getParentFile().getName().equals("100MSDCF") && Roll.number(all.get(2)) == 1004692, "by their folder and number");
@@ -180,10 +181,15 @@ public class ViewfinderTest {
 
         File list = new File(card, "LATENT/SHOTS.TXT");
         check(read(list).equals("100MSDCF/DSC04692.JPG\r\n100MSDCF/DSC04693.JPG\r\n"), "SHOTS.TXT keeps only those still missing");
+        cat.remove(1004693);   // catalogued for a moment, then lost (the camera hung while storing it)
+        all = Library.withShots(card, listed, cat);
+        check(all.size() == 3 && all.get(2).getName().equals("DSC04692.JPG") && read(list).equals("100MSDCF/DSC04692.JPG\r\n"),
+                "a picture the catalogue doesn't have was never stored: dropped");
+        all = Library.withShots(card, listed, null);
+        check(all.size() == 3, "the catalogue unreadable: the rest are kept");
         touch(new File(dcim, "DSC04692.JPG"), 1700000200000L);
-        touch(new File(dcim, "DSC04693.JPG"), 1700000300000L);
-        all = Library.withShots(card, Library.photos(card));
-        check(all.size() == 4 && !list.exists(), "once the listing shows them, SHOTS.TXT goes");
+        all = Library.withShots(card, Library.photos(card), null);
+        check(all.size() == 3 && !list.exists(), "once the listing shows it, SHOTS.TXT goes");
     }
 
     static void words() {

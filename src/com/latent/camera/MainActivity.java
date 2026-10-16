@@ -231,7 +231,9 @@ public class MainActivity extends Activity {
                 List<File> listed = Library.photos(card);
                 final int highest = Roll.highest(listed);
                 // test shots are never exposures; the viewfinder's are, even before the listing shows them
-                List<File> all = Library.withoutIgnored(card, Library.withShots(card, listed));
+                // (pictures the listing doesn't show are checked against the catalogue: one never stored doesn't count)
+                Set<Integer> catalogued = new File(Library.home(card), "SHOTS.TXT").exists() ? Probe.catalogued(getContentResolver()) : null;
+                List<File> all = Library.withoutIgnored(card, Library.withShots(card, listed, catalogued));
                 long r3 = SystemClock.uptimeMillis();
                 try {
                     String tidied = Roll.tidy(ro, Roll.exposable(all, ro));

@@ -261,6 +261,20 @@ final class Probe {
         return out;
     }
 
+    /** Every photo number in the card's catalogue (folder 100, file 4696: 1004696), or null if it can't be read. */
+    static java.util.Set<Integer> catalogued(ContentResolver cr) {
+        try {
+            String[] ids = (String[]) Class.forName("com.sony.scalar.provider.AvindexStore").getMethod("getExternalMediaIds").invoke(null);
+            if (ids == null || ids.length != 1) return null;
+            Uri uri = (Uri) Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media").getMethod("getContentUri", String.class).invoke(null, ids[0]);
+            java.util.Set<Integer> out = new java.util.HashSet<Integer>();
+            for (Row r : query(cr, uri)) out.add(r.folder * 10000 + r.number);
+            return out;
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
     /** The catalog entry for a DCIM file: folder NNNxxxxx and file xxxxNNNN. */
     static Row find(List<Row> rows, File f) {
         try {

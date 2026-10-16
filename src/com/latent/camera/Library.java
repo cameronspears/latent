@@ -77,9 +77,11 @@ final class Library {
 
     /**
      * These photos (newest first) plus the viewfinder's pictures the listing doesn't show yet, at the
-     * end (their file times aren't known). SHOTS.TXT keeps only those still missing.
+     * end (their file times aren't known). SHOTS.TXT keeps only those still missing. catalogued, when
+     * known, holds the photo numbers in the camera's catalogue: a picture missing from it was never
+     * stored (v0.31.0's hung camera catalogued one, then lost it) and is dropped.
      */
-    static List<File> withShots(File card, List<File> photos) {
+    static List<File> withShots(File card, List<File> photos, java.util.Set<Integer> catalogued) {
         File list = new File(home(card), "SHOTS.TXT");
         if (!list.exists()) return photos;
         java.util.Set<String> seen = new java.util.HashSet<String>();
@@ -93,7 +95,9 @@ final class Library {
                 for (String line; (line = r.readLine()) != null; ) {
                     String k = line.trim().toUpperCase(Locale.US);
                     if (k.length() == 0 || seen.contains(k) || !added.add(k)) continue;
-                    out.add(new File(new File(card, "DCIM"), k));
+                    File f = new File(new File(card, "DCIM"), k);
+                    if (catalogued != null && !catalogued.contains(Roll.number(f))) continue;
+                    out.add(f);
                     keep.append(k).append("\r\n");
                 }
             } finally { r.close(); }

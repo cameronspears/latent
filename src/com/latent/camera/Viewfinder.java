@@ -99,7 +99,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     // live frames
     private int widthIndex;
     private boolean inFlight, sequenceStopped;
-    private long framesAskedAt, lastFrameAt, lastLookAt;
+    private long framesAskedAt, lastFrameAt, lastLookAt, statsAt;
+    private int grabs, grabMsSum, statFrames, statLookMs;
     private int frames, lookMsSum, grabFails;
     private final int[] px = new int[FRAME_W * FRAME_H], info = new int[FilmCore.L_COUNT];
     private Bitmap frame;
@@ -154,6 +155,10 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     }
 
     private void note(String line) {
+        synchronized (log) { noteLocked(line); }
+    }
+
+    private void noteLocked(String line) {
         log.append("  ").append(SystemClock.uptimeMillis() - t0).append(" ms  ").append(line).append("\r\n");
     }
 
@@ -195,6 +200,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             return;
         }
         note("camera open in " + (SystemClock.uptimeMillis() - t) + " ms (media " + mediaId + ")");
+        flushLog();
         host.showLive(true);
         SurfaceHolder h = surface.getHolder();
         h.addCallback(this);
@@ -373,17 +379,21 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             if (closed || sequence == null || sequenceStopped) return;
             long now = SystemClock.uptimeMillis();
             // with the look off the camera's own picture shows, and frames still come now and then, for the level
-            if (!inFlight && (lookOn || now - lastLookAt > 300)) {
+            // at most about 8 frames a second (each ask is a call to the camera's own processor); with the
+            // look off the camera's own picture shows, and frames still come now and then, for the level
+            if (!inFlight && now - lastLookAt >= (lookOn ? 120 : 300)) {
+                long g = SystemClock.uptimeMillis();
                 byte[] f = grab();
-                if (f != null) { lastLookAt = now; look(f); }
+                if (f != null) { lastLookAt = now; grabMsSum += SystemClock.uptimeMillis() - g; grabs++; look(f); }
             }
+            if (now - statsAt >= 10000) stats(now);
             if (frames == 0 && lastFrameAt == 0 && now - framesAskedAt > FRAMES_WAIT_MS) {   // none yet: another size, or none at all
                 stopSequence();
                 if (++widthIndex < WIDTHS.length) { note("no frames at " + WIDTHS[widthIndex - 1] + " px"); startFrames(); }
                 else noLook("no frames at any size");
                 return;
             }
-            ui.postDelayed(this, inFlight ? 40 : 25);
+            ui.postDelayed(this, 40);
         }
     };
 
@@ -449,7 +459,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (w <= 0 || h <= 0) return;
         if (frame == null || frame.getWidth() != w || frame.getHeight() != h) frame = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         frame.setPixels(px, 0, w, 0, 0, w, h);
-        if (frames++ == 0) note("first frame " + w + "x" + h + " after " + (SystemClock.uptimeMillis() - framesAskedAt) + " ms; look " + ms + " ms");
+        if (frames++ == 0) { note("first frame " + w + "x" + h + " after " + (SystemClock.uptimeMillis() - framesAskedAt) + " ms; look " + ms + " ms"); flushLog(); }
         lookMsSum += ms;
         level.frame(info[FilmCore.L_ANGLE], info[FilmCore.L_CONFIDENCE], info[FilmCore.L_SUPPORT], SystemClock.uptimeMillis());
         if (hist == null) hist = new int[FilmCore.L_HIST_BINS];
@@ -532,42 +542,30 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     // ------------------------------------------------------------------------------ the picture
 
-    private boolean retryWithoutFrames;
-
+    /**
+     * The picture, the way the Shooting test proved safe: no live frames running while the camera
+     * captures and stores it. v0.31.0 took a picture with the frames running, and the camera catalogued
+     * it, never wrote it to the card, and hung (it wouldn't even switch off). So the frames stop before
+     * the shutter (the camera's own live view shows meanwhile), the catalogue is asked no more than every
+     * 300 ms, and the frames come back only once every picture is in the catalogue and has had a moment.
+     */
     public void shoot() {
         if (closed) return;
+        pauseFrames();
         shutterAt = SystemClock.uptimeMillis();
+        note("shutter (frames stopped)");
+        flushLog();   // if the camera hangs from here, the card already says how far it got
         try {
             call("burstableTakePicture");
         } catch (Throwable e) {
-            note("burstableTakePicture: " + Probe.why(e) + (sequence != null && !retryWithoutFrames ? "; again without live frames" : ""));
+            note("burstableTakePicture: " + Probe.why(e));
             safely("cancelTakePicture");
-            if (sequence != null && !sequenceStopped && !retryWithoutFrames) {   // the frames may hold the camera: once more without them
-                retryWithoutFrames = true;
-                stopSequence();
-                sequenceStopped = true;
-                ui.postDelayed(new Runnable() { public void run() { if (!closed && release.shooting) shootAgain(); } }, 150);
-                return;
-            }
             say("The camera wouldn't take it");
             release.shot(false);
-            restartFrames();
+            resumeFramesLater(RESUME_MS);
             return;
         }
         ui.postDelayed(shutterTimeout, SHUTTER_TIMEOUT_MS);
-    }
-
-    private void shootAgain() {
-        try {
-            call("burstableTakePicture");
-            ui.postDelayed(shutterTimeout, SHUTTER_TIMEOUT_MS);
-        } catch (Throwable e) {
-            note("burstableTakePicture without frames: " + Probe.why(e));
-            safely("cancelTakePicture");
-            say("The camera wouldn't take it");
-            release.shot(false);
-            restartFrames();
-        }
     }
 
     private final Runnable shutterTimeout = new Runnable() {
@@ -577,7 +575,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             safely("cancelTakePicture");
             say("The camera didn't answer");
             release.shot(false);
-            restartFrames();
+            resumeFramesLater(RESUME_MS);
         }
     };
 
@@ -591,12 +589,12 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             shots++;
             long now = SystemClock.uptimeMillis();
             flashUntil = now + FLASH_MS;
-            if (frame != null) {   // the print: the frame as it was, in the look (frames get it even when it is off on screen)
+            if (frame != null) {   // the print: the last frame before the shutter, in the look
                 if (print != null) print.recycle();
                 print = frame.copy(Bitmap.Config.ARGB_8888, false);
                 printAt = now;
             }
-            if (shots <= 30) note("shot " + shots + ": shutter " + ms + " ms" + (sequenceStopped ? " (frames paused)" : ""));
+            if (shots <= 30) note("shot " + shots + ": shutter " + ms + " ms");
             storeSince = now;
             findStored();
             ui.removeCallbacks(tick);
@@ -604,27 +602,48 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         } else {
             note("shutter status " + status + " after " + ms + " ms");
             say(status == 1 ? "The camera cancelled it" : "The camera reported an error");
+            resumeFramesLater(RESUME_MS);
         }
+        flushLog();
         release.shot(status == 0);
-        restartFrames();
         host.changed();
     }
 
-    private void restartFrames() {
-        if (sequenceStopped && !closed && !lookFailed) { sequenceStopped = false; startFrames(); }
+    /** After a picture is in the catalogue, this long before the frames come back. */
+    static final long RESUME_MS = 1200;
+
+    private void pauseFrames() {
+        ui.removeCallbacks(resume);
+        ui.removeCallbacks(poll);
+        if (!sequenceStopped) { stopSequence(); sequenceStopped = true; }
+        host.changed();
     }
+
+    private void resumeFramesLater(long ms) { ui.removeCallbacks(resume); ui.postDelayed(resume, ms); }
+
+    /** The frames back, once nothing is being taken or stored. */
+    private final Runnable resume = new Runnable() {
+        public void run() {
+            if (closed || !sequenceStopped) return;
+            if (release.shooting || stored < shots) { resumeFramesLater(300); return; }
+            sequenceStopped = false;
+            if (!lookFailed) startFrames();
+            host.changed();
+        }
+    };
 
     /**
      * The camera stores and catalogues each picture itself (about 0.2 s after the shutter); Linux sees
      * the file only once the card is read again, so its name comes from the catalogue, asked on a
-     * thread of its own every 120 ms until every picture taken is found (or 8 s pass).
+     * thread of its own every 300 ms (as the Shooting test did) until every picture taken is found (or 8 s pass).
      */
     private void findStored() {
         if (catalogueBusy || closed || stored >= shots) return;
-        if (!baselineKnown && mediaId != null && SystemClock.uptimeMillis() - storeSince < STORE_WAIT_MS) { ui.postDelayed(findAgain, 100); return; }
+        if (!baselineKnown && mediaId != null && SystemClock.uptimeMillis() - storeSince < STORE_WAIT_MS) { ui.postDelayed(findAgain, 300); return; }
         if (mediaId == null || SystemClock.uptimeMillis() - storeSince > STORE_WAIT_MS) {   // not seen: counted anyway, found by number next time
             note((shots - stored) + " picture(s) not seen in the catalogue");
             for (; stored < shots; stored++) host.shot(null);
+            resumeFramesLater(RESUME_MS);
             return;
         }
         catalogueBusy = true;
@@ -657,7 +676,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                             if (stored <= 30) note(f.getName() + " in the catalogue " + (SystemClock.uptimeMillis() - storeSince) + " ms after the shutter");
                             host.shot(f);
                         }
-                        if (stored < shots && !closed) ui.postDelayed(findAgain, 120);
+                        if (stored < shots && !closed) ui.postDelayed(findAgain, 300);   // never pressing the catalogue while the camera writes it
+                        else if (!closed) { flushLog(); resumeFramesLater(RESUME_MS); }
                     }
                 });
             }
@@ -724,7 +744,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     void fill(UiState s) {
         long now = SystemClock.uptimeMillis();
         s.mode = UiState.PHOTO;
-        boolean look = lookOn && frame != null;
+        boolean look = lookOn && frame != null && !sequenceStopped;   // frames stopped for a picture: the camera's own view
         s.liveImage = look ? frame : null;
         s.liveThrough = previewing && !look;   // the camera's own live view shows through
         s.lookLive = look;
@@ -768,7 +788,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         note("closed: " + shots + " picture(s), " + frames + " live frames (" + String.format(Locale.US, "%.1f", frames * 1000.0 / liveMs)
                 + " a second, look " + (frames > 0 ? lookMsSum / frames : 0) + " ms each), focus " + locks + " locked / " + misses
                 + " missed, level sure on " + level.sure + " of " + level.frames + " frames");
-        worker.execute(new Runnable() { public void run() { writeLog(); } });
+        flushLog();
         catalogue.shutdown();
         ui.removeCallbacksAndMessages(null);
         for (; stored < shots; stored++) host.shot(null);   // taken but not yet named: still exposures on the roll
@@ -809,14 +829,41 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         sequence = null;
     }
 
-    private void writeLog() {
+    /** Every 10 s while live: how the frames are keeping up (a camera slowing down shows here first). */
+    private void stats(long now) {
+        if (statsAt > 0) {
+            int n = frames - statFrames, lm = lookMsSum - statLookMs;
+            Runtime rt = Runtime.getRuntime();
+            note("live: " + n + " frames in " + (now - statsAt) / 1000 + " s, look " + (n > 0 ? lm / n : 0) + " ms, grab "
+                    + (grabs > 0 ? grabMsSum / grabs : 0) + " ms, heap " + (rt.totalMemory() - rt.freeMemory()) / 1024 + " of " + rt.maxMemory() / 1024 + " KB");
+            flushLog();
+        }
+        statsAt = now;
+        statFrames = frames;
+        statLookMs = lookMsSum;
+        grabs = 0;
+        grabMsSum = 0;
+    }
+
+    private int flushed;   // how much of the log is on the card already
+
+    /** The log so far onto the card (only what's new), so a camera that hangs still leaves it. */
+    private void flushLog() {
+        String add;
+        synchronized (log) {
+            if (flushed >= log.length()) return;
+            add = log.substring(flushed);
+            flushed = log.length();
+        }
         try {
             FileOutputStream o = new FileOutputStream(new File(Library.home(card), "VIEWFIND.TXT"), true);
-            try { o.write(log.toString().getBytes("UTF-8")); } finally { o.close(); }
+            try { o.write(add.getBytes("UTF-8")); } finally { o.close(); }
         } catch (Exception ignored) {
             // the log is a convenience
         }
     }
+
+    private void writeLog() { flushLog(); }
 
     // ------------------------------------------------------------------------------ words for the screen
 
