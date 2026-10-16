@@ -672,12 +672,13 @@ final class Ui {
             "Changes no setting and takes no picture. Then closes the camera again. Point it around while it runs.",
     };
     static final String[] SHOOT_PLAN = {
+            "Reads the focus options the camera offers (modes, areas, faces) and listens to its motion sensors for two seconds, to see if a level is possible. Only reads.",
             "Opens the camera with live view, then focuses by itself. If it can't lock, as in a dark room, it tries again, up to four times, and notes how long the AF lamp is on.",
             "Takes one photo. The camera saves it to the card as usual.",
             "Asks for live view as small pictures and times a film look on one. That decides whether looks can be shown live.",
             "Changes no camera setting. Point the camera at something and hold still.",
     };
-    static final String SHOOT_FOOTER = "About fifteen seconds. MENU stops it. Results go to LATENT/SHOOTING.TXT.";
+    static final String SHOOT_FOOTER = "About twenty seconds. Hold it level at first. MENU stops it. Log: LATENT/SHOOTING.TXT";
     static final String LIVE_FOOTER = "About ten seconds. MENU stops it. Results go to LATENT/LIVEVIEW.TXT.";
 
     private static void liveOverlay(Gfx g, UiState s) {
@@ -718,7 +719,7 @@ final class Ui {
         }
         String[] names = s.probeSteps;
         for (int i = 0; i < names.length && i < s.probeStatus.length; i++) {
-            float y = 100 + i * 46;
+            float step = Math.min(46, (FOOT - 46 - 100) / Math.max(1, names.length - 1f)), y = 100 + i * step;   // many steps: closer together
             int st = s.probeStatus[i];
             int c = st == Probe.OK ? 0xFF6FBF73 : st == Probe.FAIL ? RED : st == Probe.RUN ? INK : INK3;
             if (st == Probe.OK) { g.line(L, y - 7, L + 6, y - 1, 2, c); g.line(L + 6, y - 1, L + 16, y - 13, 2, c); }

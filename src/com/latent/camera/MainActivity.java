@@ -522,7 +522,7 @@ public class MainActivity extends Activity {
         final Stock stock = st;
         if ((hardwareTest || speedTest) && stock == null) { toast("No film looks on the card"); probeStage = 0; return; }
         if (shootTest) {   // like the live view test: on this thread, which opens the camera
-            shootRun = new ShootingTest(card, liveSurface, stock, listener, new LiveViewTest.Host() {
+            shootRun = new ShootingTest(this, card, liveSurface, stock, listener, new LiveViewTest.Host() {
                 public void showLive(boolean on) {
                     liveOn = on;
                     liveSurface.setVisibility(on ? View.VISIBLE : View.GONE);

@@ -145,10 +145,10 @@ public class RenderScreens {
         s.probePlan = Ui.SHOOT_PLAN; s.probeFooter = Ui.SHOOT_FOOTER;
         render(s, fonts, out, "13b-shooting-intro");
         s.probeStage = 2;
-        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
-        s.probeDetail = new String[] { "opened in 560 ms", "on screen", "locked in 840 ms on try 2, AF lamp on 1900 ms in all",
-                "DSC04671.JPG on the card: shutter 410 ms, saved 1200 ms later", "41 in 3.0 s (13.7 a second), 640x424, 31 KB each",
-                "Tri-X: 95 ms a frame, decode included (640x424, one core)", "live view stopped, camera released" };
+        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
+        s.probeDetail = new String[] { "opened in 662 ms", "on screen", "af-s, center, faces [off, on]", "52 readings in 2 s: roll 1.4\u00b0, pitch -3.0\u00b0",
+                "locked in 1049 ms", "DSC04679.JPG on the card: shutter 36 ms, saved 1400 ms later", "29 in 3.0 s (9.6 a second), 640x424, 31 KB each",
+                "Tri-X: 640x424 on 1 core 419 ms, 640x424 on 3 cores 412 ms, 320x212 on 3 cores 142 ms", "live view stopped, camera released" };
         render(s, fonts, out, "13c-shooting-results");
         s.probeStage = 2; s.probeTitle = "Camera roll test"; s.probeSteps = Probe.STEPS;
         s.probeStatus = new int[] { Probe.INFO, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.FAIL, Probe.OK };

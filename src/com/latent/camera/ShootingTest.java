@@ -1,6 +1,11 @@
 package com.latent.camera;
 
+import android.content.Context;
 import android.graphics.BitmapFactory;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.hardware.Camera;
 import android.os.Handler;
 import android.os.SystemClock;
@@ -26,12 +31,14 @@ import java.lang.reflect.Proxy;
  * Log: LATENT/SHOOTING.TXT, one frame: LATENT/LIVEFRM.JPG.
  */
 final class ShootingTest implements SurfaceHolder.Callback {
-    static final String[] STEPS = { "Open the camera", "Live view", "Focus", "Take a picture", "Live frames", "A look on a frame",
-            "Camera closed" };
+    static final String[] STEPS = { "Open the camera", "Live view", "Focus options", "Level sensor", "Focus", "Take a picture",
+            "Live frames", "A look on a frame", "Camera closed" };
+    static final int S_OPEN = 0, S_LIVE = 1, S_OPTIONS = 2, S_LEVEL = 3, S_FOCUS = 4, S_SHOT = 5, S_FRAMES = 6, S_LOOK = 7, S_CLOSED = 8;
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
     static final int FOCUS_TRIES = 4;
     static final long FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, SAVE_TIMEOUT_MS = 15000, FRAMES_MS = 3000;
 
+    private final Context context;
     private final File card;
     private final SurfaceView surface;
     private final Stock stock;
@@ -59,8 +66,8 @@ final class ShootingTest implements SurfaceHolder.Callback {
     private int frameCount, emptyPolls, frameBytes;
     private byte[] lastFrame;
 
-    ShootingTest(File card, SurfaceView surface, Stock stock, Probe.Listener out, LiveViewTest.Host host) {
-        this.card = card; this.surface = surface; this.stock = stock; this.out = out; this.host = host;
+    ShootingTest(Context context, File card, SurfaceView surface, Stock stock, Probe.Listener out, LiveViewTest.Host host) {
+        this.context = context; this.card = card; this.surface = surface; this.stock = stock; this.out = out; this.host = host;
     }
 
     private void report(int i, int status, String detail) {
@@ -86,7 +93,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             }
         });
         highestBefore = Roll.highest(Library.photos(card));
-        out.step(0, RUN, "opening…");
+        out.step(S_OPEN, RUN, "opening…");
         long t = SystemClock.uptimeMillis();
         try {
             Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
@@ -111,18 +118,18 @@ final class ShootingTest implements SurfaceHolder.Callback {
             cameraEx = open.invoke(null, 0, options);
             camera = (Camera) cx.getMethod("getNormalCamera").invoke(cameraEx);
         } catch (Throwable e) {
-            report(0, FAIL, Probe.why(e));
+            report(S_OPEN, FAIL, Probe.why(e));
             close();
             return;
         }
-        report(0, OK, "opened in " + (SystemClock.uptimeMillis() - t) + " ms");
-        out.step(1, RUN, "starting…");
+        report(S_OPEN, OK, "opened in " + (SystemClock.uptimeMillis() - t) + " ms");
+        out.step(S_LIVE, RUN, "starting…");
         host.showLive(true);
         SurfaceHolder h = surface.getHolder();
         h.addCallback(this);
         if (h.getSurface() != null && h.getSurface().isValid()) surfaceCreated(h);
         ui.postDelayed(new Runnable() {
-            public void run() { if (!previewing && !closed) { report(1, FAIL, "no live view surface"); close(); } }
+            public void run() { if (!previewing && !closed) { report(S_LIVE, FAIL, "no live view surface"); close(); } }
         }, 4000);
     }
 
@@ -133,14 +140,16 @@ final class ShootingTest implements SurfaceHolder.Callback {
             camera.startPreview();
             previewing = true;
         } catch (Throwable e) {
-            report(1, FAIL, Probe.why(e));
+            report(S_LIVE, FAIL, Probe.why(e));
             close();
             return;
         }
-        report(1, OK, "on screen");
+        report(S_LIVE, OK, "on screen");
         listen();
+        focusOptions();
+        level();
         host.note("Shooting test: point at something and hold still");
-        ui.postDelayed(new Runnable() { public void run() { focus(); } }, 2000);
+        ui.postDelayed(new Runnable() { public void run() { focus(); } }, 2500);   // after the level's two seconds
     }
 
     /** Listeners that only report: focus results and the AF lamp. Each is optional (bodies differ). */
@@ -168,6 +177,111 @@ final class ShootingTest implements SurfaceHolder.Callback {
         });
     }
 
+    // ------------------------------------------------------------------------------ focus options (read only)
+
+    /** The getters asked about, and only these: some others have crashed other Sony bodies. */
+    private static final String[] FOCUS_GETTERS = { "getAutoFocusMode", "getSupportedAutoFocusModes", "getFocusAreaMode",
+            "getSupportedFocusAreaModes", "getFocusAreaFlexibleSpotSize", "getSupportedFocusAreaFlexibleSpotSizes", "getFocusPointIndex",
+            "getSupportedQuickAutoFocus", "getSupportedAutoFocusStartTriggers", "getFaceDetectionMode", "getSupportedFaceDetectionModes",
+            "getMaxNumDetectedFaces", "getTrackingFocus", "getSupportedTrackingFocusModes", "isFocusDriveSupported", "isSupportedFocusHold",
+            "getMaxFocusDriveSpeed" };
+
+    /** What the camera offers for focusing: Android's focus modes and Sony's own (AF mode, areas, faces, tracking). */
+    private void focusOptions() {
+        out.step(S_OPTIONS, RUN, "reading…");
+        try {
+            Camera.Parameters p = camera.getParameters();
+            note("focus mode " + p.getFocusMode() + ", supported " + p.getSupportedFocusModes());
+            Object m = cameraEx.getClass().getMethod("createParametersModifier", Camera.Parameters.class).invoke(cameraEx, p);
+            StringBuilder sum = new StringBuilder();
+            for (String g : FOCUS_GETTERS) {
+                Object v;
+                try { v = m.getClass().getMethod(g).invoke(m); }
+                catch (NoSuchMethodException e) { note(g + ": not on this camera"); continue; }
+                catch (Throwable e) { note(g + ": " + Probe.why(e)); continue; }
+                note(g + " = " + v);
+                if (g.equals("getAutoFocusMode")) sum.append(v);
+                if (g.equals("getFocusAreaMode")) sum.append(", ").append(v);
+                if (g.equals("getSupportedFaceDetectionModes")) sum.append(", faces ").append(v);
+                if (g.equals("getSupportedTrackingFocusModes") && v != null) sum.append(", tracking");
+            }
+            String flat = p.flatten();
+            for (String kv : flat.split(";")) if (kv.contains("focus") || kv.contains("af") || kv.contains("face")) note("  " + kv);
+            report(S_OPTIONS, OK, sum.length() > 0 ? sum.toString() : "read; see the log");
+        } catch (Throwable e) {
+            report(S_OPTIONS, FAIL, Probe.why(e));
+        }
+    }
+
+    // ------------------------------------------------------------------------------ level sensor (read only)
+
+    private SensorManager sensors;
+    private int readings;
+    private float gx, gy, gz;
+    private String sensorNames = "";
+
+    private final SensorEventListener gravity = new SensorEventListener() {
+        public void onSensorChanged(SensorEvent e) {
+            if (e.values == null || e.values.length < 3) return;
+            if (readings++ < 3) note("sensor " + e.sensor.getType() + ": " + e.values[0] + ", " + e.values[1] + ", " + e.values[2]);
+            gx = e.values[0]; gy = e.values[1]; gz = e.values[2];
+        }
+        public void onAccuracyChanged(Sensor s, int a) { }
+    };
+    private final SensorEventListener idle = new SensorEventListener() {
+        public void onSensorChanged(SensorEvent e) { }
+        public void onAccuracyChanged(Sensor s, int a) { }
+    };
+
+    /**
+     * Can the camera tell how level it is? Lists its motion sensors, listens to them for two seconds
+     * (with the magnetic one on too, as Sony's level does), and asks whether it has a digital level.
+     */
+    private void level() {
+        out.step(S_LEVEL, RUN, "listening…");
+        try {
+            Class<?> sp = Class.forName("com.sony.scalar.sysutil.ScalarProperties");
+            for (String prop : new String[] { "PROP_DEVICE_DIGITAL_LEVEL", "PROP_UI_DIGITAL_LEVEL_TYPE" }) {
+                try {
+                    Object key = sp.getField(prop).get(null);
+                    Method get = null;
+                    for (Method mm : sp.getMethods()) if (mm.getName().equals("getInt") && mm.getParameterTypes().length == 1) get = mm;
+                    note(prop + " = " + (get != null ? get.invoke(null, key) : "?"));
+                } catch (Throwable e) { note(prop + ": " + Probe.why(e)); }
+            }
+        } catch (Throwable e) { note("ScalarProperties: " + Probe.why(e)); }
+        try {
+            sensors = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
+            StringBuilder names = new StringBuilder();
+            for (Sensor x : sensors.getSensorList(Sensor.TYPE_ALL)) names.append(names.length() > 0 ? ", " : "").append(x.getName()).append(" (").append(x.getType()).append(")");
+            sensorNames = names.length() > 0 ? names.toString() : "none";
+            note("sensors: " + sensorNames);
+            for (int type : new int[] { Sensor.TYPE_ACCELEROMETER, 9 /* gravity */, Sensor.TYPE_MAGNETIC_FIELD }) {
+                Sensor x = sensors.getDefaultSensor(type);
+                boolean ok = x != null && sensors.registerListener(type == Sensor.TYPE_MAGNETIC_FIELD ? idle : gravity, x, SensorManager.SENSOR_DELAY_GAME);
+                note("sensor type " + type + (ok ? " listening" : " not available"));
+            }
+        } catch (Throwable e) {
+            note("sensors: " + Probe.why(e));
+        }
+        ui.postDelayed(new Runnable() { public void run() { levelDone(); } }, 2000);
+    }
+
+    private void levelDone() {
+        stopSensors();
+        if (readings == 0) { report(S_LEVEL, FAIL, "no readings (sensors: " + sensorNames + ")"); return; }
+        // held level, the camera's up axis reads +9.8; roll is the turn about the lens, pitch the tilt up or down
+        double roll = Math.toDegrees(Math.atan2(gx, gy)), pitch = Math.toDegrees(Math.atan2(gz, Math.sqrt(gx * gx + gy * gy)));
+        report(S_LEVEL, OK, readings + " readings in 2 s: roll " + String.format(java.util.Locale.US, "%.1f", roll) + "\u00b0, pitch "
+                + String.format(java.util.Locale.US, "%.1f", pitch) + "\u00b0");
+    }
+
+    private void stopSensors() {
+        if (sensors == null) return;
+        try { sensors.unregisterListener(gravity); sensors.unregisterListener(idle); } catch (Throwable ignored) { }
+        sensors = null;
+    }
+
     // ------------------------------------------------------------------------------ focus
 
     /** The camera's own autofocus; when it can't lock, cancel and go again, up to FOCUS_TRIES times. */
@@ -176,7 +290,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         tries++;
         focusing = true;
         focusStart = SystemClock.uptimeMillis();
-        out.step(2, RUN, tries == 1 ? "focusing…" : "focusing, try " + tries + "…");
+        out.step(S_FOCUS, RUN, tries == 1 ? "focusing…" : "focusing, try " + tries + "…");
         final int attempt = tries;
         try {
             camera.autoFocus(new Camera.AutoFocusCallback() {
@@ -200,7 +314,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         if (lampOnAt > 0) { lampMs += SystemClock.uptimeMillis() - lampOnAt; lampOnAt = SystemClock.uptimeMillis(); }
         String lamp = lampMs > 0 ? ", AF lamp on " + lampMs + " ms in all" : "";
         if (success) {
-            report(2, OK, "locked in " + ms + " ms" + (attempt > 1 ? " on try " + attempt : "") + lamp);
+            report(S_FOCUS, OK, "locked in " + ms + " ms" + (attempt > 1 ? " on try " + attempt : "") + lamp);
             shoot();   // with focus still held, as the camera does on a full press
             return;
         }
@@ -209,7 +323,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             ui.postDelayed(new Runnable() { public void run() { focus(); } }, 300);
             return;
         }
-        report(2, FAIL, "no lock in " + FOCUS_TRIES + " tries" + lamp + "; shooting anyway");
+        report(S_FOCUS, FAIL, "no lock in " + FOCUS_TRIES + " tries" + lamp + "; shooting anyway");
         shoot();
     }
 
@@ -217,7 +331,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
 
     private void shoot() {
         if (closed) return;
-        out.step(3, RUN, "shooting…");
+        out.step(S_SHOT, RUN, "shooting…");
         shooting = true;
         set("setStoreImageCompleteListener", "com.sony.scalar.hardware.CameraEx$StoreImageCompleteListener", new InvocationHandler() {
             public Object invoke(Object p, Method m, Object[] a) {
@@ -244,7 +358,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 return objectMethod(p, m, a);
             }
         });
-        if (!listening) { report(3, FAIL, "no shutter listener on this camera"); afterPicture(); return; }
+        if (!listening) { report(S_SHOT, FAIL, "no shutter listener on this camera"); afterPicture(); return; }
         shutterStart = SystemClock.uptimeMillis();
         try {
             call("burstableTakePicture");
@@ -252,13 +366,13 @@ final class ShootingTest implements SurfaceHolder.Callback {
             note("burstableTakePicture: " + Probe.why(e));
             safely("cancelTakePicture");
             shooting = false;
-            report(3, FAIL, "the camera wouldn't shoot: " + Probe.why(e));
+            report(S_SHOT, FAIL, "the camera wouldn't shoot: " + Probe.why(e));
             afterPicture();
             return;
         }
         ui.postDelayed(new Runnable() {
             public void run() {
-                if (shooting) { note("no shutter answer"); safely("cancelTakePicture"); shooting = false; report(3, FAIL, "no answer from the shutter"); afterPicture(); }
+                if (shooting) { note("no shutter answer"); safely("cancelTakePicture"); shooting = false; report(S_SHOT, FAIL, "no answer from the shutter"); afterPicture(); }
             }
         }, SHUTTER_TIMEOUT_MS);
     }
@@ -272,8 +386,8 @@ final class ShootingTest implements SurfaceHolder.Callback {
         safely("cancelTakePicture");
         set("setShutterListener", null, null);
         try { camera.cancelAutoFocus(); } catch (Throwable ignored) { }
-        if (status != 0) { report(3, FAIL, status == 1 ? "cancelled by the camera" : "the camera reported an error"); afterPicture(); return; }
-        out.step(3, RUN, "saving…");
+        if (status != 0) { report(S_SHOT, FAIL, status == 1 ? "cancelled by the camera" : "the camera reported an error"); afterPicture(); return; }
+        out.step(S_SHOT, RUN, "saving…");
         waitForFile(ms, SystemClock.uptimeMillis());
     }
 
@@ -285,13 +399,13 @@ final class ShootingTest implements SurfaceHolder.Callback {
         if (now > highestBefore) {
             note("new photo on the card " + waited + " ms after the shutter");
             photoSeen = true;
-            report(3, OK, "DSC" + String.format(java.util.Locale.US, "%05d", now % 10000) + ".JPG on the card: shutter " + shutterMs + " ms, saved "
+            report(S_SHOT, OK, "DSC" + String.format(java.util.Locale.US, "%05d", now % 10000) + ".JPG on the card: shutter " + shutterMs + " ms, saved "
                     + waited + " ms later" + (storedName != null ? "" : " (no store report)"));
             ui.postDelayed(new Runnable() { public void run() { afterPicture(); } }, 1500);   // Auto Review, if on, has its moment
             return;
         }
-        if (waited > SAVE_TIMEOUT_MS) { report(3, FAIL, "shutter fired (" + shutterMs + " ms) but no new photo in " + SAVE_TIMEOUT_MS / 1000 + " s"); afterPicture(); return; }
-        if (waited > 0 && waited % 3000 < 300) out.step(3, RUN, "saving… " + waited / 1000 + " s");
+        if (waited > SAVE_TIMEOUT_MS) { report(S_SHOT, FAIL, "shutter fired (" + shutterMs + " ms) but no new photo in " + SAVE_TIMEOUT_MS / 1000 + " s"); afterPicture(); return; }
+        if (waited > 0 && waited % 3000 < 300) out.step(S_SHOT, RUN, "saving… " + waited / 1000 + " s");
         ui.postDelayed(new Runnable() { public void run() { waitForFile(shutterMs, since); } }, 300);
     }
 
@@ -320,7 +434,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
 
     /** Live view as small JPEG frames (CameraSequence's preview sequence), polled for a few seconds. */
     private void frames() {
-        out.step(4, RUN, "asking for frames…");
+        out.step(S_FRAMES, RUN, "asking for frames…");
         try {
             Class<?> cs = Class.forName("com.sony.scalar.hardware.CameraSequence");
             Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
@@ -335,9 +449,9 @@ final class ShootingTest implements SurfaceHolder.Callback {
             option(o, "JPEG_COMPRESS_MAX_SIZE", 100);
             cs.getMethod("startPreviewSequence", oc).invoke(sequence, o);
         } catch (Throwable e) {
-            report(4, FAIL, "no preview sequence: " + Probe.why(e));
+            report(S_FRAMES, FAIL, "no preview sequence: " + Probe.why(e));
             stopSequence();
-            report(5, INFO, "no frame to try");
+            report(S_LOOK, INFO, "no frame to try");
             close();
             return;
         }
@@ -383,22 +497,22 @@ final class ShootingTest implements SurfaceHolder.Callback {
         long ms = Math.max(1, SystemClock.uptimeMillis() - framesStart);
         stopSequence();
         if (frameCount == 0) {
-            report(4, FAIL, "none in " + ms / 1000 + " s (" + emptyPolls + " empty asks)");
-            report(5, INFO, "no frame to try");
+            report(S_FRAMES, FAIL, "none in " + ms / 1000 + " s (" + emptyPolls + " empty asks)");
+            report(S_LOOK, INFO, "no frame to try");
             close();
             return;
         }
         BitmapFactory.Options b = new BitmapFactory.Options();
         b.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(lastFrame, 0, lastFrame.length, b);
-        report(4, OK, frameCount + " in " + ms / 1000.0 + " s (" + String.format(java.util.Locale.US, "%.1f", frameCount * 1000.0 / ms)
+        report(S_FRAMES, OK, frameCount + " in " + ms / 1000.0 + " s (" + String.format(java.util.Locale.US, "%.1f", frameCount * 1000.0 / ms)
                 + " a second), " + b.outWidth + "x" + b.outHeight + ", " + frameBytes / frameCount / 1024 + " KB each");
         lookOnFrame(lastFrame);
     }
 
     /** How long a film look takes on one live frame: decides how smooth a live look could be. */
     private void lookOnFrame(final byte[] jpeg) {
-        out.step(5, RUN, "timing…");
+        out.step(S_LOOK, RUN, "timing…");
         closeCamera();   // the look runs with the camera given back already
         new Thread(new Runnable() {
             public void run() {
@@ -441,7 +555,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 }
                 final String r = result;
                 final int s = status;
-                ui.post(new Runnable() { public void run() { report(5, s, r); finish(); } });
+                ui.post(new Runnable() { public void run() { report(S_LOOK, s, r); finish(); } });
             }
         }, "look-timing").start();
     }
@@ -459,12 +573,13 @@ final class ShootingTest implements SurfaceHolder.Callback {
         if (cameraEx == null) return;
         releaseCamera();
         host.showLive(false);
-        report(6, OK, "live view stopped, camera released");
+        report(S_CLOSED, OK, "live view stopped, camera released");
     }
 
     /** cancel focus and capture, stop the sequence and live view, then release: the order the verified apps use. */
     private void releaseCamera() {
         ui.removeCallbacks(poll);
+        stopSensors();
         stopSequence();
         if (cameraEx == null) return;
         try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable ignored) { }
