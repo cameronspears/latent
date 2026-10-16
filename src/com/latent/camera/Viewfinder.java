@@ -554,7 +554,27 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     /** The roll is full: the button becomes Latent's and takes nothing more. */
     void lockRoll() { release.lock(); host.changed(); }
 
-    private boolean ready() { return previewing && !closed && !closing; }
+    private boolean ready() { return previewing && !closed && !closing && !hidden; }
+
+    private boolean hidden;   // MENU: the camera back is on screen, the camera kept open behind it
+
+    /** Out of sight (the camera stays open, its live view behind Latent's other screens). */
+    void hide() {
+        if (hidden) return;
+        if (release.half) release.halfUp();
+        cancelFocus();
+        hidden = true;
+        note("hidden (MENU): the camera stays open");
+        flushLog();
+    }
+
+    /** Back on screen. */
+    void show() {
+        if (!hidden) return;
+        hidden = false;
+        note("shown again");
+        host.changed();
+    }
 
     /** Centre: the film look on live view, or the camera's own picture (smooth, at full speed). */
     void toggleLook() {
@@ -793,7 +813,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 try {
                     Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
                     android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
-                    for (Probe.Row r : Probe.query(activity.getContentResolver(), uri)) if (r.jpeg && r.folder * 10000 + r.number > after) found.add(r);
+                    // any new entry: a picture just taken is catalogued before it is marked as having its JPEG
+                    // (v0.32.0 waited for the mark and never saw its pictures; the Shooting test never asked)
+                    for (Probe.Row r : Probe.query(activity.getContentResolver(), uri)) if (r.folder * 10000 + r.number > after) found.add(r);
                 } catch (Throwable e) {
                     problem = Probe.why(e);
                 }

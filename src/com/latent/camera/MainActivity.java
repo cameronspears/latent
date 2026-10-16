@@ -177,21 +177,25 @@ public class MainActivity extends Activity {
         ui.removeCallbacks(shootWhenSettled);   // left some other way: don't jump to shooting later
         shootPending = false;
         if (liveRun != null) liveRun.close();    // never keep the camera when Latent isn't on screen
-        if (shootRun != null) shootRun.close();
-        if (vf != null) vf.close(null);
         final Runnable keysLog = new Runnable() { public void run() { logKeys(); } };
         worker.execute(keysLog);
         Display.fullColour(false);
         if (developing != null) paused = true;   // finish the frame in hand, then stop; resumable later
         powerSave.release();
-    }
-
-    @Override
-    protected void onStop() {
-        super.onStop();
-        // once the camera has been opened here, Sony's image memory stays taken until this process ends:
-        // close Latent when it's left, so the next time it opens the darkroom can develop what was shot
-        if (Viewfinder.opened && !isFinishing()) finish();
+        // Once the camera has been opened here, Sony's image memory stays taken until this process ends.
+        // Leaving a camera app only pauses it (v0.32.0: never stopped, never destroyed, and the next open
+        // resumed this same process with nothing developing), so Latent closes itself now: the camera is
+        // given back (after any picture still storing), then the process ends, and the next open develops.
+        if (Viewfinder.opened) {
+            devLog("leaving: the camera was opened, so Latent closes itself (its image memory comes back only then)");
+            killWhenClosed = true;
+            if (vf != null) {
+                vf.close(null);
+                ui.postDelayed(new Runnable() { public void run() { if (vf != null) vf.closeNow(); killNow(); } }, 12000);
+            } else {
+                ui.post(new Runnable() { public void run() { killNow(); } });
+            }
+        }
     }
 
     @Override
@@ -199,23 +203,16 @@ public class MainActivity extends Activity {
         super.onDestroy();
         worker.shutdown();
         filer.shutdown();
-        if (Viewfinder.opened) {
-            devLog("closing Latent: the camera was opened, so its image memory comes back only once Latent has closed");
-            if (vf != null) {   // still giving the camera back (a picture storing): close once it has, or at the latest in 12 s
-                killWhenClosed = true;
-                ui.postDelayed(new Runnable() { public void run() { if (vf != null) vf.closeNow(); killNow(); } }, 12000);
-                return;
-            }
-            killNow();
-        }
     }
 
     private boolean killWhenClosed;
 
     /** Latent ends here, so the next open is a fresh one (with the camera's image memory back). */
     private void killNow() {
+        worker.shutdown();
         try { worker.awaitTermination(1500, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
         filer.shutdownNow();
+        finish();
         android.os.Process.killProcess(android.os.Process.myPid());
     }
 
@@ -570,6 +567,11 @@ public class MainActivity extends Activity {
         if (st == null && !stocks.isEmpty()) st = stocks.get(0);
         final Stock stock = st;
         if ((hardwareTest || speedTest) && stock == null) { toast("No film looks on the card"); probeStage = 0; return; }
+        if ((shootTest || liveTest) && vf != null) {   // the viewfinder holds the camera until Latent is left
+            toast("The camera is in use. Leave Latent and open it again to run this test");
+            probeStage = 0;
+            return;
+        }
         if (shootTest) {   // like the live view test: on this thread, which opens the camera
             shootRun = new ShootingTest(this, card, liveSurface, stock, listener, new LiveViewTest.Host() {
                 public void showLive(boolean on) {
@@ -706,7 +708,16 @@ public class MainActivity extends Activity {
      * the roll's exposures as the camera stores them; they develop the next time Latent opens.
      */
     private void openViewfinder() {
-        if (vf != null || current == null) return;
+        if (current == null) return;
+        if (vf != null) {   // opened earlier this visit and kept open: the camera is never reopened in one visit
+            if (!current.endless() && exposed >= current.length) { toast("Roll finished"); return; }
+            mode = PHOTO;
+            readBattery();
+            vf.show();
+            if (s1Held) vf.halfDown();
+            screen.invalidate();
+            return;
+        }
         if (!current.endless() && exposed >= current.length) { toast("Roll finished"); return; }
         Stock st = Stock.byId(stocks, current.stock);
         mode = PHOTO;
@@ -759,7 +770,20 @@ public class MainActivity extends Activity {
         screen.invalidate();
     }
 
-    private final Runnable closeWhenFinished = new Runnable() { public void run() { if (vf != null) vf.close(null); } };
+    private final Runnable closeWhenFinished = new Runnable() { public void run() { hideViewfinder(); } };
+
+    /**
+     * MENU in the viewfinder: back to the camera back, with the camera kept open behind it. Opening it
+     * again in the same visit froze the camera twice (v0.31.2, v0.32.0), so it is given back only when
+     * Latent is left.
+     */
+    private void hideViewfinder() {
+        if (vf == null) return;
+        ui.removeCallbacks(closeWhenFinished);
+        vf.hide();
+        if (mode == PHOTO) mode = BACK;
+        screen.invalidate();
+    }
 
     /** Nothing shot on this roll yet: its film can still change. */
     private boolean filmFresh() {
@@ -804,7 +828,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (!down) {
-            if (sc == SC_MENU || sc == SC_SK1 || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_BACK) vf.close(null);
+            if (sc == SC_MENU || sc == SC_SK1 || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_BACK) hideViewfinder();
             return;
         }
         if (sc == SC_WHEEL_CW || sc == SC_DIAL_CW) { vfFilm(1); return; }
