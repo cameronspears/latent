@@ -20,7 +20,7 @@ import java.util.Locale;
  * that touches the camera's image memory, so a hang still leaves a record.
  *
  * Ideas so far: v0.38 transfer size (no gain, 2 MB kept: P_BLOCK); v0.39 film files read without sscanf
- * (-324 ms a new film, kept: P_FAST_CUBE). v0.39.1 also showed the look is now the limit: Latent's
+ * (-324 ms a new film; always on since v0.42.0, after the setting was lost in a crash). v0.39.1 also showed the look is now the limit: Latent's
  * thread waited ~20 ms a develop for the helpers on cores 1 and 2, each busy ~4.5 s.
  * This version's idea (v0.41.0): a third helper on core 0, the camera's own core, at the helpers' low
  * priority (the camera's work still comes first there). Rows are independent, so the picture can't
@@ -37,8 +37,6 @@ final class DevelopTest {
     static final int MIN_GAIN_MS = 120, MIN_GAIN_PCT = 3;
     /** The darkroom's transfer size, as v0.38's test chose it (HardwareDevelop.DARKROOM_BLOCK until then). */
     static final String P_BLOCK = "developBlock";
-    /** Film files are read with the fast reader (FilmCore.setFastCube), as v0.39's test chose. */
-    static final String P_FAST_CUBE = "fastCube";
     /** The look also runs on core 0 (four threads), once this test has shown it helps. */
     static final String P_CORE0 = "core0";
 
@@ -106,10 +104,10 @@ final class DevelopTest {
             p[FilmCore.QUALITY] = 95; p[FilmCore.SEED] = 1;
             int variant = prefs.getInt("lookVariant", 0);
             FilmCore.setVariant(variant);   // the inner loop the darkroom uses
-            FilmCore.setFastCube(prefs.getBoolean(P_FAST_CUBE, false));   // and its way of reading film files
+            FilmCore.setFastCube(true);   // and its way of reading film files
             final int block = prefs.getInt(P_BLOCK, HardwareDevelop.DARKROOM_BLOCK);
             note("photo " + photo.getName() + ", film " + stock.name + ", loop " + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, variant))]
-                    + ", block " + block / 1024 + " KB, film files " + (prefs.getBoolean(P_FAST_CUBE, false) ? "fast" : "sscanf")
+                    + ", block " + block / 1024 + " KB"
                     + ", core 0 now " + (prefs.getBoolean(P_CORE0, false) ? "used" : "left to the camera"));
             note(FilmCore.cores().replace("\n", "\r\n").trim());   // how busy each core is with nothing of ours running
 

@@ -1270,7 +1270,7 @@ public class MainActivity extends Activity {
             public void run() {
                 // developing into the camera roll needs the catalogue and a verified memory path
                 FilmCore.setVariant(prefs.getInt("lookVariant", 0));   // the inner loop the speed test chose
-                FilmCore.setFastCube(prefs.getBoolean(DevelopTest.P_FAST_CUBE, false));   // film files read Latent's way, once the Develop test passed it
+                FilmCore.setFastCube(true);   // film files read Latent's way: identical on the camera, row for row, for every film (v0.39.1)
                 StringBuilder hl = new StringBuilder();
                 HardwareDevelop h = new HardwareDevelop(MainActivity.this, card, hl, null);
                 try {
@@ -1322,13 +1322,34 @@ public class MainActivity extends Activity {
     private volatile Roll devViewOf;
     private volatile File devSource;                // the photo of the frame in the tray
 
-    /** Progress redraws during a develop: at most one per DEV_REDRAW_MS. */
-    private static final long DEV_REDRAW_MS = 250;
+    /**
+     * Progress redraws during a develop: at most one per DEV_REDRAW_MS, and in the darkroom only of what
+     * changed: the progress band, and the tray when the print steps up (Ui.trayStep). v0.41.0 still spent
+     * ~1.7 s a frame redrawing the whole screen (~100 ms each, 17-19 a frame) on core 3.
+     */
+    private static final long DEV_REDRAW_MS = 1000;
     private long devDrawnAt;
     private boolean devRedrawPending;
+    private int devTrayShown = -1;
     private final Runnable devRedraw = new Runnable() {
-        public void run() { devRedrawPending = false; devDrawnAt = SystemClock.uptimeMillis(); screen.invalidate(); }
+        public void run() {
+            devRedrawPending = false;
+            devDrawnAt = SystemClock.uptimeMillis();
+            if (mode != DARKROOM) { screen.invalidate(); return; }
+            invalidateLogical(0, Ui.BAND_TOP, logicalWidth, Ui.BAND_BOTTOM - Ui.BAND_TOP);
+            int step = Ui.trayStep(devPct / 100f);
+            if (step != devTrayShown) {
+                devTrayShown = step;
+                invalidateLogical(Ui.trayX(logicalWidth) - 3, Ui.TRAY_Y - 3, Ui.TRAY_W + 6, Ui.TRAY_H + 6);
+            }
+        }
     };
+
+    /** Redraws only this part of the screen (in Ui's logical pixels). */
+    private void invalidateLogical(float x, float y, float w, float h) {
+        float sx = screen.getWidth() / logicalWidth, sy = screen.getHeight() / 480f;
+        screen.invalidate((int) Math.floor(x * sx) - 1, (int) Math.floor(y * sy) - 1, (int) Math.ceil((x + w) * sx) + 1, (int) Math.ceil((y + h) * sy) + 1);
+    }
 
     private void redrawSoon() {
         if (devRedrawPending) return;
@@ -1354,6 +1375,7 @@ public class MainActivity extends Activity {
         final Stock stock = Stock.byId(stocks, film);
         devFrame = frame;
         devPct = 0;
+        devTrayShown = -1;
         powerSave.touch();
         readBattery();
         final int[] p = stock == null ? params(src, 0, 0, 4, 1)
@@ -1406,7 +1428,7 @@ public class MainActivity extends Activity {
                                 + " loop=" + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, prefs.getInt("lookVariant", 0)))]
                                 + " rows=" + (SonyMemory.lastDirect() ? "direct" : "gathered") + " block=" + HardwareDevelop.block() / 1024 + "K"
                                 + " threads=" + h.look[FilmCore.T_THREADS] + (FilmCore.helperNote().length() > 0 ? " (" + FilmCore.helperNote() + ")" : "")
-                                + draws + " cube=" + (prefs.getBoolean(DevelopTest.P_FAST_CUBE, false) ? "fast" : "sscanf"), System.currentTimeMillis() - t0);
+                                + draws, System.currentTimeMillis() - t0);
                     } catch (Throwable e) {
                         hw = null;
                         devLog(src.getName() + ": camera roll develop failed (" + Probe.why(e) + "); developing in software");

@@ -65,8 +65,8 @@ final class FilmCore {
     static native String helperNote();
 
     /**
-     * Film files (.cube) read with Latent's own exact decimal reader (true) or sscanf (false, the default
-     * until the Develop test has shown both give the same table on this camera).
+     * Film files (.cube) read with Latent's own exact decimal reader (true, the default since v0.42.0: the
+     * camera's check found every row of every film identical) or sscanf (false).
      */
     static native void setFastCube(boolean on);
 

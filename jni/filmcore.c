@@ -144,9 +144,10 @@ static short *resample_lut(const short *src, int n, int m) {
  * gives exactly the floats sscanf does: each number becomes the correctly rounded double (digits / 10^k,
  * both exact, one division), then a float; the only case where a float could come out differently (the
  * double landing exactly halfway between two floats) and anything that isn't a plain decimal go to
- * sscanf. 0 = sscanf for every row (v0.38.1 and before); the Develop test turns it on (FilmCore.setFastCube).
+ * sscanf. On by default since v0.42.0 (the camera's own check, v0.39.1: every row of all six films
+ * identical, 537 -> 204 ms a film); 0 = sscanf for every row, as before (fl_cube_check compares the two).
  */
-static int g_fast_cube;
+static int g_fast_cube = 1;
 
 static const double POW10[] = { 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
                                 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22 };

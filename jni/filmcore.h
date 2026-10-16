@@ -143,7 +143,7 @@ typedef int (*fl_block_put)(void *ctx, int y, int n, int buf);
 /* The look a block at a time; params[FL_PARAM_THREADS] 1..4 = this core plus helpers on cores 1, 2 and 0. */
 int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_block_get get, fl_block_put put, void *ctx,
                       fl_progress_fn progress, void *pctx, char *err, int errlen);
-/* .cube rows read by Latent's own exact decimal reader (1) or sscanf (0, the default). */
+/* .cube rows read by Latent's own exact decimal reader (1, the default) or sscanf (0). */
 void fl_set_fast_cube(int on);
 /* The cached LUT forgotten: the next look reads its file again. */
 void fl_forget_lut(void);

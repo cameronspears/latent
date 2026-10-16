@@ -605,6 +605,16 @@ final class Ui {
         menuHint(g, s.cancelable ? "Back" : "Menu", INK2, R, y);
     }
 
+    /** The darkroom's tray, and the band of the progress bar and its line: during a develop only these are redrawn. */
+    static final float TRAY_W = 300, TRAY_H = 200, TRAY_Y = 84, BAND_TOP = 306, BAND_BOTTOM = 366;
+    static final int TRAY_STEPS = 5;
+
+    /** How far up out of the dark the print is drawn, 0..TRAY_STEPS, for a frame this far developed. */
+    static int trayStep(float framePct) { return Math.min(TRAY_STEPS, (int) (framePct * TRAY_STEPS)); }
+
+    /** The tray's left edge on a screen this wide (logical pixels). */
+    static float trayX(float width) { return width - L - TRAY_W; }
+
     private static void darkroom(Gfx g, UiState s) {
         float R = right(s);
         UiState.Film f = s.film;
@@ -617,17 +627,18 @@ final class Ui {
         float nw = g.textWidth(num, Gfx.DISPLAY, 190, -30);
         g.text("of " + s.devTotal, L - 8 + nw + 14, 262, Gfx.REGULAR, 24, RED2, Gfx.LEFT, 0);
 
-        // the print in the tray: the frame comes up out of the dark as it develops
-        float pw = 300, ph = 200, px = R - pw, py = 84;
+        // the print in the tray: the frame comes up out of the dark as it develops, in TRAY_STEPS steps
+        // (each step redraws the tray: a smooth fade cost a ~100 ms redraw per percent, v0.41.0)
+        float pw = TRAY_W, ph = TRAY_H, px = R - pw, py = TRAY_Y;
         g.rect(px, py, pw, ph, 0xFF140404);
         if (s.devPrint != null && s.devFramePct > 0) {
             g.image(s.devPrint, px, py, pw, ph, true);
-            int veil = (int) (255 * (1 - Math.min(1f, s.devFramePct * 1.15f)));   // fades away as it develops
+            int veil = (int) (255 * (1 - Math.min(1f, trayStep(s.devFramePct) / (float) TRAY_STEPS * 1.15f)));
             if (veil > 0) g.rect(px, py, pw, ph, (veil << 24) | 0x140404);
         }
         g.strokeRoundRect(px - 1, py - 1, pw + 2, ph + 2, 2, 1, RED3);
 
-        // whole roll: a bar that always moves, and an honest time estimate
+        // whole roll: a bar that always moves, and an honest time estimate (inside BAND_TOP..BAND_BOTTOM)
         g.roundRect(L, 318, R - L, 4, 2, RED3);
         g.roundRect(L, 318, Math.max(4, (R - L) * Math.min(1f, s.devProgress)), 4, 2, RED);
         String line = s.devPreparing ? "Getting the darkroom ready" : s.paused ? "Pausing after this frame" : s.devLeft;
