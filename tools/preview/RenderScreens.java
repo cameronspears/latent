@@ -52,6 +52,10 @@ public class RenderScreens {
         render(s, fonts, out, "22-photo");
         s.lookSel = 4; s.liveImage = img(samples, "HOUSE-TRIX400.png"); s.lookShown = true; s.developing = 0;
         render(s, fonts, out, "23-photo-look-change");
+        s.lookShown = false; s.liveCaption = "On your last photo";
+        render(s, fonts, out, "23b-photo-caption");
+        s.liveImage = null; s.liveCaption = "";
+        render(s, fonts, out, "23c-photo-empty");
         s = state();
         s.mode = UiState.SETTINGS;
         s.rows = new ArrayList<String[]>();

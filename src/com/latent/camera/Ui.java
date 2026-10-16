@@ -109,6 +109,9 @@ final class Ui {
         if (s.liveImage != null) {   // a 3:2 picture on the 16:9 panel: full height, black at the sides, as live view is
             float iw = H * 1.5f;
             g.image(s.liveImage, (s.width - iw) / 2, 0, iw, H, false);
+        } else if (s.liveCaption.length() == 0 && !s.loading) {   // nothing shot yet to preview on
+            g.text("Shoot a photo", s.width / 2, 236, Gfx.DISPLAY, 54, INK, Gfx.CENTER, -10);
+            g.text("Looks preview on your latest one.", s.width / 2, 276, Gfx.REGULAR, 20, INK2, Gfx.CENTER, 0);
         }
         // labels float on small dark capsules, so they read over any picture
         int glass = 0x99000000;
@@ -129,16 +132,20 @@ final class Ui {
             float dw = 14, dx = s.width / 2 - (s.looks.size() - 1) * dw / 2;
             for (int i = 0; i < s.looks.size(); i++) g.circle(dx + i * dw, 296, i == s.lookSel ? 3.5f : 2.5f, i == s.lookSel ? INK : 0x80F4F1EA);
         }
-        float hw = glyphWidth(g, "wheel") + 8 + g.textWidth("Look", Gfx.REGULAR, 17, 0) + 26 + glyphWidth(g, "updown") + 8
-                + g.textWidth("Film", Gfx.REGULAR, 17, 0);
+        float hw = glyphWidth(g, "wheel") + 8 + g.textWidth("Look", Gfx.REGULAR, 17, 0) + 26 + glyphWidth(g, "centre") + 8
+                + g.textWidth("Photos", Gfx.REGULAR, 17, 0) + 26 + glyphWidth(g, "updown") + 8 + g.textWidth("Film", Gfx.REGULAR, 17, 0);
         g.roundRect(L - 14, FOOT - 24, hw + 28, 34, 17, glass);
-        hints(g, s, INK, new String[] { "wheel", "Look", "updown", "Film" }, null);
+        hints(g, s, INK, new String[] { "wheel", "Look", "centre", "Photos", "updown", "Film" }, null);
         if (s.developing > 0) {
             String d = s.developing + " developing";
             float dw = g.textWidth(d, Gfx.MEDIUM, 16, 0) + 30;
             g.roundRect(R - dw, FOOT - 19, dw, 28, 14, 0x99000000);
             g.circle(R - dw + 14, FOOT - 5, 3.5f, f != null ? f.accent : INK);
             g.text(d, R - 10, FOOT, Gfx.MEDIUM, 16, INK, Gfx.RIGHT, 0);
+        } else if (s.liveCaption.length() > 0 && !s.lookShown) {   // says the picture is a preview, not live view
+            float cw = g.textWidth(s.liveCaption, Gfx.REGULAR, 15, 0) + 28;
+            g.roundRect(R - cw, FOOT - 19, cw, 28, 14, glass);
+            g.text(s.liveCaption, R - 14, FOOT, Gfx.REGULAR, 15, INK, Gfx.RIGHT, 0);
         }
     }
 
@@ -343,7 +350,7 @@ final class Ui {
             return;
         }
         canisterIcon(g, f, L, TOP - 15);
-        g.text("Roll " + s.rollNumber + "  ·  " + f.title + " " + f.iso, L + 26, TOP, Gfx.MEDIUM, 18, INK, Gfx.LEFT, 0);
+        g.text((s.sheetPhotos ? "Photos" : "Roll " + s.rollNumber) + "  ·  " + f.title + " " + f.iso, L + 26, TOP, Gfx.MEDIUM, 18, INK, Gfx.LEFT, 0);
         if (s.thumbs.isEmpty()) {
             g.text(s.sheetUndeveloped ? "Not developed yet" : "No frames", L - 3, 222, Gfx.DISPLAY, 54, INK, Gfx.LEFT, -10);
             if (s.sheetUndeveloped) g.text("Press the centre button to develop it.", L, 266, Gfx.REGULAR, 21, INK2, Gfx.LEFT, 0);

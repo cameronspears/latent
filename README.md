@@ -27,25 +27,39 @@ To remove it later: **MENU → Application → Application Management → Manage
 
 ## Use
 
-1. **Load film** on the camera back: pick a stock (Classic Cuban Neg, Portra 400 Warm, or your own
-   look) and a roll length.
+Latent has two modes, like the X Half. UP / DOWN on the camera back switches between them.
+
+**Film**
+1. **Load film:** pick a look and a roll length (12, 24 or 36).
 2. **Shoot.** Half-press the shutter, or choose Shoot, to go back to the camera. Every photo you take
    is an exposure on the roll, up to its length. Rolls count by the camera's photo numbers
    (DSC04592, DSC04593, …), because the camera's file times can shift by hours between power-ons.
 3. **Develop.** Open Latent and choose Develop. The darkroom shows each frame as it develops, plus
    the time left and the battery. MENU pauses after the frame in hand, and you can continue later.
-4. **Contact sheets** show every roll. LEFT / RIGHT choose a frame, UP / DOWN change roll, and the
-   centre button opens the viewer (press it again to fill the screen).
+4. **Rolls** shows every roll's contact sheet. LEFT / RIGHT choose a frame, UP / DOWN change roll,
+   and the centre button opens the viewer (press it again to fill the screen).
 
-**Lab** (under More) tries any look on any photo, with highlight, shadow and grain controls.
+**Photo**
+- **Preview:** the wheel changes the look, shown full screen on your newest original. Looks are always
+  previewed on a photo Latent shot neutral, never on one with your own style or a look already on it.
+- **Shoot:** half-press to go to the camera and shoot as many photos as you like.
+- **Develop:** back in Latent, they develop in the background in the chosen look.
+- **Photos:** the centre button opens them.
+- **Neutral:** the camera shoots neutral in Photo mode too.
 
-**Speed test** (under More) times the film look's interchangeable inner loops on this camera's own
+**Settings** (the gear at the end of the camera back's row) holds:
+- **Use three cores** and **Shoot neutral**.
+- **Try looks on a photo** (the Lab: any look on any photo, with highlight, shadow and grain controls).
+- **Unload this roll**.
+- **The camera checks** below.
+
+**Speed test** times the film look's interchangeable inner loops on this camera's own
 chip, on your newest photo decoded into memory, checks each against a full-precision reference, and
 keeps the fastest one that is as accurate as today's. Results go to `LATENT/SPEED.TXT`.
 
-**Settings check** (under More) reads your white balance, its fine-tune grid and your Creative Style,
+**Settings check** reads your white balance, its fine-tune grid and your Creative Style,
 and shows them as the camera's menus do. It only reads, and every raw value goes to
-`LATENT/SETTINGS.TXT`. While a roll is loaded, Latent sets the camera to neutral (white balance fine-tune 0 / 0, Standard
+`LATENT/SETTINGS.TXT`. While a roll is loaded, and in Photo mode, Latent sets the camera to neutral (white balance fine-tune 0 / 0, Standard
 0 / 0 / 0, DRO off) and puts your own settings back once the roll is developed. Your values are kept
 in `LATENT/NEUTRAL.TXT` until then. Latent can only write those few settings, within their menu ranges.
 

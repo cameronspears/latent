@@ -37,6 +37,7 @@ final class UiState {
     int lookSel;
     boolean lookShown;                 // the look's name, large, just after it changed
     int developing;                    // photos still developing in the background
+    String liveCaption = "";           // what the picture is (a preview on your last photo)
 
     // Settings
     List<String[]> rows = new ArrayList<String[]>();   // {label, value}: value "on"/"off" draws a switch, "›" opens, "" is a heading
@@ -62,6 +63,7 @@ final class UiState {
     List<Object> thumbs = new ArrayList<Object>();
     int sheetSel, sheetTotal;
     boolean sheetUndeveloped;
+    boolean sheetPhotos;               // a photo roll (Photo mode), not a film roll
     int filingLeft;                    // originals still moving to the roll's NEG folder
     Object viewImage;
     boolean viewCaption, viewFill;
