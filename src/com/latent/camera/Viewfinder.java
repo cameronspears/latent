@@ -92,6 +92,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     static final boolean DIRECT_SHUTTER = false;
 
     static final int FRAME_W = 320, FRAME_H = 240;
+    static final int FRAME_COMPRESS = 8;
     static final long MIN_FRAME_MS = 45;   // at most ~22 a second (v0.38.0: two look threads, the screen copying one picture)
     /** Frame widths to ask the camera for, in turn, if frames don't come. */
     static final int[] WIDTHS = { 320, 640 };
@@ -142,6 +143,11 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     static final int[] LOOK_CORES = { 2, 1 };
     private final Looker[] lookers = new Looker[LOOK_CORES.length];
     private int seq, shownSeq;
+    /**
+     * The level from the picture's own lines. Off since v0.38.2: you didn't want the line, and reading it cost
+     * 10-15 ms of every other frame. Level and fl_level stay (tested), ready if it comes back.
+     */
+    static final boolean LEVEL = false;
     /** The look's grain moves every frame, as film's does (blue noise: it reads as grain, never a pattern). */
     static final boolean MOVING_GRAIN = true;
     /**
@@ -528,7 +534,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             option(o, (String) oc.getField("PREVIEW_FRAME_WIDTH").get(null), WIDTHS[widthIndex]);
             option(o, (String) oc.getField("PREVIEW_FRAME_HEIGHT").get(null), 0);   // the picture's own shape
             option(o, "PREVIEW_FRAME_FORMAT", 0x100);                                // JPEG
-            option(o, "JPEG_COMPRESS_RATE_DENOM", 15);
+            // a frame about 1/8 of its raw size (~17 KB at 320 px), not 1/15 (8 KB, JPEG quality ~60: blotchy, soft edges)
+            option(o, "JPEG_COMPRESS_RATE_DENOM", FRAME_COMPRESS);
             option(o, "JPEG_COMPRESS_MAX_SIZE", 100);
             cs.getMethod("startPreviewSequence", oc).invoke(sequence, o);
             mFrames = cs.getMethod("getPreviewSequenceFrames", int.class);
@@ -688,7 +695,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         final int[] p = params.clone();
         final int n = ++seq;
         // the level from every other frame (about ten readings a second), the histogram only when it shows
-        final int flags = (jpeg != null && (n & 1) == 0 ? FilmCore.F_LEVEL : 0) | (jpeg != null && display == D_GRID ? FilmCore.F_HIST : 0)
+        final int flags = (LEVEL && jpeg != null && (n & 1) == 0 ? FilmCore.F_LEVEL : 0) | (jpeg != null && display == D_GRID ? FilmCore.F_HIST : 0)
                 | (MOVING_GRAIN ? FilmCore.F_TEMPORAL : 0);
         final int w = liveW, h = liveH;
         k.exec.execute(new Runnable() {
@@ -1561,7 +1568,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         s.grid = display == D_GRID;
         s.hist = display == D_GRID && look ? hist : null;
         s.clean = display == D_CLEAN;
-        s.levelShown = display != D_CLEAN && level.shown && previewing;
+        s.levelShown = LEVEL && display != D_CLEAN && level.shown && previewing;
         s.levelAngle = level.angle;
         s.levelOk = level.level;
         s.flash = now < flashUntil;
@@ -1706,10 +1713,43 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         host.changed();
     }
 
-    private int draws, drawMsSum;
+    private int draws, drawMsSum, blitMsSum;
+    private long[] coreBusy, coreTotal;
 
-    /** The screen drew the viewfinder (UI thread): how long it took, for the stats. */
-    void drew(long ms) { draws++; drawMsSum += ms; }
+    /** The screen drew the viewfinder (UI thread): how long it took, and of that the picture's copy, for the stats. */
+    void drew(long ms, long blitMs) { draws++; drawMsSum += ms; blitMsSum += blitMs; }
+
+    /** Each core's busy share since the last call, from /proc/stat ("0:12% 1:95% ..."), or "?". */
+    private String coreLoad() {
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader("/proc/stat"));
+            long[] busy = new long[8], total = new long[8];
+            try {
+                String l;
+                while ((l = r.readLine()) != null) {
+                    if (!l.startsWith("cpu") || l.startsWith("cpu ")) continue;
+                    String[] f = l.trim().split("\\s+");
+                    int n = Integer.parseInt(f[0].substring(3));
+                    if (n < 0 || n >= 8) continue;
+                    long idle = Long.parseLong(f[4]) + (f.length > 5 ? Long.parseLong(f[5]) : 0), sum = 0;
+                    for (int i = 1; i < f.length && i <= 7; i++) sum += Long.parseLong(f[i]);
+                    busy[n] = sum - idle;
+                    total[n] = sum;
+                }
+            } finally { r.close(); }
+            StringBuilder b = new StringBuilder();
+            for (int n = 0; n < 8; n++) {
+                if (total[n] == 0) continue;
+                long db = coreBusy == null ? 0 : busy[n] - coreBusy[n], dt = coreTotal == null ? 0 : total[n] - coreTotal[n];
+                b.append(b.length() > 0 ? " " : "").append(n).append(':').append(dt > 0 ? db * 100 / dt + "%" : "?");
+            }
+            coreBusy = busy;
+            coreTotal = total;
+            return b.toString();
+        } catch (Throwable e) {
+            return "?";
+        }
+    }
 
     /** Every 10 s while live: how the frames are keeping up (a camera slowing down shows here first). */
     private void stats(long now) {
@@ -1727,7 +1767,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             String cores = "";
             for (Looker k : lookers) if (k != null && k.pinned != null) cores += (cores.length() > 0 ? "+" : "") + k.pinned;
             note("live: " + n + " frames in " + (now - statsAt) / 1000 + " s, " + look + " ms each (" + st + ") on " + cores + ", grab " + grab + " ms, "
-                    + draws + " draws of " + (draws > 0 ? drawMsSum / draws : 0) + " ms, " + (overlaysMade - statOverlays) + " overlays of "
+                    + draws + " draws of " + (draws > 0 ? drawMsSum / draws : 0) + " ms (picture " + (draws > 0 ? blitMsSum / draws : 0) + "), cores " + coreLoad() + ", "
+                    + (overlaysMade - statOverlays) + " overlays of "
                     + (overlaysMade > 0 ? overlayMsSum / overlaysMade : 0) + " ms, Latent's CPU "
                     + (cpu >= 0 && statCpu >= 0 ? (cpu - statCpu) * 100 / Math.max(1, now - statsAt) + "%" : "?") + ", load " + loadAvg()
                     + ", heap " + (rt.totalMemory() - rt.freeMemory()) / 1024 + " of " + rt.maxMemory() / 1024 + " KB");
@@ -1738,7 +1779,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             } else slowSpells = 0;
             flushLog();
         }
-        if (statsAt == 0) statCpu = cpuMs();
+        if (statsAt == 0) { statCpu = cpuMs(); coreLoad(); }
         statsAt = now;
         statFrames = frames;
         statLookMs = lookMsSum;
@@ -1747,6 +1788,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         grabMsSum = 0;
         draws = 0;
         drawMsSum = 0;
+        blitMsSum = 0;
     }
 
     /** Latent's own CPU time so far, in ms (/proc/self/stat), or -1. */

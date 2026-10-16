@@ -141,6 +141,9 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().setFormat(android.graphics.PixelFormat.RGBA_8888);   // 2.3 defaults to 16-bit RGB565
+        // no window background: every screen paints its own, and on each live frame the theme's black was
+        // filled under the picture only to be covered (v0.38.2)
+        getWindow().setBackgroundDrawable(null);
         screen = new Screen(this);   // loads the fonts
         setupMs = SystemClock.uptimeMillis() - startAt;
         // live view (the camera's own picture) sits behind Latent's drawing, hidden until it's used
@@ -2378,7 +2381,7 @@ public class MainActivity extends Activity {
             Ui.draw(gfx, s);
             c.restore();
             drawn();
-            if (mode == PHOTO && vf != null) vf.drew(SystemClock.uptimeMillis() - t);
+            if (mode == PHOTO && vf != null) vf.drew(SystemClock.uptimeMillis() - t, gfx.takeExactMs());
         }
     }
 }

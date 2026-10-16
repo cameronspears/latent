@@ -127,7 +127,17 @@ final class AndroidGfx implements Gfx {
      * through the layout's scale (which happens to come to 1:1 but isn't exactly 1.0 in floats): Skia then
      * copies it row by row instead of sampling it (the viewfinder does this every frame).
      */
+    private long exactMs;
+
+    /** Time spent drawing 1:1 pictures since last asked (the viewfinder's frame, for its stats). */
+    long takeExactMs() { long ms = exactMs; exactMs = 0; return ms; }
+
     public void imageExact(Object img, float x, float y, float w, float h) {
+        long t0 = android.os.SystemClock.uptimeMillis();
+        try { drawExact(img, x, y, w, h); } finally { exactMs += android.os.SystemClock.uptimeMillis() - t0; }
+    }
+
+    private void drawExact(Object img, float x, float y, float w, float h) {
         Bitmap b = (Bitmap) img;
         if (b == null || b.isRecycled()) return;
         c.getMatrix(m);
