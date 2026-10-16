@@ -48,6 +48,7 @@ final class UiState {
     String shutter = "", aperture = "", iso = "";
     boolean isoAuto;
     int ev;                            // exposure, in thirds of a stop from metered
+    boolean evEdit;                    // the exposure scale is open (DOWN): the wheel moves it
     int shotsLeft = -1;
     int[] hist;                        // live brightness, or null
     boolean grid, lookLive, flash;     // thirds; the look is on live view; the shutter just blinked

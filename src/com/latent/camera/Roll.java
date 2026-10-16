@@ -32,6 +32,11 @@ import java.util.Set;
  *
  * An endless roll (length ENDLESS, shown as ∞) has no last frame: each time Latent is back from the
  * camera, the photos shot since are added to its frames and develop behind the camera back.
+ *
+ * On an endless roll the film can change from frame to frame (the wheel in the viewfinder, as on the
+ * X Half): 'looks' keeps the film each picture was taken in, by photo number, and stockFor(i) is what
+ * the darkroom develops frame i in. 'stock' is the film loaded now, for pictures without an entry
+ * (taken in the camera's own shooting mode). A roll of 12, 24 or 36 keeps one film.
  */
 final class Roll {
     static final String LOADED = "loaded", DEVELOPING = "developing", DEVELOPED = "developed";
@@ -48,6 +53,7 @@ final class Roll {
     String state = LOADED;
     List<String> frames = new ArrayList<String>();   // source paths, frozen when developing starts
     List<String> prints = new ArrayList<String>();   // per frame: its developed photo in the camera roll, or ""
+    final java.util.Map<Integer, String> looks = new java.util.TreeMap<Integer, String>();   // photo number -> film it was shot in
 
     private Roll(File dir, int number) { this.dir = dir; this.number = number; }
 
@@ -96,6 +102,11 @@ final class Roll {
         if (f.length() > 0) r.frames = new ArrayList<String>(Arrays.asList(f.split("\\|")));
         String pr = p.getProperty("prints", "");
         if (pr.length() > 0) r.prints = new ArrayList<String>(Arrays.asList(pr.split("\\|", -1)));
+        for (String e : p.getProperty("looks", "").split("\\|")) {   // 1004706:CUBANNEG|1004707:NATURAL
+            int c = e.indexOf(':');
+            if (c <= 0 || c == e.length() - 1) continue;
+            try { r.looks.put(Integer.parseInt(e.substring(0, c)), e.substring(c + 1)); } catch (NumberFormatException ignored) { }
+        }
         return r;
     }
 
@@ -129,6 +140,11 @@ final class Roll {
         StringBuilder pr = new StringBuilder();
         for (int i = 0; i < prints.size(); i++) { if (i > 0) pr.append('|'); pr.append(prints.get(i)); }
         p.setProperty("prints", pr.toString());
+        if (!looks.isEmpty()) {
+            StringBuilder lk = new StringBuilder();
+            for (java.util.Map.Entry<Integer, String> e : looks.entrySet()) { if (lk.length() > 0) lk.append('|'); lk.append(e.getKey()).append(':').append(e.getValue()); }
+            p.setProperty("looks", lk.toString());
+        }
         File tmp = new File(dir, "SAVING.TMP"), target = new File(dir, "ROLL.TXT");
         FileOutputStream out = new FileOutputStream(tmp);
         try { p.store(out, "Latent roll"); } finally { out.close(); }
@@ -149,6 +165,19 @@ final class Roll {
         } catch (Exception e) {
             return -1;
         }
+    }
+
+    /** The film frame i was shot in: its own on an endless roll, else the roll's. */
+    String stockFor(int i) {
+        if (i < 0 || i >= frames.size()) return stock;
+        String s = looks.get(number(new File(frames.get(i))));
+        return s != null ? s : stock;
+    }
+
+    /** A picture's film, by its photo number (an endless roll keeps one per picture; others ignore it). */
+    void lookFor(File photo, String film) {
+        int n = number(photo);
+        if (endless() && n > 0 && film != null && film.length() > 0) looks.put(n, film);
     }
 
     /** The highest photo number among these photos (0 if none). */

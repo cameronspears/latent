@@ -18,6 +18,7 @@ public class ViewfinderTest {
         level();
         shots(new File(a[0]));
         words();
+        exposure();
         System.out.println("ViewfinderTest: all passed");
     }
 
@@ -284,6 +285,16 @@ public class ViewfinderTest {
         byte[] b = new byte[(int) f.length()];
         try { in.read(b); } finally { in.close(); }
         return new String(b, "UTF-8");
+    }
+
+    /** Decision B: DOWN opens the scale, the wheel moves it in thirds within the camera's range. */
+    static void exposure() {
+        check(Viewfinder.evIndex(1, 1f / 3) == 1 && Viewfinder.evIndex(-4, 1f / 3) == -4, "a third of a stop is one step of the camera's 1/3 index");
+        check(Viewfinder.evIndex(3, 0.5f) == 2 && Viewfinder.evIndex(0, 0) == 0, "a camera with half stops gets the nearest step");
+        check(Viewfinder.clampEv(10, -9, 9) == 9 && Viewfinder.clampEv(-10, -9, 9) == -9 && Viewfinder.clampEv(4, -9, 9) == 4, "kept within the camera's range");
+        check(Ui.evText(0).equals("0") && Ui.evText(1).equals("+1/3") && Ui.evText(-5).equals("\u20131 2/3") && Ui.evText(6).equals("+2"),
+                "exposure in words: " + Ui.evText(0) + " " + Ui.evText(1) + " " + Ui.evText(-5) + " " + Ui.evText(6));
+        System.out.println("  ok  exposure compensation");
     }
 
     static void check(boolean ok, String what) {

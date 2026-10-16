@@ -2,6 +2,7 @@ package com.latent.camera;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -358,7 +359,8 @@ public class MainActivity extends Activity {
      */
     private void backKey(int k) {
         if (k != K_ENTER || !ready || current == null) return;
-        if (wantsDeveloping(current)) startDevelop(current);
+        if (Viewfinder.opened && current.endless() && vfWaiting > 0) restartToDevelop(vfWaiting + " picture(s) to develop");
+        else if (wantsDeveloping(current)) startDevelop(current);
         else goShoot();
     }
 
@@ -447,6 +449,7 @@ public class MainActivity extends Activity {
         rows.add(new String[] { "Shooting", "", "" });
         rows.add(new String[] { "Latent's viewfinder", viewfinderOn() ? "on" : "off", "viewfinder" });
         rows.add(new String[] { "Focus first", focusFirst() ? "on" : "off", "focusFirst" });
+        rows.add(new String[] { "Film look on live view", liveLook() ? "on" : "off", "liveLook" });
         rows.add(new String[] { "Developing", "", "" });
         rows.add(new String[] { "Use three cores", developCores() > 1 ? "on" : "off", "cores" });
         rows.add(new String[] { "Shoot neutral while a roll is loaded", neutralOn() ? "on" : "off", "neutral" });
@@ -467,9 +470,11 @@ public class MainActivity extends Activity {
         if (action.equals("cores")) return prefs.getBoolean("multicoreOk", false) ? "Develops on cores 1 and 2 as well. Core 0 is left to the camera." : "Run the Speed test first: it checks the other cores.";
         if (action.equals("neutral")) return "Every look starts from the same picture. Your settings come back after.";
         if (action.equals("viewfinder")) return viewfinderOn() ? "Shoot stays in Latent. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
+        if (action.equals("liveLook")) return liveLook() ? "Live view shows the film, with the level. Turn it off for the camera's own view."
+                : "The camera's own live view. Run the Live look test (Camera, below) to turn the film on.";
         if (action.equals("focusFirst")) return focusFirst() ? "A full press waits for focus to lock, as AF-S does." : "A full press takes the picture at once, in focus or not.";
         if (action.equals("shootTest")) return "Latent focuses and takes one photo itself. Changes no setting.";
-        if (action.equals("lookTest")) return "Live frames with two photos taken, and the camera's own log. Changes no setting.";
+        if (action.equals("lookTest")) return "The film look on live frames while two photos are taken. If both are stored, the look comes on.";
         if (action.equals("restartTest")) return "Latent gives the camera back and starts again by itself. Takes no photo.";
         if (action.equals("develop")) return "Ends the roll here and develops the " + exposed + " shot so far.";
         if (action.equals("change")) return current != null && current.endless() ? "This roll's photos keep developing." : "Keeps the frames shot so far for developing.";
@@ -479,6 +484,8 @@ public class MainActivity extends Activity {
     private boolean neutralOn() { return prefs.getBoolean("neutral", true); }
     private boolean viewfinderOn() { return prefs.getBoolean("viewfinder", true); }
     private boolean focusFirst() { return prefs.getBoolean("focusFirst", true); }
+    /** The film look on live view: off until the Live look test has stored pictures with the frames running (it turns it on). */
+    private boolean liveLook() { return prefs.getBoolean("liveLook", false); }
 
     /** The camera shoots neutral while a roll is loaded: every look starts from a plain picture. */
     private boolean neutralWanted(boolean filmLoaded) { return neutralOn() && filmLoaded; }
@@ -509,6 +516,9 @@ public class MainActivity extends Activity {
                 prefs.edit().putBoolean("viewfinder", !viewfinderOn()).commit();
             } else if (action.equals("focusFirst")) {
                 prefs.edit().putBoolean("focusFirst", !focusFirst()).commit();
+            } else if (action.equals("liveLook")) {
+                if (vf != null) toast("It changes the next time the viewfinder opens");
+                prefs.edit().putBoolean("liveLook", !liveLook()).commit();
             } else if (action.equals("lab")) {
                 openLab();
                 fromSettings = true;
@@ -611,6 +621,12 @@ public class MainActivity extends Activity {
         if (st == null && !stocks.isEmpty()) st = stocks.get(0);
         final Stock stock = st;
         if ((hardwareTest || speedTest) && stock == null) { toast("No film looks on the card"); probeStage = 0; return; }
+        if ((shootTest || liveTest || restartTest || lookTest) && developing != null) {   // the darkroom and the camera never overlap (v0.33.0)
+            paused = true;
+            toast("Finishing a photo first. Try again in a moment");
+            probeStage = 0;
+            return;
+        }
         if ((shootTest || liveTest || restartTest || lookTest) && vf != null) {   // the viewfinder holds the camera until Latent is left
             toast("The camera is in use. Leave Latent and open it again to run this test");
             probeStage = 0;
@@ -631,7 +647,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (lookTest) {   // the camera answers on the thread that opens it: this one
-            lookRun = new LiveLookTest(this, card, liveSurface, prefs, listener, new LiveViewTest.Host() {
+            lookRun = new LiveLookTest(this, card, liveSurface, prefs, stock, listener, new LiveViewTest.Host() {
                 public void showLive(boolean on) {
                     liveOn = on;
                     liveSurface.setVisibility(on ? View.VISIBLE : View.GONE);
@@ -799,7 +815,7 @@ public class MainActivity extends Activity {
         vfBase = exposed;
         readBattery();
         devLog("viewfinder: opening (" + current.label() + ", " + exposed + " exposed)");
-        vf = new Viewfinder(this, card, liveSurface, worker, st, focusFirst(), highestOnCard, new Viewfinder.Host() {
+        vf = new Viewfinder(this, card, liveSurface, worker, st, focusFirst(), highestOnCard, liveLook(), new Viewfinder.Host() {
             public void showLive(boolean on) {
                 liveSurface.setVisibility(on ? View.VISIBLE : View.GONE);
                 screen.invalidate();
@@ -809,6 +825,7 @@ public class MainActivity extends Activity {
             public void shot(File photo) { vfShot(photo); }
             public void closed(String why) {
                 vf = null;
+                if (relaunchWhenClosed) { relaunch(); return; }   // the camera is back: Latent starts again and develops
                 if (killWhenClosed) { killNow(); return; }
                 ui.removeCallbacks(closeWhenFinished);
                 if (mode == PHOTO) mode = BACK;
@@ -827,9 +844,15 @@ public class MainActivity extends Activity {
         exposed++;
         if (photo != null) {
             highestOnCard = Math.max(highestOnCard, Roll.number(photo));
+            final Roll r = current;
+            final String film = r != null && r.endless() ? r.stock : null;   // an endless roll: this frame's own film (decision A)
             Runnable note = new Runnable() {
                 public void run() {
                     try { Library.recordShot(card, photo); } catch (Exception e) { devLog("viewfinder: " + photo.getName() + " not noted (" + Probe.why(e) + ")"); }
+                    if (film != null) {
+                        r.lookFor(photo, film);
+                        try { r.save(); } catch (Exception e) { devLog("viewfinder: " + photo.getName() + "'s film not noted (" + Probe.why(e) + ")"); }
+                    }
                 }
             };
             try { worker.execute(note); } catch (java.util.concurrent.RejectedExecutionException e) { note.run(); }   // Latent closing down
@@ -847,6 +870,41 @@ public class MainActivity extends Activity {
 
     private final Runnable closeWhenFinished = new Runnable() { public void run() { hideViewfinder(); } };
 
+    private boolean restarting, relaunchWhenClosed;
+
+    /**
+     * Goal 6: pictures shot here need the darkroom, and the darkroom needs Sony's image memory, which
+     * this process holds until it ends (v0.23-0.24). So the camera goes back (after every picture is
+     * stored), and Latent starts again behind a screen of its own (Relaunch): back in ~3.3 s with the
+     * memory free (v0.33.1), where the darkroom takes the new pictures as usual.
+     */
+    private void restartToDevelop(String why) {
+        if (restarting) return;
+        restarting = true;
+        devLog("restarting to develop: " + why);
+        toast("Developing\u2026");
+        mode = BACK;
+        screen.invalidate();
+        if (vf != null) { relaunchWhenClosed = true; vf.close(null); }
+        else relaunch();
+    }
+
+    /** Relaunch in front; this process then ends in onPause (the camera was opened here). */
+    private void relaunch() {
+        try {
+            Intent i = new Intent(this, Relaunch.class);
+            i.putExtra(Relaunch.EXTRA_PID, android.os.Process.myPid());
+            i.putExtra(Relaunch.EXTRA_AT, SystemClock.uptimeMillis());
+            i.putExtra(Relaunch.EXTRA_WHY, "develop");
+            startActivity(i);
+            overridePendingTransition(0, 0);
+        } catch (Throwable e) {   // stay put: the pictures develop the next time Latent opens
+            restarting = false;
+            relaunchWhenClosed = false;
+            devLog("restart: " + Probe.why(e));
+        }
+    }
+
     /**
      * MENU in the viewfinder: back to the camera back, with the camera kept open behind it. Opening it
      * again in the same visit froze the camera twice (v0.31.2, v0.32.0), so it is given back only when
@@ -855,6 +913,7 @@ public class MainActivity extends Activity {
     private void hideViewfinder() {
         if (vf == null) return;
         ui.removeCallbacks(closeWhenFinished);
+        if (vfWaiting > 0) { restartToDevelop(vfWaiting + " picture(s) to develop"); return; }
         vf.hide();
         if (mode == PHOTO) mode = BACK;
         screen.invalidate();
@@ -865,13 +924,22 @@ public class MainActivity extends Activity {
         return current != null && Roll.LOADED.equals(current.state) && current.frames.isEmpty() && vfBase + (vf != null ? vf.shots : 0) == 0;
     }
 
-    /** The wheel in the viewfinder: the film's card; on a fresh roll, the next film, as a film simulation dial. */
+    /**
+     * The wheel in the viewfinder, as the X Half's film simulation (decision A): on an endless roll it
+     * changes the film for this frame and the ones after (each frame keeps its own, in ROLL.TXT); a roll of
+     * 12, 24 or 36 is film camera mode, one film, changeable only until its first frame. Else it shows the
+     * film's card.
+     */
     private void vfFilm(int step) {
         if (vf == null) return;
-        if (filmFresh() && stocks.size() > 1) {
+        if (current != null && (current.endless() || filmFresh()) && stocks.size() > 1) {
             Stock now = Stock.byId(stocks, current.stock);
             int i = Math.max(0, stocks.indexOf(now));
             final Stock next = stocks.get((i + step + stocks.size()) % stocks.size());
+            if (current.endless()) {   // what's shot already keeps the film it was shot in
+                for (String f : current.frames) if (!current.looks.containsKey(Roll.number(new File(f)))) current.lookFor(new File(f), current.stock);
+                for (File f : current.exposures(photos)) if (!current.looks.containsKey(Roll.number(f))) current.lookFor(f, current.stock);
+            }
             current.stock = next.id;
             final Roll r = current;
             prefs.edit().putString("lastStock", next.id).commit();
@@ -903,16 +971,26 @@ public class MainActivity extends Activity {
             return;
         }
         if (!down) {
-            if (sc == SC_MENU || sc == SC_SK1 || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_BACK) hideViewfinder();
+            if (sc == SC_MENU || sc == SC_SK1 || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_BACK) {
+                if (vf.evEditing) vf.closeEv(); else hideViewfinder();
+            }
             return;
         }
-        if (sc == SC_WHEEL_CW || sc == SC_DIAL_CW) { vfFilm(1); return; }
-        if (sc == SC_WHEEL_CCW || sc == SC_DIAL_CCW) { vfFilm(-1); return; }
         int k = key(keyCode, sc);
+        boolean cw = sc == SC_WHEEL_CW || sc == SC_DIAL_CW, ccw = sc == SC_WHEEL_CCW || sc == SC_DIAL_CCW;
+        if (vf.evEditing) {   // the exposure scale is open: the wheel, left and right move it
+            if (cw || (k == K_RIGHT && !ccw)) vf.evBy(1);
+            else if (ccw || k == K_LEFT) vf.evBy(-1);
+            else if ((k == K_DOWN || k == K_ENTER) && e.getRepeatCount() == 0) vf.toggleEv();
+            else if (k == K_UP) { vf.closeEv(); vf.cycleDisplay(1); }
+            return;
+        }
+        if (cw) { vfFilm(1); return; }
+        if (ccw) { vfFilm(-1); return; }
         if (k == K_LEFT) vfFilm(-1);
         else if (k == K_RIGHT) vfFilm(1);
-        else if (k == K_UP) vf.cycleDisplay(-1);
-        else if (k == K_DOWN) vf.cycleDisplay(1);
+        else if (k == K_UP) vf.cycleDisplay(1);                                     // DISP
+        else if (k == K_DOWN && e.getRepeatCount() == 0) vf.toggleEv();             // the ± key: exposure
         else if (k == K_ENTER && e.getRepeatCount() == 0) vf.toggleLook();
     }
 
@@ -1033,8 +1111,8 @@ public class MainActivity extends Activity {
      */
     private void startDevelop(Roll r, boolean quiet) {
         if (r == null) return;
-        if (Viewfinder.opened) {   // the camera has the image memory until Latent closes
-            if (!quiet) toast("It develops the next time you open Latent");
+        if (Viewfinder.opened) {   // the camera has the image memory until this process ends: Latent restarts to develop
+            if (!quiet) restartToDevelop(r.label() + " to develop");
             return;
         }
         if (developing != null) {
@@ -1120,7 +1198,8 @@ public class MainActivity extends Activity {
         if (next < 0) { finishDevelop(); return; }   // the last originals are filed in the background (refresh)
         final int frame = next;
         final File src = r.source(frame), out = r.output(frame), prv = r.preview(out);
-        final Stock stock = Stock.byId(stocks, r.stock);
+        final String film = r.stockFor(frame);   // on an endless roll, the film this frame was shot in
+        final Stock stock = Stock.byId(stocks, film);
         devFrame = frame;
         devPct = 0;
         powerSave.touch();
@@ -1167,7 +1246,7 @@ public class MainActivity extends Activity {
                         }
                         // earlier frames whose negatives have settled leave the camera roll, alongside the next frame
                         filer.execute(new Runnable() { public void run() { fileSettled(r, false); } });
-                        logHardware(src, r.stock, print, h.ms, " (read " + h.look[FilmCore.T_READ] + " look " + h.look[FilmCore.T_LOOK]
+                        logHardware(src, film, print, h.ms, " (read " + h.look[FilmCore.T_READ] + " look " + h.look[FilmCore.T_LOOK]
                                 + " write " + h.look[FilmCore.T_WRITE] + ") " + (HardwareDevelop.extraFine() ? "xfine" : "fine")
                                 + " loop=" + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, prefs.getInt("lookVariant", 0)))]
                                 + " rows=" + (SonyMemory.lastDirect() ? "direct" : "gathered")
@@ -1198,7 +1277,7 @@ public class MainActivity extends Activity {
                     }
                     if (rc == 0) {
                         FilmCore.timing(t);
-                        logTiming(src, r.stock, p, t);
+                        logTiming(src, film, p, t);
                         made = out;
                     } else {
                         err = exists ? FilmCore.lastError() : "photo no longer on the card";
@@ -2019,7 +2098,7 @@ public class MainActivity extends Activity {
                 s.lookSel = Math.max(0, stocks.indexOf(cur));
                 s.exposed = vfBase + (vf != null ? vf.shots : 0);
                 if (current != null) { s.length = current.length; s.endless = current.endless(); }
-                s.cardNote = filmFresh() ? "" : "Loaded for the whole roll";
+                s.cardNote = current != null && current.endless() ? "From this frame on" : filmFresh() ? "" : "Loaded for the whole roll";
                 break;
             }
             case SETTINGS: {

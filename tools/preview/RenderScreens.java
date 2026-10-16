@@ -68,7 +68,7 @@ public class RenderScreens {
         s = state();
         s.film = portra; s.rollNumber = 4; s.exposed = 12; s.length = 12; s.battery = 17;
         render(s, fonts, out, "5-home-finished-lowbattery");
-        // after Latent's viewfinder: the camera holds the image memory until Latent closes
+        // after Latent's viewfinder, with the camera still open (Latent restarts to develop on MENU or Develop)
         s = state();
         s.film = portra; s.rollNumber = 4; s.exposed = 12; s.length = 12; s.developLater = true; s.waiting = 3;
         render(s, fonts, out, "5b-home-finished-develop-later");
@@ -156,6 +156,23 @@ public class RenderScreens {
         s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
         s.afState = 1; s.afTry = 3; s.afLamp = true; s.shutter = "1/30"; s.aperture = "F3.5"; s.iso = "6400"; s.isoAuto = true;
         render(s, fonts, out, "8n-vf-trying-again");
+
+        // v0.35: the look on live view again; the wheel on an endless roll; DOWN opens the exposure scale
+        s = vf(six, 3, img(samples, "STREET-CUBANNEG.png"));
+        s.endless = true; s.exposed = 41; s.lookShown = true; s.cardNote = "From this frame on";
+        render(s, fonts, out, "8q-vf-endless-film-card");
+        s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
+        s.evEdit = true; s.ev = 0; s.shutter = "1/125"; s.aperture = "F5.6"; s.iso = "200";
+        render(s, fonts, out, "8r-vf-exposure-open");
+        s.ev = 1;
+        render(s, fonts, out, "8s-vf-exposure-plus-third");
+        s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
+        s.evEdit = true; s.ev = -5; s.levelShown = true; s.levelAngle = 0.3f; s.levelOk = true;
+        render(s, fonts, out, "8t-vf-exposure-minus-level");
+        s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
+        s.ev = -2; s.exposed = 7; s.printImage = img(samples, "HOUSE-CLASSNEG.png"); s.printProgress = 0.7f; s.levelShown = true; s.levelAngle = 3.1f;
+        s.shutter = "1/250"; s.aperture = "F8"; s.iso = "400"; s.isoAuto = true;
+        render(s, fonts, out, "8u-vf-live-look-print-level");
 
         s = state();
         s.mode = UiState.DARKROOM; s.film = cuban; s.devFrame = 4; s.devTotal = 12; s.devDone = 4;

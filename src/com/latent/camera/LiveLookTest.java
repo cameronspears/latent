@@ -74,9 +74,24 @@ final class LiveLookTest implements SurfaceHolder.Callback {
     private long shutterAt, shutterAnsweredAt;
     private String storeReport;
 
-    LiveLookTest(Activity activity, File card, SurfaceView surface, SharedPreferences prefs, Probe.Listener out, LiveViewTest.Host host) {
+    LiveLookTest(Activity activity, File card, SurfaceView surface, SharedPreferences prefs, Stock stock, Probe.Listener out, LiveViewTest.Host host) {
         this.activity = activity; this.card = card; this.surface = surface; this.prefs = prefs; this.out = out; this.host = host;
+        this.lut = stock == null ? null : stock.lut.getPath();
+        params[FilmCore.HIGHLIGHT] = stock == null ? 0 : stock.highlight;
+        params[FilmCore.SHADOW] = stock == null ? 0 : stock.shadow;
+        params[FilmCore.GRAIN_SIZE] = 1;
+        params[FilmCore.QUALITY] = 90;
+        params[FilmCore.THREADS] = 1;
     }
+
+    // the film look on each frame, as the viewfinder does it (its thread, its priority, its pace)
+    private final String lut;
+    private final int[] params = new int[FilmCore.COUNT];
+    private final java.util.concurrent.ExecutorService looker = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private final int[] px = new int[Viewfinder.FRAME_W * Viewfinder.FRAME_H], info = new int[FilmCore.L_COUNT];
+    private volatile boolean looking;
+    private long lastLookAt;
+    private int looks, lookMsSum, lookFails, levelSure;
 
     private void report(int i, int status, String detail) {
         if (i < 0) { if (status != RUN) note(detail); return; }
@@ -380,8 +395,10 @@ final class LiveLookTest implements SurfaceHolder.Callback {
             if (mSize == null) { mSize = fr.getClass().getMethod("getSize"); mRead = fr.getClass().getMethod("read", byte[].class); mRelease = fr.getClass().getMethod("release"); }
             int size = (Integer) mSize.invoke(fr);
             if (size <= 0) return false;
-            mRead.invoke(fr, new byte[size]);
+            final byte[] jpeg = new byte[size];
+            mRead.invoke(fr, jpeg);
             long now = SystemClock.uptimeMillis();
+            if (!looking && now - lastLookAt >= Viewfinder.MIN_FRAME_MS) { lastLookAt = now; look(jpeg); }
             if (lastFrameAt > 0) biggestGap = Math.max(biggestGap, now - lastFrameAt);
             lastFrameAt = now;
             frames++;
@@ -394,13 +411,35 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         }
     }
 
+    private void look(final byte[] jpeg) {
+        looking = true;
+        looker.execute(new Runnable() {
+            public void run() {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
+                long t = SystemClock.uptimeMillis();
+                int rc = FilmCore.live(jpeg, jpeg.length, lut, params, px, Viewfinder.FRAME_W, Viewfinder.FRAME_H, info);
+                final int ms = (int) (SystemClock.uptimeMillis() - t);
+                final boolean ok = rc == 0, sure = info[FilmCore.L_CONFIDENCE] >= 30;
+                ui.post(new Runnable() {
+                    public void run() {
+                        looking = false;
+                        if (ok) { looks++; lookMsSum += ms; if (sure) levelSure++; }
+                        else if (lookFails++ < 3) note("look: " + FilmCore.lastError());
+                    }
+                });
+            }
+        });
+    }
+
     private void stopFrames() {
         ui.removeCallbacks(poll);
         if (sequence == null) return;
         try { sequence.getClass().getMethod("stopPreviewSequence").invoke(sequence); } catch (Throwable e) { note("stopPreviewSequence: " + Probe.why(e)); }
         try { sequence.getClass().getMethod("release").invoke(sequence); } catch (Throwable e) { note("sequence release: " + Probe.why(e)); }
         sequence = null;
-        note("frames stopped: " + frames + " in all, the longest gap " + biggestGap + " ms");
+        long span = Math.max(1, lastFrameAt - firstFrameAt);
+        note("frames stopped: " + frames + " in all, the longest gap " + biggestGap + " ms; the look on " + looks + " ("
+                + String.format(Locale.US, "%.1f", looks * 1000.0 / span) + " a second, " + (looks > 0 ? lookMsSum / looks : 0) + " ms each), the level sure on " + levelSure);
     }
 
     // ------------------------------------------------------------------------------ the pictures, with the frames running
@@ -536,6 +575,10 @@ final class LiveLookTest implements SurfaceHolder.Callback {
             return;
         }
         reviewBack();
+        if (stored == 2 && stored == shotNo) {   // both stored with the frames and the look running: the viewfinder may use them
+            prefs.edit().putBoolean("liveLook", true).commit();
+            note("both pictures stored with the look running: Film look on live view is on");
+        }
         flush();
         ui.postDelayed(new Runnable() { public void run() { close(); } }, 1000);
     }
@@ -586,13 +629,15 @@ final class LiveLookTest implements SurfaceHolder.Callback {
             try { if (camera != null && previewing) camera.stopPreview(); } catch (Throwable e) { note("stopPreview: " + Probe.why(e)); }
             try { if (camera != null) camera.release(); } catch (Throwable e) { note("camera release: " + Probe.why(e)); }
             try { cameraEx.getClass().getMethod("release").invoke(cameraEx); } catch (Throwable e) { note("release: " + Probe.why(e)); }
-            report(S_CLOSED, OK, "released, " + stored + " of " + shotNo + " picture(s) stored, " + frames + " frames");
+            report(S_CLOSED, OK, "released, " + stored + " of " + shotNo + " picture(s) stored, " + frames + " frames, the look on " + looks
+                    + (stored == 2 ? ". Film look on live view is on" : ""));
         }
         finish();
     }
 
     private void finish() {
         closed = true;
+        looker.shutdown();
         try { surface.getHolder().removeCallback(this); } catch (Throwable ignored) { }
         cameraEx = null;
         camera = null;

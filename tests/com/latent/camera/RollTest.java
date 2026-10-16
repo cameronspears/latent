@@ -56,6 +56,23 @@ public class RollTest {
         back.cleanTemp();
         check(!new File(back.dir, "03_01006.TMP").exists(), "half-written .TMP removed");
 
+        {   // an endless roll keeps each frame's film; a roll of 12 keeps its one film
+            Roll e = Roll.create(card, "NATURAL", Roll.ENDLESS, 0, 1001015);
+            File p16 = new File(dcim, "DSC01016.JPG"), p17 = new File(dcim, "DSC01017.JPG"), p18 = new File(dcim, "DSC01018.JPG");
+            e.lookFor(p16, "CUBANNEG");
+            e.lookFor(p17, "PORTRA4W");
+            e.stock = "TRIX400";   // the film loaded now, for the frames with no film of their own
+            e.frames.add(p16.getPath()); e.frames.add(p17.getPath()); e.frames.add(p18.getPath());
+            e.save();
+            Roll eb = Roll.open(e.dir);
+            check(eb.stockFor(0).equals("CUBANNEG") && eb.stockFor(1).equals("PORTRA4W") && eb.stockFor(2).equals("TRIX400"),
+                    "an endless roll develops each frame in the film it was shot in: " + eb.stockFor(0) + " " + eb.stockFor(1) + " " + eb.stockFor(2));
+            r.lookFor(p16, "PORTRA4W");
+            check(r.looks.isEmpty() && back.stockFor(0).equals("CUBANNEG"), "a roll of 12 keeps its one film");
+            for (File f : e.dir.listFiles()) f.delete();
+            e.dir.delete();
+        }
+
         Roll r2 = Roll.create(card, "PORTRA4W", 24, 0);
         List<Roll> all = Roll.list(card);
         check(all.size() == 2 && all.get(0) .number == 2 && r2.label().equals("Roll 002"), "rolls listed newest first");

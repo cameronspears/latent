@@ -5,7 +5,6 @@ import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.SystemClock;
-import android.view.View;
 
 import java.io.File;
 
@@ -29,8 +28,16 @@ public final class Relaunch extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        View v = new View(this);
+        // true black, as Latent's screens are; a word in its own type when it restarts to develop
+        android.widget.TextView v = new android.widget.TextView(this);
         v.setBackgroundColor(0xFF000000);
+        v.setGravity(android.view.Gravity.CENTER);
+        v.setTextColor(0xFF9A958B);
+        v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 30);
+        try { v.setTypeface(android.graphics.Typeface.createFromAsset(getAssets(), "fonts/inter-regular.ttf")); } catch (Throwable ignored) { }
+        float aspect = Display.aspect();   // the 640x480 buffer is stretched onto the panel: undo it, as Latent's screens do
+        if (aspect > 0) v.setTextScaleX(4f / 3 / aspect);
+        if ("develop".equals(getIntent().getStringExtra(EXTRA_WHY))) v.setText("Developing\u2026");
         setContentView(v);
         pid = getIntent().getIntExtra(EXTRA_PID, 0);
         started = SystemClock.uptimeMillis();

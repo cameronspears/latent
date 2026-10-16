@@ -25,22 +25,24 @@ import java.util.concurrent.Executors;
  * Latent's own viewfinder, the way the X Half is the camera: live view with the roll's film look on
  * it, focus on a half-press, the picture on a full press, and a level read from the picture.
  *
- * How, all of it found on this camera by the Shooting and Live view tests:
- * - The camera opens through Sony's CameraEx on the UI thread, naming the memory card as its target
- *   (without it the photo reached the card only after the camera was released). Every camera call
- *   and callback is on this thread.
- * - Live view runs as usual on the surface behind Latent's drawing; the camera also hands Latent the
- *   same picture as small JPEG frames (CameraSequence's preview sequence, 320 px). Each frame gets the
- *   look on the worker thread (FilmCore.live) and is drawn over the camera's own, about 7 a second.
- *   Centre shows the camera's own live view instead, at full speed.
+ * How, all of it found on this camera (the Shooting, Live look and Restart tests):
+ * - The camera opens through Sony's CameraEx on the UI thread, naming the memory card as its target.
+ *   Every camera call and callback is on this thread.
+ * - Live view runs as usual on the surface behind Latent's drawing; with the film look on (a setting the
+ *   Live look test turns on once pictures have stored with it), the camera also hands Latent the same
+ *   picture as small JPEG frames (CameraSequence's preview sequence, 320 px, asked for as Sony's Smart
+ *   Remote asks). Each gets the look on the worker thread (FilmCore.live), back to back, and is drawn
+ *   over the camera's own. Centre shows the camera's own live view instead.
  * - Focus is the camera's own (Camera.autoFocus), retried while the button is held (Release).
- * - The picture is the camera's own (burstableTakePicture): it stores and catalogues it itself, with
- *   your settings, about 0.2 s after the shutter. Latent learns its name from the catalogue.
- * - No camera setting is changed: no exposure, focus or drive setting, Auto Review as it is.
- * - The camera is given back on MENU, when Latent is left, and if Latent crashes.
+ * - The picture is the camera's own (burstableTakePicture): it stores it itself, with your settings.
+ *   Latent learns its name from Sony's catalogue, told to look after each picture (Smart Remote does).
+ * - Exposure compensation (DOWN, the ± key) is the camera's own setting, shared with shooting mode.
+ *   No other camera setting is changed.
+ * - The camera is given back on MENU (when pictures wait, so Latent can restart and develop them),
+ *   when Latent is left, and if Latent crashes; never while a picture may still be storing.
  *
- * Once this process has opened the camera, Sony's image memory stays taken until Latent closes, so the
- * darkroom can't run (see opened). Pictures taken here develop the next time Latent opens.
+ * Once this process has opened the camera, Sony's image memory stays taken until it ends, so the
+ * darkroom can't run here (see opened): MainActivity restarts Latent to develop.
  * Log: LATENT/VIEWFIND.TXT, a few lines per visit.
  */
 final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
@@ -65,14 +67,14 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     static volatile boolean opened;
 
     /**
-     * The film look on live view (and the level, which reads the same frames) needs the camera's live
-     * JPEG frames (CameraSequence's preview sequence). On the A5100, once that has been started in a
-     * camera session the camera never stores another picture, whoever presses the shutter: v0.31.0
-     * (frames running), v0.31.1 (frames stopped first), v0.31.2 (the camera's own shutter) all lost
-     * their pictures, and the camera froze when released or reopened with them pending. Off: the
-     * camera's own live view shows, with Latent's drawing over it.
+     * The film look on live view (and the level, which reads the same frames) comes from the camera's
+     * live JPEG frames (CameraSequence's preview sequence), asked for as Sony's Smart Remote asks for
+     * them. v0.31 lost its pictures with them running, but it also never told Sony's catalogue to
+     * look (so it never saw them) and released or reopened the camera with them in doubt; v0.34.1's
+     * Live look test stored two pictures with the frames running, each in the catalogue ~2.2 s later
+     * once flushed. Off (a setting, until the test has passed): the camera's own live view shows.
      */
-    static final boolean LIVE_LOOK = false;
+    final boolean liveLook;
     /**
      * Direct shutter (the button is the camera's own). Off: Latent focuses and takes the pictures
      * itself, exactly as the Shooting test has every time without a fault (focus, burstableTakePicture,
@@ -81,13 +83,14 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     static final boolean DIRECT_SHUTTER = false;
 
     static final int FRAME_W = 320, FRAME_H = 240;
+    static final long MIN_FRAME_MS = 120;
     /** Frame widths to ask the camera for, in turn, if frames don't come. */
     static final int[] WIDTHS = { 320, 640 };
     static final long FRAMES_WAIT_MS = 2500, FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, STORE_WAIT_MS = 8000;
     static final long PRINT_MS = 4000, FLASH_MS = 140, CARD_MS = 1600, NOTE_MS = 2600;
     /** Display modes: up and down cycle them. */
     static final int D_STANDARD = 0, D_GRID = 1, D_CLEAN = 2;
-    static final String[] DISPLAY_NAMES = { "Standard", LIVE_LOOK ? "Grid and histogram" : "Grid", "Clean" };
+    static final String[] DISPLAY_NAMES = { "Standard", "Grid", "Clean" };
 
     private final Activity activity;
     private final File card;
@@ -137,7 +140,11 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     // exposure
     String shutter = "", aperture = "", iso = "";
     boolean isoAuto;
-    int ev;
+    int ev;                    // exposure compensation, in thirds of a stop (the camera's own setting)
+    private int evMin = -9, evMax = 9;
+    private float evStep = 1f / 3;
+    boolean evEditing;         // DOWN (±): the scale is open and the wheel moves it
+    private long evEditUntil;
     int shotsLeft = -1;
     private long photoBytes = 6 * 1024 * 1024;
 
@@ -155,8 +162,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private String note = "";
 
     Viewfinder(Activity activity, File card, SurfaceView surface, ExecutorService worker, Stock stock, boolean focusFirst,
-               int highestPhoto, Host host) {
+               int highestPhoto, boolean liveLook, Host host) {
         this.activity = activity; this.card = card; this.surface = surface; this.worker = worker; this.host = host;
+        this.liveLook = liveLook;
         this.release = new Release(this, focusFirst, !DIRECT_SHUTTER);
         this.highestKnown = highestPhoto;
         setFilm(stock);
@@ -250,8 +258,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             if (!direct) release.app = true;
         }
         readSettings();
-        if (LIVE_LOOK) startFrames();
-        else note("the camera's own live view (no live frames: they stop pictures being stored)");
+        if (liveLook) startFrames();
+        else note("the camera's own live view (the film look on live view is off in MENU)");
         ui.post(tick);
         host.live();
         host.changed();
@@ -321,6 +329,23 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 return objectMethod(p, m, a);
             }
         });
+        // the store and capture reports the Shooting and Live look tests had set (both stored their pictures)
+        set("setStoreImageCompleteListener", "com.sony.scalar.hardware.CameraEx$StoreImageCompleteListener", new InvocationHandler() {
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().equals("onDone") && a != null && a.length > 1 && storeReports++ < 30)
+                    note("store report: status " + a[0] + ", " + field(a[1], "DirectoryName") + "/" + field(a[1], "FileName"));
+                return objectMethod(p, m, a);
+            }
+        });
+        for (String iface : new String[] { "com.sony.scalar.hardware.CameraEx$OnCaptureStatusListener", "com.sony.scalar.hardware.CameraEx$CaptureStatusListener" }) {
+            if (set("setCaptureStatusListener", iface, new InvocationHandler() {
+                public Object invoke(Object p, Method m, Object[] a) {
+                    if ((m.getName().equals("onStart") || m.getName().equals("onEnd")) && captureReports++ < 30)
+                        note("capture " + m.getName().substring(2).toLowerCase(Locale.US) + (a != null && a.length > 1 ? " " + a[0] + (a.length > 2 ? ", " + a[1] : "") : ""));
+                    return objectMethod(p, m, a);
+                }
+            })) break;
+        }
         set("setAutoISOSensitivityListener", "com.sony.scalar.hardware.CameraEx$AutoISOSensitivityListener", new InvocationHandler() {
             public Object invoke(Object p, Method m, Object[] a) {
                 if (m.getName().startsWith("on") && a != null && a.length > 0 && a[0] instanceof Integer) {
@@ -339,7 +364,12 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             afMode = afModeText(p.get("af-mode"), p.getFocusMode());
             afArea = areaText(p.get("focus-area-type"));
             float step = p.getExposureCompensationStep();
-            ev = Math.round(p.getExposureCompensation() * (step > 0 ? step : 1f / 3) * 3);
+            evStep = step > 0 ? step : 1f / 3;
+            ev = Math.round(p.getExposureCompensation() * evStep * 3);
+            evMin = Math.round(p.getMinExposureCompensation() * evStep * 3);
+            evMax = Math.round(p.getMaxExposureCompensation() * evStep * 3);
+            if (evMin >= evMax) { evMin = -9; evMax = 9; }
+            evApplied = ev;
             try {
                 Object m = cameraEx.getClass().getMethod("createParametersModifier", Camera.Parameters.class).invoke(cameraEx, p);
                 Object pair = m.getClass().getMethod("getShutterSpeed").invoke(m);
@@ -383,6 +413,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             if (sequence == null) sequence = cs.getMethod("open", Class.forName("com.sony.scalar.hardware.CameraEx")).invoke(null, cameraEx);
             Class<?> oc = Class.forName("com.sony.scalar.hardware.CameraSequence$Options");
             Object o = oc.newInstance();
+            option(o, "PREVIEW_FRAME_RATE", 30000);   // as Smart Remote and the Live look test ask
             option(o, (String) oc.getField("PREVIEW_FRAME_MAX_NUM").get(null), 1);
             option(o, (String) oc.getField("PREVIEW_FRAME_WIDTH").get(null), WIDTHS[widthIndex]);
             option(o, (String) oc.getField("PREVIEW_FRAME_HEIGHT").get(null), 0);   // the picture's own shape
@@ -421,7 +452,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             // look off the camera's own picture shows, and frames still come now and then, for the level
             // and never more than half the time busy: as long again idle as the last frame took (v0.31.0's
             // camera slowed down while just looking, with the frames going flat out)
-            if (!inFlight && now - lastLookAt >= Math.max(lookOn ? 150 : 300, lastLookMs * 2)) {
+            // the next frame as soon as the last look is drawn, at most about 8 a second (the camera's own
+            // processes keep the load at 57-78; v0.31 waited twice the look's time and got ~3 a second)
+            if (!inFlight && now - lastLookAt >= (lookOn ? MIN_FRAME_MS : 300)) {
                 long g = SystemClock.uptimeMillis();
                 byte[] f = grab();
                 if (f != null) { lastLookAt = now; grabMsSum += SystemClock.uptimeMillis() - g; grabs++; look(f); }
@@ -474,8 +507,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         final int[] p = params.clone();
         worker.execute(new Runnable() {
             public void run() {
-                // behind everything else on this core: the camera's own work and your presses come first
-                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                // a little behind the screen and the camera's callbacks, ahead of the darkroom (v0.31's background
+                // priority starved it under the camera's own load)
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
                 long t = SystemClock.uptimeMillis();
                 final int rc;
                 try { rc = FilmCore.live(jpeg, jpeg.length, l, p, px, FRAME_W, FRAME_H, info); }
@@ -512,6 +546,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     void halfDown() {
         if (!ready()) return;
+        closeEv();
         release.halfDown();
         if (!release.app) {   // the camera focuses; if it says nothing at all (manual focus, say), Latent tries
             final long at = SystemClock.uptimeMillis();
@@ -529,6 +564,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     }
 
     private long lastReportAt;
+    private int storeReports, captureReports;
 
     void halfUp() { if (ready()) { release.halfUp(); host.changed(); } }
 
@@ -562,6 +598,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     void hide() {
         if (hidden) return;
         if (release.half) release.halfUp();
+        closeEv();
         cancelFocus();
         hidden = true;
         note("hidden (MENU): the camera stays open");
@@ -578,7 +615,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     /** Centre: the film look on live view, or the camera's own picture (smooth, at full speed). */
     void toggleLook() {
-        if (!LIVE_LOOK) { showCard(); return; }   // no look on live view: centre shows the film
+        if (!liveLook) { showCard(); return; }   // no look on live view: centre shows the film
         if (lookFailed) { say("Film look unavailable on live view"); return; }
         lookOn = !lookOn;
         say(lookOn ? "Film look on" : "Film look off  \u00b7  the camera's own view");
@@ -587,7 +624,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     void cycleDisplay(int step) {
         display = (display + step + DISPLAY_NAMES.length) % DISPLAY_NAMES.length;
-        say(DISPLAY_NAMES[display]);
+        say(display == D_GRID && liveLook ? "Grid and histogram" : DISPLAY_NAMES[display]);
         host.changed();
     }
 
@@ -596,6 +633,72 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     void say(String text) { note = text; noteUntil = SystemClock.uptimeMillis() + NOTE_MS; ui.removeCallbacks(tick); ui.post(tick); host.changed(); }
 
     void setFocusFirst(boolean on) { release.focusFirst = on; }
+
+    // ------------------------------------------------------------------------------ exposure compensation (decision B)
+
+    static final long EV_EDIT_MS = 5000, EV_APPLY_MS = 150;
+
+    /** DOWN (the ± key): opens the exposure scale, or closes it. */
+    void toggleEv() {
+        if (!ready()) return;
+        evEditing = !evEditing;
+        evEditUntil = SystemClock.uptimeMillis() + EV_EDIT_MS;
+        if (!evEditing) applyEvNow();
+        ui.removeCallbacks(tick);
+        ui.post(tick);
+        host.changed();
+    }
+
+    /** Closes the scale (a half-press, centre, MENU), keeping what's set. */
+    void closeEv() {
+        if (!evEditing) return;
+        evEditing = false;
+        applyEvNow();
+        host.changed();
+    }
+
+    /** The wheel (or left / right) while the scale is open: a third of a stop each click. */
+    void evBy(int thirds) {
+        if (!evEditing || !ready()) return;
+        int next = clampEv(ev + thirds, evMin, evMax);
+        evEditUntil = SystemClock.uptimeMillis() + EV_EDIT_MS;
+        if (next == ev) return;
+        ev = next;
+        ui.removeCallbacks(applyEv);
+        ui.postDelayed(applyEv, EV_APPLY_MS);   // a quick turn of the wheel is one change, not many
+        host.changed();
+    }
+
+    static int clampEv(int ev, int min, int max) { return Math.max(min, Math.min(max, ev)); }
+
+    /** Thirds of a stop as the camera's compensation index (its step is a third on the A5100). */
+    static int evIndex(int thirds, float step) { return Math.round(thirds / (3 * (step > 0 ? step : 1f / 3))); }
+
+    private int evApplied = Integer.MIN_VALUE;
+    private final Runnable applyEv = new Runnable() { public void run() { applyEvNow(); } };
+
+    /**
+     * Sets the camera's own exposure compensation, as its shooting mode would (decision B: shared with
+     * shooting mode, not put back). Only the one value is sent (createEmptyParameters, as BetterManual
+     * does), and shooting mode then waits as after any setting change.
+     */
+    private void applyEvNow() {
+        ui.removeCallbacks(applyEv);
+        if (camera == null || cameraEx == null || closed || ev == evApplied) return;
+        try {
+            Camera.Parameters p = (Camera.Parameters) cameraEx.getClass().getMethod("createEmptyParameters").invoke(cameraEx);
+            p.setExposureCompensation(evIndex(ev, evStep));
+            camera.setParameters(p);
+            NeutralSettings.wrote();
+            if (evNotes++ < 20) note("exposure compensation " + ev + "/3");
+            evApplied = ev;
+        } catch (Throwable e) {
+            note("exposure compensation: " + Probe.why(e));
+            say("The camera kept its exposure");
+        }
+    }
+
+    private int evNotes;
 
     // ------------------------------------------------------------------------------ the button: the camera's, or Latent's (Release.Camera)
 
@@ -811,6 +914,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 final java.util.ArrayList<Probe.Row> found = new java.util.ArrayList<Probe.Row>();
                 String problem = null;
                 try {
+                    flushCatalogue();
                     Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
                     android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
                     // any new entry: a picture just taken is catalogued before it is marked as having its JPEG
@@ -851,6 +955,31 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     }
 
     private final Runnable findAgain = new Runnable() { public void run() { findStored(); } };
+
+    private long lastFlushAt;
+
+    /**
+     * Sony's catalogue lists a new picture only once told to look, which Smart Remote does after each
+     * picture (MediaObserverAggregator.invokeFlushingMediaDatabase): loadMedia, Images.waitAndUpdateDatabase,
+     * waitLoadMediaComplete. v0.34.1: the picture listed ~2.2 s after the shutter, 40-55 ms per flush.
+     * Catalogue thread; at most every 1.2 s.
+     */
+    private void flushCatalogue() {
+        long now = SystemClock.uptimeMillis();
+        if (now - lastFlushAt < 1200) return;
+        lastFlushAt = now;
+        try {
+            Class<?> store = Class.forName("com.sony.scalar.provider.AvindexStore");
+            store.getMethod("loadMedia", String.class, int.class).invoke(null, mediaId, 1);
+            Class.forName("com.sony.scalar.provider.AvindexStore$Images").getMethod("waitAndUpdateDatabase", android.content.ContentResolver.class, String.class)
+                    .invoke(null, activity.getContentResolver(), mediaId);
+            store.getMethod("waitLoadMediaComplete", String.class).invoke(null, mediaId);
+        } catch (Throwable e) {
+            if (flushFails++ < 3) note("catalogue flush: " + Probe.why(e));
+        }
+    }
+
+    private int flushFails;
 
     /**
      * Before any picture: the highest photo number in the catalogue, so a picture is known by being
@@ -900,7 +1029,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             long now = SystemClock.uptimeMillis();
             boolean was = level.shown;
             level.tick(now);
-            boolean moving = now < flashUntil + 100 || now < cardUntil + 100 || now < noteUntil + 100 || (print != null && now - printAt < PRINT_MS + 200);
+            if (evEditing && now > evEditUntil) closeEv();
+            boolean moving = evEditing || now < flashUntil + 100 || now < cardUntil + 100 || now < noteUntil + 100 || (print != null && now - printAt < PRINT_MS + 200);
             if (moving || was != level.shown) host.changed();
             if (moving || level.shown) ui.postDelayed(this, moving ? 100 : 300);   // the level hides by itself when frames stop being sure
         }
@@ -925,6 +1055,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         s.iso = isoAuto && iso.length() == 0 ? "AUTO" : iso;
         s.isoAuto = isoAuto && iso.length() > 0;
         s.ev = ev;
+        s.evEdit = evEditing;
         s.shotsLeft = shotsLeft < 0 ? -1 : Math.max(0, shotsLeft - shots);
         s.grid = display == D_GRID;
         s.hist = display == D_GRID && look ? hist : null;
@@ -1022,6 +1153,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         set("setShutterSpeedChangeListener", null, null);
         set("setApertureChangeListener", null, null);
         set("setAutoISOSensitivityListener", null, null);
+        set("setStoreImageCompleteListener", null, null);
+        set("setCaptureStatusListener", null, null);
         try { if (camera != null && previewing) camera.stopPreview(); } catch (Throwable e) { note("stopPreview: " + Probe.why(e)); }
         // Sony's own apps release the Android camera before CameraEx (their ExecutorCreator.terminate)
         try { if (camera != null) camera.release(); } catch (Throwable e) { note("camera release: " + Probe.why(e)); }
@@ -1193,6 +1326,10 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             }
         }
         throw new NoSuchMethodException("setOption(String, int)");
+    }
+
+    private static String field(Object o, String name) {
+        try { return String.valueOf(o.getClass().getField(name).get(o)); } catch (Throwable e) { return "?"; }
     }
 
     private static int intField(Object o, String name) {

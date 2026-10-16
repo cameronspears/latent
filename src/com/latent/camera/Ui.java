@@ -77,19 +77,19 @@ final class Ui {
                 if (t != null) g.image(t, x, 322, tw, th, false);
                 else g.rect(x, 322, tw, th, SURFACE);
             }
-            note = s.developLater && s.waiting > 0 ? s.waiting + (s.waiting == 1 ? " photo develops" : " photos develop") + " the next time you open Latent."
+            note = s.developLater && s.waiting > 0 ? s.waiting + (s.waiting == 1 ? " new photo. Press to develop it." : " new photos. Press to develop them.")
                     : s.developing > 0 ? "" : shown == 0 ? "No end to this roll. Photos develop each time you come back." : "";
             if (note.length() > 0) g.text(note, L, s.thumbs.isEmpty() ? 356 : 410, Gfx.REGULAR, 19, INK2, Gfx.LEFT, 0);
         } else {
             ticks(g, s.length, shown, -1, L, R, 338, INK, LINE, f.accent);
-            note = s.developed >= 0 ? s.developed + " of " + shown + " developed. " + (s.developLater ? "It carries on the next time you open Latent." : "Press to carry on.")
-                    : shown >= s.length ? (s.developLater ? "Roll finished. It develops the next time you open Latent." : "Roll finished. Press to develop.")
+            note = s.developed >= 0 ? s.developed + " of " + shown + " developed. Press to carry on."
+                    : shown >= s.length ? "Roll finished. Press to develop."
                     : shown == 0 ? "Fresh roll. Half-press the shutter to shoot."
                     : (s.length - shown) + (s.length - shown == 1 ? " exposure left" : " exposures left");
             g.text(note, L, 384, Gfx.REGULAR, 19, INK2, Gfx.LEFT, 0);
         }
-        boolean develop = s.developed >= 0 || (!s.endless && shown >= s.length);
-        hints(g, s, INK2, develop && s.developLater ? new String[0] : new String[] { "centre", develop ? "Develop" : "Shoot" },
+        boolean develop = s.developed >= 0 || (!s.endless && shown >= s.length) || (s.endless && s.developLater && s.waiting > 0);
+        hints(g, s, INK2, new String[] { "centre", develop ? "Develop" : "Shoot" },
                 new String[] { "menu", "Menu" });
         if (s.developing > 0) developingPill(g, s, R - g.textWidth("Menu", Gfx.REGULAR, 17, 0) - glyphWidth(g, "menu") - 30, f.accent);
     }
@@ -179,7 +179,9 @@ final class Ui {
         int ink = live ? INK : 0xCCF4F1EA;
         float x = ix + 22;
         if (s.afState == 2 || s.afState == 3) { g.circle(x + 4, by - 6, 4.5f, s.afState == 2 ? GREEN : AMBER); x += 18; }
-        if (!s.clean) {
+        if (s.evEdit) {   // DOWN (±): the exposure scale, large, the wheel moves it
+            evPanel(g, s, accent);
+        } else if (!s.clean) {
             x = expo(g, x, by, s.shutter, "", ink);
             x = expo(g, x + 22, by, s.aperture, "", ink);
             x = expo(g, x + 22, by, s.iso, s.isoAuto ? "ISO A" : "ISO", ink);
@@ -244,6 +246,28 @@ final class Ui {
         return x + g.textWidth(value, Gfx.MEDIUM, 20, 0);
     }
 
+    /** Exposure compensation in words: "0", "+1/3", "–1 2/3", "+2" (the en dash: Latent's fonts have no minus sign). */
+    static String evText(int ev) {
+        if (ev == 0) return "0";
+        int a = Math.abs(ev), whole = a / 3, third = a % 3;
+        return (ev > 0 ? "+" : "\u2013") + (whole > 0 ? String.valueOf(whole) : "") + (third == 0 ? "" : (whole > 0 ? " " : "") + third + "/3");
+    }
+
+    /**
+     * The exposure scale, open (DOWN, the camera's ± key): the value large over the scale, in a panel
+     * at the foot of the picture, the way a camera shows its exposure dial being turned. The wheel moves
+     * it a third at a time; DOWN, centre or a half-press closes it.
+     */
+    private static void evPanel(Gfx g, UiState s, int accent) {
+        float cx = s.width / 2, w = 340, top = 362, h = 96;
+        g.roundRect(cx - w / 2, top, w, h, 22, 0xC4000000);
+        g.text("EXPOSURE", cx, top + 24, Gfx.MEDIUM, 10, INK2, Gfx.CENTER, 160);
+        g.text(evText(s.ev), cx, top + 60, Gfx.DISPLAY, 34, s.ev == 0 ? INK : accent, Gfx.CENTER, -10);
+        meter(g, cx, top + 78, 250, s.ev, INK, accent);
+        g.text("\u2039", cx - w / 2 + 22, top + 64, Gfx.REGULAR, 26, INK3, Gfx.CENTER, 0);
+        g.text("\u203a", cx + w / 2 - 22, top + 64, Gfx.REGULAR, 26, INK3, Gfx.CENTER, 0);
+    }
+
     /** The exposure scale: -3 to +3 in thirds, a mark where exposure sits (ev in thirds, 0 = metered). */
     private static void meter(Gfx g, float cx, float y, float w, int ev, int ink, int accent) {
         float x0 = cx - w / 2, step = w / 18;
@@ -252,16 +276,13 @@ final class Ui {
             float h = zero ? 10 : major ? 7 : 4;
             g.rect(x0 + i * step - 0.6f, y - h / 2, 1.2f, h, zero ? ink : (ink & 0x00FFFFFF) | (major ? 0xAA000000 : 0x66000000));
         }
-        g.text("-", x0 - 10, y + 5, Gfx.MEDIUM, 13, (ink & 0x00FFFFFF) | 0x99000000, Gfx.CENTER, 0);
+        g.text("\u2013", x0 - 10, y + 5, Gfx.MEDIUM, 13, (ink & 0x00FFFFFF) | 0x99000000, Gfx.CENTER, 0);
         g.text("+", x0 + w + 10, y + 5, Gfx.MEDIUM, 13, (ink & 0x00FFFFFF) | 0x99000000, Gfx.CENTER, 0);
         int e = Math.max(-9, Math.min(9, ev));
         float mx = cx + e * step;
         g.line(mx - 5, y + 12, mx, y + 7, 1.6f, ev == 0 ? ink : accent);
         g.line(mx, y + 7, mx + 5, y + 12, 1.6f, ev == 0 ? ink : accent);
-        if (ev != 0) {
-            String t = (ev > 0 ? "+" : "\u2212") + (Math.abs(ev) / 3 > 0 ? String.valueOf(Math.abs(ev) / 3) : "") + (Math.abs(ev) % 3 == 0 ? "" : (Math.abs(ev) / 3 > 0 ? " " : "") + Math.abs(ev) % 3 + "/3");
-            g.text(t, mx, y - 12, Gfx.MEDIUM, 12, accent, Gfx.CENTER, 0);
-        }
+        if (ev != 0 && w < 200) g.text(evText(ev), mx, y - 12, Gfx.MEDIUM, 12, accent, Gfx.CENTER, 0);
     }
 
     /** The last shot as a small print developing in the corner; with photos queued, how many. */
@@ -720,8 +741,8 @@ final class Ui {
             "Changes no camera setting. Point the camera at something and hold still.",
     };
     static final String[] LOOK_PLAN = {
-            "Opens the camera and asks for the live frames Latent's film look needs, the way Sony's Smart Remote does.",
-            "Takes two photos with the frames running and checks each is stored. If the camera hands a photo over as raw data instead, it's stored as it is. Kept off your rolls.",
+            "Opens the camera and asks for the live frames Latent's film look needs, the way Sony's Smart Remote does, and puts the film on each one as the viewfinder will.",
+            "Takes two photos with the frames and the look running, and checks each is stored. Kept off your rolls. If both are, Film look on live view comes on.",
             "Saves the camera's own log after the first photo. If a photo isn't stored, the camera is kept open (releasing it froze the camera before) and the screen says what to do.",
     };
     static final String LOOK_FOOTER = "About half a minute. Logs: LATENT/LIVELOOK.TXT and LOOKLOG.TXT.";
