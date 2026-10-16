@@ -38,6 +38,42 @@ final class Library {
     static File lutDir(File card) { return new File(home(card), "LUTS"); }
     static File outDir(File card) { return new File(home(card), "OUT"); }
 
+    /**
+     * Photos that are never exposures: the Shooting test's own shots and prints. LATENT/IGNORE.TXT,
+     * one "100MSDCF/DSC04680.JPG" per line (folder and name, so it reads the same on a computer).
+     */
+    static java.util.Set<String> ignored(File card) {
+        java.util.Set<String> out = new java.util.HashSet<String>();
+        File f = new File(home(card), "IGNORE.TXT");
+        if (!f.exists()) return out;
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f));
+            try { for (String line; (line = r.readLine()) != null; ) if (line.trim().length() > 0) out.add(line.trim().toUpperCase(Locale.US)); }
+            finally { r.close(); }
+        } catch (IOException e) {
+            // nothing ignored
+        }
+        return out;
+    }
+
+    static String key(File photo) {
+        return (photo.getParentFile().getName() + "/" + photo.getName()).toUpperCase(Locale.US);
+    }
+
+    static void ignore(File card, File photo) throws IOException {
+        FileOutputStream o = new FileOutputStream(new File(home(card), "IGNORE.TXT"), true);
+        try { o.write((key(photo) + "\r\n").getBytes("UTF-8")); } finally { o.close(); }
+    }
+
+    /** These photos without the ignored ones. */
+    static List<File> withoutIgnored(File card, List<File> photos) {
+        java.util.Set<String> skip = ignored(card);
+        if (skip.isEmpty()) return photos;
+        List<File> out = new ArrayList<File>(photos.size());
+        for (File p : photos) if (!skip.contains(key(p))) out.add(p);
+        return out;
+    }
+
     /** Every JPEG under DCIM, newest first. */
     static List<File> photos(File card) {
         List<File> out = new ArrayList<File>();

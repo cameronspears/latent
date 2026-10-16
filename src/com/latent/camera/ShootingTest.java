@@ -32,8 +32,9 @@ import java.lang.reflect.Proxy;
  */
 final class ShootingTest implements SurfaceHolder.Callback {
     static final String[] STEPS = { "Open the camera", "Live view", "Focus options", "Level sensor", "Focus", "Take a picture",
-            "Live frames", "A look on a frame", "Camera closed" };
-    static final int S_OPEN = 0, S_LIVE = 1, S_OPTIONS = 2, S_LEVEL = 3, S_FOCUS = 4, S_SHOT = 5, S_FRAMES = 6, S_LOOK = 7, S_CLOSED = 8;
+            "Live frames", "A look on a frame", "Develop the shot", "Camera closed" };
+    static final int S_OPEN = 0, S_LIVE = 1, S_OPTIONS = 2, S_LEVEL = 3, S_FOCUS = 4, S_SHOT = 5, S_FRAMES = 6, S_LOOK = 7, S_DEVELOP = 8,
+            S_CLOSED = 9;
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
     static final int FOCUS_TRIES = 4;
     static final long FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, SAVE_TIMEOUT_MS = 15000, FRAMES_MS = 3000;
@@ -429,7 +430,16 @@ final class ShootingTest implements SurfaceHolder.Callback {
         if (catalogueSeen < 0 || pathSeen < 0) {
             Probe.Row row = newestCatalogued();
             if (row != null) {
-                if (catalogueSeen < 0) { catalogueSeen = waited; note("in the catalogue " + waited + " ms after the shutter: " + row.data + " (" + row.folder + "/" + row.number + ")"); }
+                if (catalogueSeen < 0) {
+                    catalogueSeen = waited;
+                    note("in the catalogue " + waited + " ms after the shutter: " + row.data + " (" + row.folder + "/" + row.number + ")");
+                    shot = dcfFile(row.folder, row.number);
+                    try { Library.ignore(card, shot); note(shot.getName() + " kept off every roll (IGNORE.TXT)"); } catch (Exception e) { note("ignore: " + Probe.why(e)); }
+                    // the camera has stored it: that is enough to go on (Linux sees the file only once the card is read afresh)
+                    report(S_SHOT, OK, shot.getName() + " stored: shutter " + shutterMs + " ms, in the catalogue " + waited + " ms later");
+                    ui.postDelayed(new Runnable() { public void run() { afterPicture(); } }, 1500);
+                    return;
+                }
                 File f = row.data == null ? null : new File(row.data);
                 if (pathSeen < 0 && f != null && f.exists() && f.length() > 0) { pathSeen = waited; note("its path answers " + waited + " ms after the shutter, " + f.length() + " bytes"); }
             }
@@ -453,6 +463,15 @@ final class ShootingTest implements SurfaceHolder.Callback {
     }
 
     private boolean photoSeen;
+    private File shot;   // the test's photo, by its DCF name (readable only through the catalogue until the card is read again)
+
+    /** DCIM/100MSDCF/DSC04680.JPG for folder 100, number 4680 (the folder's suffix as on the card). */
+    private File dcfFile(int folder, int number) {
+        File dcim = new File(card, "DCIM"), dir = new File(dcim, folder + "MSDCF");
+        File[] dirs = dcim.listFiles();
+        if (dirs != null) for (File d : dirs) if (d.getName().startsWith(String.valueOf(folder))) dir = d;
+        return new File(dir, String.format(java.util.Locale.US, "DSC%05d.JPG", number));
+    }
 
     /** The catalogue's newest photo numbered above the card's highest before the shot, or null. */
     private Probe.Row newestCatalogued() {
@@ -512,8 +531,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         } catch (Throwable e) {
             report(S_FRAMES, FAIL, "no preview sequence: " + Probe.why(e));
             stopSequence();
-            report(S_LOOK, INFO, "no frame to try");
-            close();
+            lookOnFrame(null);
             return;
         }
         note("preview sequence started");
@@ -559,8 +577,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         stopSequence();
         if (frameCount == 0) {
             report(S_FRAMES, FAIL, "none in " + ms / 1000 + " s (" + emptyPolls + " empty asks)");
-            report(S_LOOK, INFO, "no frame to try");
-            close();
+            lookOnFrame(null);
             return;
         }
         BitmapFactory.Options b = new BitmapFactory.Options();
@@ -581,6 +598,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 String result;
                 int status;
                 try {
+                    if (jpeg == null) throw new IllegalStateException("no frame to try");
                     File f = new File(Library.home(card), "LIVEFRM.JPG");
                     FileOutputStream o = new FileOutputStream(f);
                     try { o.write(jpeg); } finally { o.close(); }
@@ -616,9 +634,44 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 }
                 final String r = result;
                 final int s = status;
-                ui.post(new Runnable() { public void run() { report(S_LOOK, s, r); finish(); } });
+                ui.post(new Runnable() { public void run() { report(S_LOOK, s, r); out.step(S_DEVELOP, RUN, "developing…"); } });
+                final String[] dev = developShot();
+                ui.post(new Runnable() { public void run() { report(S_DEVELOP, Integer.parseInt(dev[0]), dev[1]); finish(); } });
             }
         }, "look-timing").start();
+    }
+
+    /**
+     * The shot through Latent's darkroom, as Photo mode would: found in Sony's catalogue by its number,
+     * decoded by the camera, the look applied, saved as a new photo. The print is kept off every roll
+     * too. Returns {status, detail}. Background thread, camera already released.
+     */
+    private String[] developShot() {
+        if (shot == null) return new String[] { String.valueOf(INFO), "no shot to develop" };
+        if (stock == null) return new String[] { String.valueOf(INFO), "no film looks on the card" };
+        StringBuilder dl = new StringBuilder();
+        try {
+            HardwareDevelop h = new HardwareDevelop(context, card, dl, null);
+            h.prepare(false);
+            int[] p = new int[FilmCore.COUNT];
+            p[FilmCore.HIGHLIGHT] = stock.highlight;
+            p[FilmCore.SHADOW] = stock.shadow;
+            p[FilmCore.GRAIN] = stock.grain;
+            p[FilmCore.GRAIN_SIZE] = stock.grainSize;
+            p[FilmCore.QUALITY] = 95;
+            p[FilmCore.SEED] = shot.getName().hashCode();
+            p[FilmCore.THREADS] = 1;
+            long t = SystemClock.uptimeMillis();
+            HardwareDevelop.Print print = h.develop(shot, stock.lut.getPath(), p, null);
+            long ms = SystemClock.uptimeMillis() - t;
+            try { Library.ignore(card, print.file); } catch (Exception e) { note("ignore: " + Probe.why(e)); }
+            note("develop log:\r\n" + dl);
+            return new String[] { String.valueOf(print.catalogued ? OK : INFO), stock.title + ": " + print.file.getName() + " in " + ms / 1000.0 + " s"
+                    + (print.catalogued ? "" : " (not catalogued)") };
+        } catch (Throwable e) {
+            note("develop log:\r\n" + dl);
+            return new String[] { String.valueOf(FAIL), Probe.why(e) };
+        }
     }
 
     // ------------------------------------------------------------------------------ closing

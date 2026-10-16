@@ -145,10 +145,11 @@ public class RenderScreens {
         s.probePlan = Ui.SHOOT_PLAN; s.probeFooter = Ui.SHOOT_FOOTER;
         render(s, fonts, out, "13b-shooting-intro");
         s.probeStage = 2;
-        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
-        s.probeDetail = new String[] { "opened in 662 ms", "on screen", "af-s, center, faces [off, on]", "52 readings in 2 s: roll 1.4\u00b0, pitch -3.0\u00b0",
-                "locked in 1049 ms", "DSC04679.JPG on the card: shutter 36 ms, saved 1400 ms later", "29 in 3.0 s (9.6 a second), 640x424, 31 KB each",
-                "Tri-X: 640x424 on 1 core 419 ms, 640x424 on 3 cores 412 ms, 320x212 on 3 cores 142 ms", "live view stopped, camera released" };
+        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.INFO, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
+        s.probeDetail = new String[] { "opened in 662 ms", "on screen", "af-s, center, faces [off, on]", "no sensor readings; display roll 0",
+                "locked in 1049 ms", "DSC04681.JPG stored: shutter 31 ms, in the catalogue 79 ms later", "29 in 3.0 s (9.6 a second), 640x424, 31 KB each",
+                "Tri-X: 640x424 on 1 core 419 ms, 640x424 on 3 cores 412 ms, 320x212 on 3 cores 142 ms", "Tri-X: DSC04682.JPG in 7.9 s",
+                "live view stopped, camera released" };
         render(s, fonts, out, "13c-shooting-results");
         s.probeStage = 2; s.probeTitle = "Camera roll test"; s.probeSteps = Probe.STEPS;
         s.probeStatus = new int[] { Probe.INFO, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.FAIL, Probe.OK };

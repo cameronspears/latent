@@ -209,7 +209,7 @@ public class MainActivity extends Activity {
                 final List<Roll> ro = Roll.list(card);
                 Roll.upgrade(ro);
                 long r2 = SystemClock.uptimeMillis();
-                List<File> all = Library.photos(card);
+                List<File> all = Library.withoutIgnored(card, Library.photos(card));   // test shots are never exposures
                 long r3 = SystemClock.uptimeMillis();
                 try {
                     String tidied = Roll.tidy(ro, Roll.exposable(all, ro));

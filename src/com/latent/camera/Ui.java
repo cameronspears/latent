@@ -674,7 +674,7 @@ final class Ui {
     static final String[] SHOOT_PLAN = {
             "Reads the focus options the camera offers (modes, areas, faces) and listens to its motion sensors for two seconds, to see if a level is possible. Only reads.",
             "Opens the camera with live view, then focuses by itself. If it can't lock, as in a dark room, it tries again, up to four times, and notes how long the AF lamp is on.",
-            "Takes one photo. The camera saves it to the card as usual.",
+            "Takes one photo, then develops it in the film look as Photo mode would. Both are kept off your rolls.",
             "Asks for live view as small pictures and times a film look on one. That decides whether looks can be shown live.",
             "Changes no camera setting. Point the camera at something and hold still.",
     };
