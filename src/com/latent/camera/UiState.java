@@ -28,6 +28,7 @@ final class UiState {
     int developed = -1;                // frames developed so far when a develop was paused, else -1
     List<String> nav = new ArrayList<String>();
     int camMode;                       // the switch at the top of the camera back: 0 Film, 1 Photo
+    boolean camSwitch;                 // show that switch (once Photo mode is in the app)
     boolean gear;                      // the camera back's row ends with Settings (a gear); navSel == nav.size() is it
 
     // Photo mode: live view with a look on it
@@ -42,7 +43,6 @@ final class UiState {
     int rowSel;
     String footer = "";
     int navSel;
-    boolean navMore;                   // the secondary actions are showing
 
     // load film
     List<Film> films = new ArrayList<Film>();

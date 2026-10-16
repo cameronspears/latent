@@ -48,7 +48,7 @@ final class Ui {
     private static void back(Gfx g, UiState s) {
         float R = right(s);
         battery(g, s.battery, R, INK2, INK3);
-        modeSwitch(g, s, 0, s.film != null ? s.film.accent : INK);
+        if (s.camSwitch) modeSwitch(g, s, 0, s.film != null ? s.film.accent : INK);
         if (s.film == null) {
             g.text("No film loaded", L, TOP, Gfx.MEDIUM, 18, INK2, Gfx.LEFT, 0);
             g.text("Load a roll", L - 3, 222, Gfx.DISPLAY, 72, INK, Gfx.LEFT, -10);
@@ -179,15 +179,8 @@ final class Ui {
     /** Bottom navigation: a row of words, the chosen one bright with an accent bar under it. */
     private static void nav(Gfx g, UiState s, int accent) {
         float x = L;
-        if (s.navMore) {   // the secondary row says where it came from
-            g.text("More", x, FOOT, Gfx.MEDIUM, 21, INK2, Gfx.LEFT, 0);
-            x += g.textWidth("More", Gfx.MEDIUM, 21, 0) + 14;
-            g.line(x, FOOT - 15, x + 6, FOOT - 8, 1.6f, INK3);
-            g.line(x + 6, FOOT - 8, x, FOOT - 1, 1.6f, INK3);
-            x += 26;
-        }
         // the row slides so the chosen item is always in view; "…" says there is more
-        float end = s.navMore ? right(s) - 130 : right(s), dots = g.textWidth("…", Gfx.MEDIUM, 21, 0) + 12;
+        float end = right(s), dots = g.textWidth("…", Gfx.MEDIUM, 21, 0) + 12;
         int n = s.nav.size(), first = 0, sel = Math.min(s.navSel, n - 1);   // navSel == n: the gear, not a word
         if (s.gear) end -= 44;
         float[] w = new float[n];
@@ -206,7 +199,6 @@ final class Ui {
             if (on) g.roundRect(x, FOOT + 12, 22, 4, 2, accent);
             x += w[i] + 36;
         }
-        if (s.navMore) menuHint(g, "Back", INK3, right(s), FOOT);
         if (s.gear) gear(g, right(s) - 11, FOOT - 7, s.navSel == n ? INK : INK3, s.navSel == n, accent);
     }
 

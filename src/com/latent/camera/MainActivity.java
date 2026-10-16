@@ -47,7 +47,7 @@ import java.util.concurrent.ThreadFactory;
  */
 public class MainActivity extends Activity {
     private static final int BACK = UiState.BACK, LOAD = UiState.LOAD, DARKROOM = UiState.DARKROOM,
-            SHEET = UiState.SHEET, VIEW = UiState.VIEW, LAB = UiState.LAB, PROBE = UiState.PROBE;
+            SHEET = UiState.SHEET, VIEW = UiState.VIEW, LAB = UiState.LAB, PROBE = UiState.PROBE, SETTINGS = UiState.SETTINGS;
     private static final int[] LENGTHS = { 12, 24, 36 };
 
     // camera key scan codes (Sony ScalarInput)
@@ -218,7 +218,7 @@ public class MainActivity extends Activity {
                     devLog("Latent's note of the loaded roll was " + (note.length() == 0 ? "missing" : note) + "; " + inCamera.label()
                             + " is open on the card, so that's the roll in the camera" + (saved ? "" : " (the note couldn't be saved)"));
                 }
-                final String neutralMsg = reconcileNeutral(inCamera != null);
+                final String neutralMsg = reconcileNeutral(inCamera != null && neutralOn());
                 if (cardReadNote == null) cardReadNote = "card read: first touch " + (r0 - r00) + " ms" + (cardThere ? "" : " (no LATENT)") + ", looks " + (r1 - r0) + " ms, rolls " + (r2 - r1) + " ms, photos "
                         + (r3 - r2) + " ms (" + all.size() + "), the rest " + (SystemClock.uptimeMillis() - r3) + " ms";
                 final String msg = problem;
@@ -237,7 +237,7 @@ public class MainActivity extends Activity {
                         if (!ready) readyAt = SystemClock.uptimeMillis();
                         ready = true;
                         saveSnapshot();
-                        backSel = Math.min(backSel, backItems().size() - 1);
+                        backSel = Math.min(backSel, backItems().size());
                         filer.execute(new Runnable() { public void run() { fileBacklog(ro); } });
                         if (samples.isEmpty()) renderSamples();   // so Load film opens with them ready
                         if (then != null) then.run();
@@ -250,87 +250,155 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------------------------ camera back
 
-    private boolean navMore;           // the secondary actions are showing
-
     /**
-     * What the bottom row offers depends on where you are with the roll: mid-roll it's shooting and
-     * developing; a full roll only wants developing. Everything else waits behind More.
+     * The bottom row is only what the roll wants next: load one, shoot it, develop it, look back at
+     * rolls. Everything else is in Settings, the gear at the row's end (backSel == items.size()).
      */
     private List<String> backItems() {
         List<String> items = new ArrayList<String>();
         if (current == null) {
             items.add("Load film");
-            items.add("Contact sheets");
-            items.add("Lab");
-            items.add("Settings check");
-            items.add("Speed test");
-            items.add("Live view test");
-            items.add(coresLabel());
-        } else if (navMore) {
-            items.add("Contact sheets");
-            items.add("Lab");
-            items.add("Unload roll");
-            items.add("Settings check");
-            items.add("Speed test");
-            items.add("Live view test");
-            items.add(coresLabel());
         } else if (Roll.DEVELOPING.equals(current.state)) {
             items.add("Continue developing");
-            items.add("More");
         } else {
             int shown = Math.min(exposed, current.length);
             if (shown < current.length) items.add("Shoot");
             if (shown > 0) items.add("Develop");
-            items.add("More");
         }
+        items.add("Rolls");
         return items;
     }
 
     private void backKey(int k) {
         List<String> items = backItems();
         if (k == K_LEFT || k == K_UP) backSel = Math.max(0, backSel - 1);
-        else if (k == K_RIGHT || k == K_DOWN) backSel = Math.min(items.size() - 1, backSel + 1);
+        else if (k == K_RIGHT || k == K_DOWN) backSel = Math.min(items.size(), backSel + 1);   // one past the words: the gear
         else if (k == K_ENTER && ready) {
+            if (backSel >= items.size()) { openSettings(); screen.invalidate(); return; }
             String item = items.get(backSel);
-            if (item.equals("Load film") || item.equals("Unload roll")) {
-                if (stocks.isEmpty()) toast("No looks in LATENT/LUTS");
-                else { stockSel = Math.min(stockSel, stocks.size() - 1); mode = LOAD; navMore = false; renderSamples(); }
+            if (item.equals("Load film")) {
+                openLoad();
             } else if (item.equals("Shoot")) {
                 goShoot();
-            } else if (item.equals("More")) {
-                navMore = true;
-                backSel = 0;
             } else if (item.equals("Develop") || item.equals("Continue developing")) {
                 startDevelop(current);
-            } else if (item.equals("Contact sheets")) {
-                openSheet(firstRollWithFrames());
-            } else if (item.equals("Lab")) {
-                openLab();
-            } else if (item.equals(coresLabel())) {   // the switch: develop on three cores, or on Latent's own only
-                if (!prefs.getBoolean("multicoreOk", false)) toast("Run the Speed test first: it checks the other cores");
-                else {
-                    int now = developCores() > 1 ? 1 : 3;
-                    prefs.edit().putInt("cores", now).commit();
-                    toast(now > 1 ? "Developing on 3 cores" : "Developing on 1 core");
-                }
-            } else if (item.equals("Settings check") || item.equals("Hardware test") || item.equals("Speed test") || item.equals("Live view test")) {
-                mode = PROBE;
-                probeStage = 0;
-                hardwareTest = item.equals("Hardware test");
-                settingsCheck = item.equals("Settings check");
-                speedTest = item.equals("Speed test");
-                liveTest = item.equals("Live view test");
+            } else if (item.equals("Rolls")) {
+                Roll r = firstRollWithFrames();
+                if (r == null) toast("No rolls yet");
+                else openSheet(r);
             }
         }
         screen.invalidate();
+    }
+
+    private void openLoad() {
+        if (stocks.isEmpty()) { toast("No looks in LATENT/LUTS"); return; }
+        stockSel = Math.min(stockSel, stocks.size() - 1);
+        mode = LOAD;
+        renderSamples();
+    }
+
+    // ------------------------------------------------------------------------------ settings
+
+    private int settingsSel = 1;       // a row of settingsRows(); headings are passed over
+    private boolean fromSettings;      // the test or Lab on screen was opened from Settings: MENU goes back there
+
+    /** Each row: {label, value, action}. Value "on"/"off" is a switch, "›" opens something, "" is a heading. */
+    private List<String[]> settingsRows() {
+        List<String[]> rows = new ArrayList<String[]>();
+        rows.add(new String[] { "Developing", "", "" });
+        rows.add(new String[] { "Use three cores", developCores() > 1 ? "on" : "off", "cores" });
+        rows.add(new String[] { "Shoot neutral while a roll is loaded", neutralOn() ? "on" : "off", "neutral" });
+        rows.add(new String[] { "Film", "", "" });
+        rows.add(new String[] { "Try looks on a photo", "›", "lab" });
+        if (current != null && !Roll.DEVELOPING.equals(current.state)) rows.add(new String[] { "Unload this roll", "›", "unload" });
+        rows.add(new String[] { "Camera", "", "" });
+        rows.add(new String[] { "Settings check", "›", "settingsCheck" });
+        rows.add(new String[] { "Speed test", "›", "speedTest" });
+        rows.add(new String[] { "Live view test", "›", "liveTest" });
+        return rows;
+    }
+
+    /** What the chosen row does, in a line at the foot of Settings. */
+    private String settingsFooter(String action) {
+        if (action.equals("cores")) return prefs.getBoolean("multicoreOk", false) ? "Develops on cores 1 and 2 as well. Core 0 is left to the camera." : "Run the Speed test first: it checks the other cores.";
+        if (action.equals("neutral")) return "Every look starts from the same picture. Your settings come back after.";
+        if (action.equals("unload")) return "Keeps the frames shot so far, then load another film.";
+        return "Latent " + versionName();
+    }
+
+    private boolean neutralOn() { return prefs.getBoolean("neutral", true); }
+
+    private void openSettings() {
+        mode = SETTINGS;
+        fromSettings = false;
+        List<String[]> rows = settingsRows();
+        settingsSel = Math.max(1, Math.min(settingsSel, rows.size() - 1));
+        if (rows.get(settingsSel)[1].length() == 0) settingsSel++;
+    }
+
+    private void settingsKey(int k) {
+        List<String[]> rows = settingsRows();
+        int n = rows.size(), step = k == K_UP || k == K_LEFT ? -1 : k == K_DOWN || k == K_RIGHT ? 1 : 0;
+        if (step != 0) {
+            int i = settingsSel + step;
+            while (i >= 0 && i < n && rows.get(i)[1].length() == 0) i += step;   // pass over headings
+            if (i >= 0 && i < n) settingsSel = i;
+        } else if (k == K_ENTER) {
+            String action = rows.get(Math.min(settingsSel, n - 1))[2];
+            if (action.equals("cores")) {   // develop on three cores, or on Latent's own only
+                if (!prefs.getBoolean("multicoreOk", false)) toast("Run the Speed test first: it checks the other cores");
+                else prefs.edit().putInt("cores", developCores() > 1 ? 1 : 3).commit();
+            } else if (action.equals("neutral")) {
+                setNeutral(!neutralOn());
+            } else if (action.equals("lab")) {
+                openLab();
+                fromSettings = true;
+            } else if (action.equals("unload")) {
+                openLoad();
+            } else if (action.equals("settingsCheck") || action.equals("speedTest") || action.equals("liveTest")) {
+                mode = PROBE;
+                probeStage = 0;
+                hardwareTest = false;
+                settingsCheck = action.equals("settingsCheck");
+                speedTest = action.equals("speedTest");
+                liveTest = action.equals("liveTest");
+                fromSettings = true;
+            }
+        }
+        screen.invalidate();
+    }
+
+    /**
+     * The switch: off, the camera keeps your own settings during a roll. Changing it mid-roll changes the
+     * camera at once (and shooting waits the usual few seconds after, like loading a roll).
+     */
+    private void setNeutral(final boolean on) {
+        prefs.edit().putBoolean("neutral", on).commit();
+        if (current == null) return;   // nothing to change until a roll is loaded
+        worker.execute(new Runnable() {
+            public void run() {
+                StringBuilder nl = new StringBuilder();
+                NeutralSettings ns = new NeutralSettings(card, nl);
+                String msg = null;
+                if (on && !ns.active()) {
+                    String why = ns.apply();
+                    msg = why == null ? "Camera set to neutral for this roll" : "Camera " + why;
+                } else if (!on && ns.active()) {
+                    String why = ns.restore();
+                    msg = why == null ? "Your camera settings are back" : why;
+                }
+                devLogAll(nl);
+                final String m = msg;
+                if (m != null) ui.post(new Runnable() { public void run() { toast(m); } });
+            }
+        });
     }
 
     /** Threads for the look: 3 (Latent's core plus helpers on cores 1 and 2) once the Speed test has checked them, unless switched off. */
     private int developCores() {
         return prefs.getBoolean("multicoreOk", false) ? Math.max(1, Math.min(3, prefs.getInt("cores", 3))) : 1;
     }
-
-    private String coresLabel() { return developCores() > 1 ? "3 cores" : "1 core"; }
 
     // camera roll test (phase 1)
     private int probeStage;
@@ -505,10 +573,10 @@ public class MainActivity extends Activity {
                     t2 = System.currentTimeMillis();
                     // the camera shoots neutral while a roll is loaded; yours come back after developing
                     StringBuilder nl = new StringBuilder();
-                    String why = new NeutralSettings(card, nl).apply();
+                    String why = neutralOn() ? new NeutralSettings(card, nl).apply() : null;
                     neutralTried = true;
                     devLogAll(nl);
-                    msg = stock.name + " loaded" + (why == null ? "  ·  camera set to neutral" : ". Camera " + why);
+                    msg = stock.name + " loaded" + (!neutralOn() ? "" : why == null ? "  ·  camera set to neutral" : ". Camera " + why);
                 } catch (Exception e) {
                     msg = "Could not load film: " + e.getMessage();
                 }
@@ -521,7 +589,7 @@ public class MainActivity extends Activity {
                     public void run() {
                         loading = false;
                         if (r != null) { current = r; exposed = 0; }   // the camera back shows it now; the card is re-read behind it
-                        mode = BACK; backSel = 0; navMore = false;
+                        mode = BACK; backSel = 0;
                         toast(m);
                         refresh(null);
                     }
@@ -534,8 +602,8 @@ public class MainActivity extends Activity {
     private volatile boolean neutralTried;   // set neutral at most once per run for a roll loaded before v0.13
 
     /**
-     * The camera shoots neutral exactly while a roll is loaded: once none is (developed, or the app
-     * finds none), your settings go back. Worker thread. Returns a message for the screen, or null.
+     * The camera shoots neutral exactly while a roll is loaded (and the switch in Settings is on): once
+     * none is (developed, or the app finds none), your settings go back. Worker thread. Returns a message for the screen, or null.
      */
     private String reconcileNeutral(boolean loaded) {
         StringBuilder nl = new StringBuilder();
@@ -1164,7 +1232,7 @@ public class MainActivity extends Activity {
     private String modeName() {
         switch (mode) {
             case BACK: return "camera back"; case LOAD: return "Load film"; case DARKROOM: return "darkroom"; case SHEET: return "contact sheet";
-            case VIEW: return "viewer"; case LAB: return "Lab"; default: return "tests";
+            case VIEW: return "viewer"; case LAB: return "Lab"; case SETTINGS: return "Settings"; default: return "tests";
         }
     }
 
@@ -1373,6 +1441,7 @@ public class MainActivity extends Activity {
             case SHEET: sheetKey(k); break;
             case VIEW: viewKey(k); break;
             case LAB: labKey(k); break;
+            case SETTINGS: settingsKey(k); break;
             case PROBE: if (k == K_ENTER && probeStage == 0) runProbe(); break;
             default: break;   // darkroom: only MENU (pause)
         }
@@ -1390,13 +1459,14 @@ public class MainActivity extends Activity {
         boolean menu = sc == SC_MENU || sc == SC_SK1 || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_BACK;
         if (!menu) return true;
         switch (mode) {
-            case BACK: if (navMore) { navMore = false; backSel = 0; } else goShoot(); break;   // leaving starts the camera's shooting mode too
+            case BACK: goShoot(); break;   // leaving starts the camera's shooting mode too
+            case SETTINGS: mode = BACK; break;
             case DARKROOM: paused = true; toast("Pausing after this frame"); break;
             case VIEW: mode = SHEET; break;
-            case LAB: if (!labBusy) mode = BACK; break;
+            case LAB: if (!labBusy) mode = fromSettings ? SETTINGS : BACK; break;
             case PROBE:
                 if (liveRun != null) liveRun.close();   // MENU stops the live view test at once
-                else if (probeStage != 1) mode = BACK;
+                else if (probeStage != 1) mode = fromSettings ? SETTINGS : BACK;
                 break;
             default: mode = BACK; break;
         }
@@ -1428,9 +1498,17 @@ public class MainActivity extends Activity {
                     if (Roll.DEVELOPING.equals(current.state)) s.developed = current.developedCount();
                 }
                 s.nav = backItems();
-                s.navSel = Math.min(backSel, s.nav.size() - 1);
-                s.navMore = navMore;
+                s.navSel = Math.min(backSel, s.nav.size());
+                s.gear = true;
                 break;
+            case SETTINGS: {
+                List<String[]> rows = settingsRows();
+                int sel = Math.min(settingsSel, rows.size() - 1);
+                for (String[] r : rows) s.rows.add(new String[] { r[0], r[1] });
+                s.rowSel = sel;
+                s.footer = settingsFooter(rows.get(sel)[2]);
+                break;
+            }
             case LOAD:
                 for (Stock st : stocks) s.films.add(film(st));
                 s.filmSel = stockSel;

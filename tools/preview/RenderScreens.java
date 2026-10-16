@@ -29,7 +29,7 @@ public class RenderScreens {
         for (int i = 0; i < 24; i++) thumbs.add(img(samples, names[i % 3] + "-CUBANNEG.png"));
 
         UiState s = state();
-        s.nav = Arrays.asList("Load film", "Contact sheets", "Lab");
+        s.gear = true; s.nav = Arrays.asList("Load film", "Rolls");
         render(s, fonts, out, "1-back-empty");
 
         // ---- the redesign: Film / Photo, a short row with Settings at its end, Photo mode, Settings
@@ -39,10 +39,10 @@ public class RenderScreens {
         UiState.Film party = film("Afterparty", "800", "", 0xFF4B2470, 0xFFE8458B, 0xFFF0629F);
         List<UiState.Film> six = Arrays.asList(natural, portra, classic, cuban, trix, party);
         s = state();
-        s.gear = true; s.nav = Arrays.asList("Load film", "Rolls");
+        s.camSwitch = true; s.gear = true; s.nav = Arrays.asList("Load film", "Rolls");
         render(s, fonts, out, "20-home-film-empty");
         s = state();
-        s.gear = true; s.film = cuban; s.rollNumber = 3; s.exposed = 14; s.length = 24;
+        s.camSwitch = true; s.gear = true; s.film = cuban; s.rollNumber = 3; s.exposed = 14; s.length = 24;
         s.nav = Arrays.asList("Shoot", "Develop", "Rolls");
         render(s, fonts, out, "21-home-film-midroll");
         s.navSel = 3;
@@ -58,34 +58,31 @@ public class RenderScreens {
         s.rows.add(new String[] { "Developing", "" });
         s.rows.add(new String[] { "Use three cores", "on" });
         s.rows.add(new String[] { "Shoot neutral while a roll is loaded", "on" });
-        s.rows.add(new String[] { "Looks", "" });
+        s.rows.add(new String[] { "Film", "" });
         s.rows.add(new String[] { "Try looks on a photo", "›" });
+        s.rows.add(new String[] { "Unload this roll", "›" });
         s.rows.add(new String[] { "Camera", "" });
         s.rows.add(new String[] { "Settings check", "›" });
         s.rows.add(new String[] { "Speed test", "›" });
         s.rows.add(new String[] { "Live view test", "›" });
-        s.rows.add(new String[] { "Version", "Latent 0.16" });
+        s.footer = "Develops on cores 1 and 2 as well. Core 0 is left to the camera.";
         s.rowSel = 1;
         render(s, fonts, out, "24-settings");
 
         s = state();
         s.film = portra; s.rollNumber = 5; s.exposed = 0; s.length = 12; s.toast = "Portra 400 loaded";
-        s.nav = Arrays.asList("Shoot", "More");
+        s.gear = true; s.nav = Arrays.asList("Shoot", "Rolls");
         render(s, fonts, out, "2-back-fresh-toast");
 
         s = state();
         s.film = cuban; s.rollNumber = 3; s.exposed = 14; s.length = 24;
-        s.nav = Arrays.asList("Shoot", "Develop", "More");
+        s.gear = true; s.nav = Arrays.asList("Shoot", "Develop", "Rolls");
         render(s, fonts, out, "3-back-midroll");
 
-        s.navMore = true; s.nav = Arrays.asList("Contact sheets", "Lab", "Unload roll", "Settings check", "Speed test", "3 cores"); s.navSel = 0;
-        render(s, fonts, out, "4-back-more");
-        s.navSel = 5;
-        render(s, fonts, out, "4b-back-more-end");
 
         s = state();
         s.film = portra; s.rollNumber = 4; s.exposed = 36; s.length = 36; s.battery = 17;
-        s.nav = Arrays.asList("Develop", "More");
+        s.gear = true; s.nav = Arrays.asList("Develop", "Rolls");
         render(s, fonts, out, "5-back-full-lowbattery");
 
         s = state();
