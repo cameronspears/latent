@@ -7,9 +7,9 @@ An in-camera app that develops your photos like a roll of film. On film, a photo
 then develop it. Each frame gets a **3D LUT** (the colour look), a **highlight / shadow tone curve**,
 and **film grain**, and lands in the camera's own playback.
 
-Status: **v0.12.0.** Rolls, the darkroom, contact sheets and the viewer have run on the A5100. The
-hardware develop into the camera roll has passed the one-photo Hardware test (v0.10 and v0.11).
-v0.12 is the first version that uses it for whole rolls and files the originals as negatives.
+Status: **v0.26.5**, running on the A5100. Rolls (12, 24, 36 or ∞), the darkroom into the camera
+roll on three cores, negatives, contact sheets and the six looks all work on the camera. Next up is
+Latent's own viewfinder; see `docs/HANDOVER.md` for where things stand.
 
 ## Install (about 2 minutes)
 
@@ -105,7 +105,8 @@ Any `.cube` 3D LUT works (sizes 2–65). Rename it to 8 characters or fewer with
 for example `KODAK.CUB`, because the camera's card system only accepts short names. Then copy it
 into `LATENT/LUTS/` on the card.
 
-The two bundled looks come from `tools/make_luts.py`, a small film model with white balance,
+The six bundled looks (Natural, Portra, Classic Neg, Cuban Neg, Tri-X, Afterparty) come from
+`tools/make_luts.py`, a small film model with white balance,
 curve, per-hue shifts and split toning. Change the numbers there and rebuild:
 
 ```bash
@@ -205,8 +206,9 @@ as it can:
 
 Every developed frame appends a line to **`LATENT/TIMING.TXT`**. A camera-roll develop records
 decode, output image, develop, save, find, orientation and negative copy times. A software develop
-records read, look and write times plus CPU details. The A5100 lets apps use only one of its four
-cores and has no NEON, so speed comes from doing less per pixel.
+records read, look and write times plus CPU details. The A5100 has no NEON. Latent's own thread runs
+on one core, and once the Speed test has checked them, two helper threads run the look on cores 1
+and 2 at lower priority (MENU → Developing → Use three cores).
 
 **`LATENT/DEVELOP.TXT`** records the darkroom's decisions: when it fell back to software, and why
 an original stayed in the camera roll. **`LATENT/HWTEST.TXT`** is the log of the last Hardware
@@ -214,10 +216,9 @@ test.
 
 ## Known limits / not yet verified on the camera
 
-- **Speed:** v0.11 developed a frame into the camera roll in about 19 s (17 s develop, 1.5 s save).
-  v0.12's YCbCr look is about 40% faster on a Mac, and the camera numbers are still to come.
-- **Portrait photos:** the orientation fix follows Grain Lab's method, which is confirmed on the
-  A5000. It hasn't yet been seen on the A5100.
+- **Speed:** a frame develops into the camera roll in about 7–8 s (v0.14.1 on), down from about 19 s
+  in v0.11.
+- **Portrait photos:** the orientation fix is confirmed on the A5100 (v0.12).
 - **Power cut during a save:** if the battery dies in the second between Sony's save and Latent
   recording it, that frame may develop again next time, leaving one extra photo in the camera roll.
   The original is safe either way.
