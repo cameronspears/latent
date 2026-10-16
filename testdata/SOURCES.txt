@@ -1,0 +1,5 @@
+Test photos from Wikimedia Commons, used only for local testing:
+STREET.JPG  "Wolfe City October 2015 05 (Main Street)" - Michael Barera, CC BY-SA 4.0 (Sony ILCE-5100)
+HOUSE.JPG   "Plano October 2015 26 (Magnolia House)" - Michael Barera, CC BY-SA 4.0 (Sony ILCE-5100)
+LAKE.JPG    "Lake Tawakoni September 2015 1" - Michael Barera, CC BY-SA 4.0 (re-saved progressive: rejection test)
+PEOPLE.JPG  "2017.05.20 Capital TransPride Washington, DC USA 5100" - Ted Eytan, CC BY-SA 2.0 (ILCE-6300, edited)

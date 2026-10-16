@@ -1,0 +1,7 @@
+# build output
+out/
+FilmLab.apk
+FilmLab.apk.sha256
+# the signing key: keep it (and back it up), but never in the repository
+*.keystore
+.DS_Store

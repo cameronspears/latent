@@ -1,0 +1,88 @@
+/*
+ * Film Lab image core: tone curve + 3D LUT + film grain, streamed through libjpeg one strip at a
+ * time so a 24 MP frame never has to fit in memory. Plain C89-ish, integer maths in the hot loop
+ * (the camera's armeabi build has no hardware float ABI). Shared by the camera (via jni_bridge.c)
+ * and the desktop test tool (tools/fltool.c).
+ */
+#ifndef FILMCORE_H
+#define FILMCORE_H
+
+#define FL_PARAM_HIGHLIGHT 0   /* -4 .. +4, Fuji-style: + brighter highlights        */
+#define FL_PARAM_SHADOW    1   /* -4 .. +4, Fuji-style: + deeper shadows             */
+#define FL_PARAM_GRAIN     2   /*  0 .. 10, strength                                 */
+#define FL_PARAM_GRAINSIZE 3   /*  1 .. 3                                            */
+#define FL_PARAM_QUALITY   4   /* 50 .. 100, output JPEG quality                     */
+#define FL_PARAM_SEED      5   /* any int: varies the grain pattern between frames   */
+#define FL_PARAM_THREADS   6   /* 1 = single-threaded; 2+ = decode/look/encode pipeline */
+#define FL_PARAM_COUNT     7
+
+#define FL_TIME_READ   0   /* ms decoding                                   */
+#define FL_TIME_LOOK   1   /* ms applying tone + LUT + grain + thumbnail    */
+#define FL_TIME_WRITE  2   /* ms encoding and writing                       */
+#define FL_TIME_FINISH 3   /* ms thumbnail patch, flush, close, rename      */
+#define FL_TIME_TOTAL  4   /* wall time                                     */
+#define FL_TIME_CPU    5   /* CPU time summed over every thread             */
+#define FL_TIME_THREADS 6  /* threads the look ran on (block develop)       */
+#define FL_TIME_COUNT  7
+
+typedef void (*fl_progress_fn)(void *ctx, int percent);
+
+/* Process a baseline JPEG file into a new JPEG file. lut_path may be NULL or "" for no LUT;
+ * preview_path, if given, also gets a screen-size JPEG of the result.
+ * Writes out_path + ".TMP" first, then renames, so a crash never leaves a half file under the
+ * real name. Returns 0 on success; on failure fills err. */
+int fl_process_file(const char *in_path, const char *out_path, const char *lut_path,
+                    const char *preview_path, const int *params, fl_progress_fn progress, void *ctx,
+                    char *err, int errlen);
+
+/* A screen-size (fits 640x480) JPEG preview of an existing JPEG. preview_path in fl_process_file
+ * makes the same thing for free during developing. 0 on success. */
+int fl_make_preview(const char *in_path, const char *out_path, char *err, int errlen);
+
+/* Phase timings (FL_TIME_*) of the last successful fl_process_file call, in milliseconds. */
+void fl_last_timing(int *out);
+
+/* Preview into 0xAARRGGBB pixels (Android ARGB_8888 order).
+ * mode 0: whole frame (from the embedded preview when the file has one), no grain, fitted
+ *         inside max_w x max_h.
+ * mode 1: 100% crop of max_w x max_h around the frame centre, with grain.
+ * On success writes the produced size to out_wh[0], out_wh[1] and returns 0. */
+int fl_preview(const char *in_path, const char *lut_path, const int *params, int mode,
+               unsigned int *argb, int max_w, int max_h, int *out_wh, char *err, int errlen);
+
+/* Row access for fl_develop_uyvy: fill (write == 0) or store (write == 1) row y as packed UYVY,
+ * w * 2 bytes. Returns 0 on success. */
+typedef int (*fl_row_io)(void *ctx, int y, unsigned char *uyvy, int write);
+
+/* Applies the same look and grain as fl_process_file to an image held as UYVY rows (the camera
+ * hardware's format), read and written through io. Timings as for fl_process_file. 0 on success. */
+int fl_develop_uyvy(const char *lut_path, const int *params, int w, int h, fl_row_io io, void *ctx,
+                    fl_progress_fn progress, void *pctx, char *err, int errlen);
+
+/* UYVY (Cb Y0 Cr Y1, full-range BT.601) <-> RGB for one row of w pixels (w even). */
+/* Speed test: the look's interchangeable inner loops, timed on in_path decoded at 1/scale; one line each. */
+int fl_bench(const char *in_path, const char *lut_path, const int *params, int scale, char *report, int len);
+/* Read only: the cores present / online, those Latent may use, its CPU group, and each core's load
+ * over one second. One "key: value" line each. */
+int fl_cores(char *report, int len);
+/* The look on in_path (at 1/scale) on one core, then on two threads with the helper allowed onto every
+ * core; reports what that request did, where each ran, both times, and that the pictures match. */
+int fl_bench_cores(const char *in_path, const char *lut_path, const int *params, int scale, char *report, int len);
+/* Which inner loop fl_develop_uyvy uses (0 = per pair, the default). */
+void fl_set_variant(int v);
+
+/* Block access with two buffers (buf 0 or 1): get reads rows y .. y + *n - 1 (packed UYVY, *stride bytes
+ * apart) into that buffer to change in place, NULL on failure; put sends those rows on from it (0 = ok).
+ * Blocks are read and sent in order, top to bottom; a buffer is only read into after its block was sent. */
+typedef unsigned char *(*fl_block_get)(void *ctx, int y, int buf, int *n, int *stride);
+typedef int (*fl_block_put)(void *ctx, int y, int n, int buf);
+/* The look a block at a time; params[FL_PARAM_THREADS] 1..3 = this core plus helpers on cores 1 and 2. */
+int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_block_get get, fl_block_put put, void *ctx,
+                      fl_progress_fn progress, void *pctx, char *err, int errlen);
+/* Threads the last fl_develop_blocks used; note gets why a helper didn't join, if one didn't. */
+int fl_last_threads(char *note, int len);
+
+void fl_uyvy_to_rgb(const unsigned char *uyvy, unsigned char *rgb, int w);
+void fl_rgb_to_uyvy(const unsigned char *rgb, unsigned char *uyvy, int w);
+
+#endif
