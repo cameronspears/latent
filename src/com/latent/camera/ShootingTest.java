@@ -108,25 +108,29 @@ final class ShootingTest implements SurfaceHolder.Callback {
      * computer. Skips files already copied (same size). Background thread.
      */
     private void copyFirmware() {
+        // the camera mounts the card with 8.3 names only: each file goes in as FW/F0001.BIN, with FW/INDEX.TXT naming it
         File to = new File(Library.home(card), "FW");
-        int files = 0;
+        to.mkdirs();
+        StringBuilder index = new StringBuilder();
+        int files = 0, n = 0;
         long bytes = 0;
         String[][] what = { { "/system/framework", "" }, { "/system/lib", "camera|scalar|sony|seq|dsp|still|avindex|osal|diadem|jpeg|imag" },
-                { "/system/etc/permissions", "" }, { "/system", "build.prop" } };
+                { "/system/etc/permissions", "" }, { "/system", "build\\.prop" } };
         for (String[] w : what) {
             File[] list = new File(w[0]).listFiles();
             if (list == null) { note("firmware: " + w[0] + " not readable"); continue; }
+            java.util.Arrays.sort(list);
             for (File f : list) {
                 if (!f.isFile() || (w[1].length() > 0 && !f.getName().toLowerCase(java.util.Locale.US).matches(".*(" + w[1] + ").*"))) continue;
-                File dst = new File(new File(to, w[0].substring(1).replace('/', '_')), f.getName());
+                File dst = new File(to, String.format(java.util.Locale.US, "F%04d.BIN", ++n));
+                index.append(dst.getName()).append('\t').append(f.getPath()).append('\t').append(f.length()).append("\r\n");
                 if (dst.exists() && dst.length() == f.length()) continue;
                 try {
-                    dst.getParentFile().mkdirs();
                     java.io.InputStream in = new java.io.FileInputStream(f);
                     FileOutputStream o = new FileOutputStream(dst);
                     try {
                         byte[] b = new byte[65536];
-                        for (int n; (n = in.read(b)) > 0; ) o.write(b, 0, n);
+                        for (int k; (k = in.read(b)) > 0; ) o.write(b, 0, k);
                     } finally { in.close(); o.close(); }
                     files++;
                     bytes += f.length();
@@ -135,7 +139,13 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 }
             }
         }
-        note("firmware: " + files + " files copied (" + bytes / 1024 + " KB) to LATENT/FW");
+        try {
+            FileOutputStream o = new FileOutputStream(new File(to, "INDEX.TXT"));
+            try { o.write(index.toString().getBytes("UTF-8")); } finally { o.close(); }
+        } catch (Exception e) {
+            note("firmware index: " + Probe.why(e));
+        }
+        note("firmware: " + files + " files copied (" + bytes / 1024 + " KB) to LATENT/FW, " + n + " listed in INDEX.TXT");
     }
 
     private void startCamera() {
