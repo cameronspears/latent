@@ -52,6 +52,8 @@ final class ShootingTest implements SurfaceHolder.Callback {
     private Object sequence;
     private boolean previewing, closed, focusing, shooting;
     private Thread.UncaughtExceptionHandler previousHandler;
+    private String mediaId;
+    private long catalogueSeen = -1, pathSeen = -1;
 
     // focus
     private int tries;
@@ -107,6 +109,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 String[] ids = (String[]) Class.forName("com.sony.scalar.provider.AvindexStore").getMethod("getExternalMediaIds").invoke(null);
                 if (ids != null && ids.length > 0) {
                     media = ids[0];
+                    mediaId = media;
                     options = oc.newInstance();
                     oc.getMethod("setTargetMedia", String.class).invoke(options, media);
                 }
@@ -264,12 +267,31 @@ final class ShootingTest implements SurfaceHolder.Callback {
         } catch (Throwable e) {
             note("sensors: " + Probe.why(e));
         }
+        try {
+            Class<?> dm = Class.forName("com.sony.scalar.hardware.avio.DisplayManager");
+            displayManager = dm.newInstance();
+            Class<?> li = Class.forName("com.sony.scalar.hardware.avio.DisplayManager$OrientationRollListener");
+            Object l = Proxy.newProxyInstance(li.getClassLoader(), new Class<?>[] { li }, new InvocationHandler() {
+                public Object invoke(Object p, Method m, Object[] a) {
+                    if (m.getName().equals("onChanged") && a != null && a.length > 0) { rollValue = String.valueOf(a[0]); note("display roll: " + a[0]); }
+                    return objectMethod(p, m, a);
+                }
+            });
+            dm.getMethod("setOrientationRollListener", li).invoke(displayManager, l);
+            note("display roll listener set");
+        } catch (Throwable e) {
+            note("display roll: " + Probe.why(e));
+            displayManager = null;
+        }
         ui.postDelayed(new Runnable() { public void run() { levelDone(); } }, 2000);
     }
 
+    private Object displayManager;
+    private String rollValue;
+
     private void levelDone() {
         stopSensors();
-        if (readings == 0) { report(S_LEVEL, FAIL, "no readings (sensors: " + sensorNames + ")"); return; }
+        if (readings == 0) { report(S_LEVEL, rollValue != null ? INFO : FAIL, "no sensor readings" + (rollValue != null ? "; display roll " + rollValue : "; no display roll either")); return; }
         // held level, the camera's up axis reads +9.8; roll is the turn about the lens, pitch the tilt up or down
         double roll = Math.toDegrees(Math.atan2(gx, gy)), pitch = Math.toDegrees(Math.atan2(gz, Math.sqrt(gx * gx + gy * gy)));
         report(S_LEVEL, OK, readings + " readings in 2 s: roll " + String.format(java.util.Locale.US, "%.1f", roll) + "\u00b0, pitch "
@@ -277,6 +299,11 @@ final class ShootingTest implements SurfaceHolder.Callback {
     }
 
     private void stopSensors() {
+        if (displayManager != null) {
+            try { displayManager.getClass().getMethod("releaseOrientationRollListener").invoke(displayManager); } catch (Throwable ignored) { }
+            try { displayManager.getClass().getMethod("finish").invoke(displayManager); } catch (Throwable ignored) { }
+            displayManager = null;
+        }
         if (sensors == null) return;
         try { sensors.unregisterListener(gravity); sensors.unregisterListener(idle); } catch (Throwable ignored) { }
         sensors = null;
@@ -391,11 +418,22 @@ final class ShootingTest implements SurfaceHolder.Callback {
         waitForFile(ms, SystemClock.uptimeMillis());
     }
 
-    /** The camera writes the photo itself: watch the card for a new photo number. */
+    /**
+     * The camera writes the photo itself. Watch three ways: the folder listing (what Latent uses), the
+     * photo's own path (from the catalogue), and Sony's catalogue, which the camera updates when it stores.
+     */
     private void waitForFile(final long shutterMs, final long since) {
         if (closed) return;
         int now = Roll.highest(Library.photos(card));
         long waited = SystemClock.uptimeMillis() - since;
+        if (catalogueSeen < 0 || pathSeen < 0) {
+            Probe.Row row = newestCatalogued();
+            if (row != null) {
+                if (catalogueSeen < 0) { catalogueSeen = waited; note("in the catalogue " + waited + " ms after the shutter: " + row.data + " (" + row.folder + "/" + row.number + ")"); }
+                File f = row.data == null ? null : new File(row.data);
+                if (pathSeen < 0 && f != null && f.exists() && f.length() > 0) { pathSeen = waited; note("its path answers " + waited + " ms after the shutter, " + f.length() + " bytes"); }
+            }
+        }
         if (now > highestBefore) {
             note("new photo on the card " + waited + " ms after the shutter");
             photoSeen = true;
@@ -404,12 +442,35 @@ final class ShootingTest implements SurfaceHolder.Callback {
             ui.postDelayed(new Runnable() { public void run() { afterPicture(); } }, 1500);   // Auto Review, if on, has its moment
             return;
         }
-        if (waited > SAVE_TIMEOUT_MS) { report(S_SHOT, FAIL, "shutter fired (" + shutterMs + " ms) but no new photo in " + SAVE_TIMEOUT_MS / 1000 + " s"); afterPicture(); return; }
+        if (waited > SAVE_TIMEOUT_MS) {
+            String how = catalogueSeen >= 0 ? "; catalogued after " + catalogueSeen + " ms" + (pathSeen >= 0 ? ", path readable after " + pathSeen + " ms" : ", path not readable") : "; not in the catalogue either";
+            report(S_SHOT, FAIL, "not in the folder in " + SAVE_TIMEOUT_MS / 1000 + " s" + how);
+            afterPicture();
+            return;
+        }
         if (waited > 0 && waited % 3000 < 300) out.step(S_SHOT, RUN, "saving… " + waited / 1000 + " s");
         ui.postDelayed(new Runnable() { public void run() { waitForFile(shutterMs, since); } }, 300);
     }
 
     private boolean photoSeen;
+
+    /** The catalogue's newest photo numbered above the card's highest before the shot, or null. */
+    private Probe.Row newestCatalogued() {
+        if (mediaId == null) return null;
+        try {
+            Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
+            android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
+            Probe.Row best = null;
+            for (Probe.Row r : Probe.query(context.getContentResolver(), uri)) {
+                int n = r.folder * 10000 + r.number;
+                if (n > highestBefore && (best == null || n > best.folder * 10000 + best.number)) best = r;
+            }
+            return best;
+        } catch (Throwable e) {
+            if (catalogueSeen == -1) { note("catalogue: " + Probe.why(e)); catalogueSeen = -2; }
+            return null;
+        }
+    }
 
     private void afterPicture() {
         if (closed) return;
