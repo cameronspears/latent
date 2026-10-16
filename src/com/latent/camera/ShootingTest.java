@@ -110,6 +110,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
     private void copyFirmware() {
         // the camera mounts the card with 8.3 names only: each file goes in as FW/F0001.BIN, with FW/INDEX.TXT naming it
         File to = new File(Library.home(card), "FW");
+        if (new File(to, "INDEX.TXT").exists()) { note("firmware: copied before (LATENT/FW)"); return; }
         to.mkdirs();
         StringBuilder index = new StringBuilder();
         int files = 0, n = 0;
@@ -619,6 +620,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             return true;
         } catch (Throwable e) {
             note("capture hook: " + Probe.why(e) + "; the camera stores as usual");
+            saveSystemLog();   // the camera service's own words about the refusal, if it gives any
             releaseSequence();
             return false;
         }
@@ -800,6 +802,35 @@ final class ShootingTest implements SurfaceHolder.Callback {
         } catch (Throwable e) {
             return "?";
         }
+    }
+
+    /**
+     * The system log (logcat) to LATENT/LOGCAT.TXT: Android 2.3 lets an app with READ_LOGS read it, and
+     * the camera service may say there why the capture hook was refused. Waits at most 5 s.
+     */
+    private void saveSystemLog() {
+        final File out = new File(Library.home(card), "LOGCAT.TXT");
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                Process p = null;
+                try {
+                    p = Runtime.getRuntime().exec(new String[] { "logcat", "-d", "-v", "time" });
+                    java.io.InputStream in = p.getInputStream();
+                    FileOutputStream o = new FileOutputStream(out);
+                    try {
+                        byte[] b = new byte[16384];
+                        for (int n; (n = in.read(b)) > 0; ) o.write(b, 0, n);
+                    } finally { o.close(); in.close(); }
+                } catch (Throwable e) {
+                    note("system log: " + Probe.why(e));
+                } finally {
+                    if (p != null) p.destroy();
+                }
+            }
+        }, "logcat");
+        t.start();
+        try { t.join(5000); } catch (InterruptedException ignored) { }
+        note("system log: " + (out.exists() ? out.length() / 1024 + " KB in LATENT/LOGCAT.TXT" : "none") + (t.isAlive() ? " (still reading after 5 s)" : ""));
     }
 
     /** The log so far onto the card, before a step that could hang the camera. */
