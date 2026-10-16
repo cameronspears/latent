@@ -137,6 +137,55 @@ static short *resample_lut(const short *src, int n, int m) {
     return dst;
 }
 
+/*
+ * Reading a .cube's 36,000 rows with sscanf took most of a second on the camera, once for every frame
+ * whose film differs from the last one's. fast_triple reads a row of three plain decimals itself, and
+ * gives exactly the floats sscanf does: each number becomes the correctly rounded double (digits / 10^k,
+ * both exact, one division), then a float; the only case where a float could come out differently (the
+ * double landing exactly halfway between two floats) and anything that isn't a plain decimal go to
+ * sscanf. 0 = sscanf for every row (v0.38.1 and before); the Develop test turns it on (FilmCore.setFastCube).
+ */
+static int g_fast_cube;
+
+static const double POW10[] = { 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+                                1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22 };
+
+/* [+-]digits[.digits], at most 15 significant digits and 22 decimals, no exponent: its value, or NULL. */
+static const char *fast_num(const char *p, float *out) {
+    unsigned long long m = 0;
+    int sig = 0, frac = 0, any = 0, neg = 0;
+    double q, d;
+    float f, other;
+    if (*p == '-') { neg = 1; p++; } else if (*p == '+') p++;
+    for (; *p >= '0' && *p <= '9'; p++, any = 1) { if (sig || *p != '0') sig++; m = m * 10 + (unsigned)(*p - '0'); }
+    if (*p == '.') for (p++; *p >= '0' && *p <= '9'; p++, any = 1) { if (sig || *p != '0') sig++; m = m * 10 + (unsigned)(*p - '0'); frac++; }
+    if (!any || sig > 15 || frac > 22 || *p == 'e' || *p == 'E') return NULL;
+    q = (double)m / POW10[frac];       /* both exact: the division rounds once, correctly */
+    if (neg) q = -q;
+    f = (float)q;
+    d = f;
+    if (d != q) {                      /* exactly halfway between two floats: leave it to sscanf */
+        other = nextafterf(f, d < q ? HUGE_VALF : -HUGE_VALF);
+        if (q - d == (double)other - q || d - q == q - (double)other) return NULL;
+    }
+    *out = f;
+    return p;
+}
+
+/* A data row: three plain decimals separated by spaces or tabs, nothing after but white space. 0 = read. */
+static int fast_triple(const char *p, float *r, float *g, float *b) {
+    float *v[3];
+    int i;
+    v[0] = r; v[1] = g; v[2] = b;
+    for (i = 0; i < 3; i++) {
+        if (i > 0 && *p != ' ' && *p != '\t') return -1;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!(p = fast_num(p, v[i]))) return -1;
+    }
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    return *p ? -1 : 0;
+}
+
 static int load_cube(fl_look *L, const char *path, char *err, int errlen) {
     FILE *f;
     char line[256];
@@ -146,6 +195,7 @@ static int load_cube(fl_look *L, const char *path, char *err, int errlen) {
     if (!path || !path[0]) return 0;
     f = fopen(path, "r");
     if (!f) { set_err(err, errlen, "cannot open look %s", path); return -1; }
+    if (g_fast_cube) setvbuf(f, NULL, _IOFBF, 64 * 1024);   /* the card read in 64 KB pieces, not 1 KB */
     while (fgets(line, sizeof line, f)) {
         char *p = line;
         float r, g, b;
@@ -161,7 +211,7 @@ static int load_cube(fl_look *L, const char *path, char *err, int errlen) {
         }
         if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) continue;   /* TITLE, DOMAIN_MIN ... */
         if (!L->data) continue;
-        if (sscanf(p, "%f %f %f", &r, &g, &b) == 3 && count < total) {
+        if (((g_fast_cube && fast_triple(p, &r, &g, &b) == 0) || sscanf(p, "%f %f %f", &r, &g, &b) == 3) && count < total) {
             L->data[count * 3 + 0] = (short)(clamp01(r) * 4080.0 + 0.5);
             L->data[count * 3 + 1] = (short)(clamp01(g) * 4080.0 + 0.5);
             L->data[count * 3 + 2] = (short)(clamp01(b) * 4080.0 + 0.5);
@@ -217,6 +267,55 @@ static int look_init(fl_look *L, const char *lut_path, const int *params, char *
 }
 
 static void look_free(fl_look *L) { if (!L->shared) free(L->data); L->data = NULL; }
+
+static long now_ms(void);
+
+void fl_set_fast_cube(int on) { g_fast_cube = on ? 1 : 0; }
+
+/* The last LUT read is forgotten: the next develop reads its look from the card again (the Develop test). */
+void fl_forget_lut(void) {
+    free(g_lut.data);
+    memset(&g_lut, 0, sizeof g_lut);
+}
+
+int fl_cube_check(const char *path, int *ms, char *err, int errlen) {
+    fl_look a, b;
+    int keep = g_fast_cube, same;
+    long t;
+    FILE *f;
+    char line[256];
+    memset(&a, 0, sizeof a);
+    memset(&b, 0, sizeof b);
+    ms[0] = ms[1] = ms[2] = ms[3] = 0;
+    g_fast_cube = 0;
+    t = now_ms();
+    if (load_cube(&a, path, err, errlen) != 0) { g_fast_cube = keep; return -1; }
+    ms[0] = (int)(now_ms() - t);
+    g_fast_cube = 1;
+    t = now_ms();
+    if (load_cube(&b, path, err, errlen) != 0) { g_fast_cube = keep; free(a.data); return -1; }
+    ms[1] = (int)(now_ms() - t);
+    g_fast_cube = keep;
+    same = a.n == b.n && (a.n == 0 || memcmp(a.data, b.data, sizeof(short) * 3 * a.n * a.n * a.n) == 0);
+    free(a.data);
+    free(b.data);
+    /* and every row's three floats, bit for bit, before any resampling could hide a difference */
+    f = fopen(path, "r");
+    if (!f) { set_err(err, errlen, "cannot open look %s", path); return -1; }
+    while (fgets(line, sizeof line, f)) {
+        float r, g, bl, r2, g2, b2;
+        int slow = sscanf(line, "%f %f %f", &r, &g, &bl) == 3;
+        if (fast_triple(line, &r2, &g2, &b2) == 0) {
+            ms[2]++;
+            if (!slow || memcmp(&r, &r2, sizeof r) || memcmp(&g, &g2, sizeof g) || memcmp(&bl, &b2, sizeof bl)) {
+                if (same) set_err(err, errlen, "row differs: %s", line);
+                same = 0;
+            }
+        } else if (slow) ms[3]++;
+    }
+    fclose(f);
+    return same ? 0 : 1;
+}
 
 /* Tetrahedral interpolation, one pixel. */
 static void look_apply(const fl_look *L, unsigned char *px) {
@@ -2684,7 +2783,7 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
     fl_grain G;
     look_pool P;
     look_helper helpers[MAX_HELPERS];
-    long t0 = now_ms(), cpu0 = cpu_ms(), t, t_read = 0, t_look = 0, t_write = 0, t_wait = 0, hcpu = 0;
+    long t0 = now_ms(), cpu0 = cpu_ms(), t, t_read = 0, t_look = 0, t_write = 0, t_wait = 0, hcpu = 0, t_setup = 0;
     int y = 0, last = -1, rc = 0, i, nh = 0, want, v = g_variant, own_rows = 0;
 
     memset(g_timing, 0, sizeof g_timing);
@@ -2730,6 +2829,7 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
         int cur = 0, n = 0, stride = 0, prev_y = -1, prev_n = 0;
         unsigned char *rows;
         t = now_ms();
+        t_setup = t - t0;
         rows = get(ctx, 0, cur, &n, &stride);
         t_read += now_ms() - t;
         if (!rows || n < 1 || n > h) { set_err(err, errlen, "reading rows from 0 failed"); rc = -1; }
@@ -2811,6 +2911,7 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
         g_timing[FL_TIME_WAIT] = (int)t_wait;
         g_timing[FL_TIME_ROWS] = own_rows;
         g_timing[FL_TIME_HCPU] = (int)hcpu;
+        g_timing[FL_TIME_SETUP] = (int)t_setup;
     }
     ycc_free(&Y);
     look_free(&L); grain_free(&G);

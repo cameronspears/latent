@@ -7,7 +7,7 @@ final class FilmCore {
     /** indexes into timing(): milliseconds spent decoding, applying the look, encoding, finishing, in total */
     static final int T_READ = 0, T_LOOK = 1, T_WRITE = 2, T_FINISH = 3, T_TOTAL = 4, T_CPU = 5, T_THREADS = 6;
     /** block develops only: ms Latent's thread waited for the helpers, rows it looked itself, the helpers' CPU ms */
-    static final int T_WAIT = 7, T_ROWS = 8, T_HCPU = 9, T_COUNT = 10;
+    static final int T_WAIT = 7, T_ROWS = 8, T_HCPU = 9, T_SETUP = 10, T_COUNT = 11;   /* T_SETUP: ms before the first block */
 
     interface Progress { void onProgress(int percent); }
 
@@ -63,6 +63,21 @@ final class FilmCore {
 
     /** Why a helper core didn't join the last develop ("" when all did). */
     static native String helperNote();
+
+    /**
+     * Film files (.cube) read with Latent's own exact decimal reader (true) or sscanf (false, the default
+     * until the Develop test has shown both give the same table on this camera).
+     */
+    static native void setFastCube(boolean on);
+
+    /** The cached film forgotten: the next develop reads its file from the card again. */
+    static native void forgetLut();
+
+    /**
+     * A film file read both ways: ms[0] ms with sscanf, ms[1] with the fast reader, ms[2] rows the fast
+     * reader took, ms[3] rows it left to sscanf. 0 identical, 1 different (lastError says where), -1 error.
+     */
+    static native int cubeCheck(String path, int[] ms);
 
     /** Which inner loop developing uses (index into VARIANTS). */
     static native void setVariant(int v);

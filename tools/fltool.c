@@ -5,6 +5,7 @@
  *   fltool preview IN.JPG OUT.ppm [--crop] [... same options]
  *   fltool live IN.JPG OUT.ppm [--lut F.cub]       the viewfinder's frame path (from memory, 320x240)
  *   fltool level IN.JPG DEGREES [WIDTH]            the level on IN turned DEGREES anticlockwise, at WIDTH (320)
+ *   fltool cubecheck F.cub...                      the fast .cube reader against sscanf, row by row
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,6 +97,16 @@ int main(int argc, char **argv) {
     int crop = 0, i;
     char err[256] = "";
     double t0;
+    if (argc >= 3 && !strcmp(argv[1], "cubecheck")) {   /* fltool cubecheck F.cub...: the fast .cube reader against sscanf */
+        int k, bad = 0;
+        for (k = 2; k < argc; k++) {
+            int ms[4], rc = fl_cube_check(argv[k], ms, err, sizeof err);
+            printf("  %s  %s: sscanf %d ms, fast %d ms, %d rows fast, %d left to sscanf%s%s\n", rc == 0 ? "pass" : "FAIL", argv[k],
+                   ms[0], ms[1], ms[2], ms[3], rc ? " - " : "", rc ? err : "");
+            if (rc) bad = 1;
+        }
+        return bad;
+    }
     if (argc >= 2 && !strcmp(argv[1], "cores")) {   /* fltool cores */
         static char report[1024];
         fl_cores(report, sizeof report);
