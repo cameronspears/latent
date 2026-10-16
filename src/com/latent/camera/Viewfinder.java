@@ -1098,7 +1098,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private final Runnable closeStep = new Runnable() {
         public void run() {
             if (closed) return;
-            if (storing() && SystemClock.uptimeMillis() - closingAt < 10000 && cameraEx != null) { ui.postDelayed(this, 200); return; }
+            // with the frames running, longer: v0.31 froze the camera releasing it with pictures in doubt
+            if (storing() && SystemClock.uptimeMillis() - closingAt < (liveLook ? 20000 : 10000) && cameraEx != null) { ui.postDelayed(this, 200); return; }
             ui.removeCallbacks(poll);
             stopSequence();
             if (cameraEx != null && direct) {
