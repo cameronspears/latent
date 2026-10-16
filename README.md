@@ -7,7 +7,7 @@ An in-camera app that develops your photos like a roll of film. On film, a photo
 then develop it. Each frame gets a **3D LUT** (the colour look), a **highlight / shadow tone curve**,
 and **film grain**, and lands in the camera's own playback.
 
-Status: **v0.26.5**, running on the A5100. Rolls (12, 24, 36 or ∞), the darkroom into the camera
+Status: **v0.30.1**, running on the A5100. Rolls (12, 24, 36 or ∞), the darkroom into the camera
 roll on three cores, negatives, contact sheets and the six looks all work on the camera. Next up is
 Latent's own viewfinder; see `docs/HANDOVER.md` for where things stand.
 

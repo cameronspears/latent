@@ -1,7 +1,7 @@
 # Latent: notes for the next session
 
-Written 2026-10-16 at **v0.30.1**. The camera has **v0.30.0** installed: its Shooting test loads a
-memory map and then can't open the camera, so install v0.30.1 next (it switches that off).
+Written 2026-10-16 at **v0.30.1**, the version installed on the camera (its Shooting test checked
+out: open, live view, focus and one shot, all normal).
 `README.md` is the user guide and explains the develop pipeline. This file is the working context.
 
 ## The project in one paragraph
