@@ -55,6 +55,8 @@ write_fn sb_test_write = f_write;
 int sb_develop(void *src, const int *sg, void *dst, const int *dg, int block, const char *lut, const int *params,
                fl_progress_fn progress, void *pctx);
 const char *sb_last_error(void);
+int sb_develop_inplace(void *img, const int *g, int block, const char *lut, const int *params, fl_progress_fn progress, void *pctx);
+int sb_verify_inplace(void *img, const int *g, int size);
 
 /* the reference: the same picture through the core's copy-in / copy-out path, without the bridge */
 static unsigned char *g_src, *g_ref;
@@ -143,6 +145,37 @@ int main(int argc, char **argv) {
                    calls_read, calls_write, refused, same ? "pixels identical" : "PIXELS DIFFER", padding_ok ? "untouched" : "OVERWRITTEN");
             if (!same || !padding_ok || refused) pass = 0;
             free(pic); free(dst.mem);
+        }
+    }
+    /* in place, as during a capture: a padded image and an unpadded one, every block size */
+    for (i = 0; i < 2; i++) {
+        int *g0 = i == 0 ? sg : fg;
+        fakemem *orig = i == 0 ? &src : &flat;
+        for (b = 0; b < 5; b++) {
+            fakemem img;
+            int ig[8];
+            memcpy(ig, g0, sizeof ig);
+            img.size = orig->size; img.type = 2; img.mem = malloc(img.size);
+            memcpy(img.mem, orig->mem, img.size);
+            if (i == 0) for (y = 0; y < h; y++) memset(img.mem + (size_t)y * sg[2] * 2 + w * 2, 0xA5, (size_t)(sg[2] - w) * 2);   /* padding sentinel */
+            calls_read = calls_write = refused = 0;
+            if (sb_verify_inplace(&img, ig, blocks[b] < 65536 ? 65536 : blocks[b]) != 0) { printf("  FAIL  in place verify %d: %s\n", blocks[b], sb_last_error()); pass = 0; free(img.mem); continue; }
+            if (sb_develop_inplace(&img, ig, blocks[b], argv[2], params, NULL, NULL) != 0) {
+                printf("  FAIL  in place %s block %d: %s\n", i == 0 ? "padded" : "unpadded", blocks[b], sb_last_error());
+                pass = 0; free(img.mem); continue;
+            }
+            unsigned char *pic = malloc((size_t)w * 2 * h);
+            int padding_ok = 1;
+            for (y = 0; y < h; y++) {
+                memcpy(pic + (size_t)y * w * 2, img.mem + (size_t)y * ig[2] * 2, (size_t)w * 2);
+                if (i == 0) for (int k = w * 2; k < ig[2] * 2; k++) if (img.mem[(size_t)y * ig[2] * 2 + k] != 0xA5) padding_ok = 0;
+            }
+            int same = memcmp(pic, reference, (size_t)w * 2 * h) == 0;
+            printf("  %s  in place %-8s block %8d: %5ld reads %5ld writes, refused %ld, %s, padding %s\n",
+                   same && padding_ok && !refused ? "pass" : "FAIL", i == 0 ? "padded" : "unpadded", blocks[b], calls_read, calls_write, refused,
+                   same ? "pixels identical" : "PIXELS DIFFER", padding_ok ? "untouched" : "OVERWRITTEN");
+            if (!same || !padding_ok || refused) pass = 0;
+            free(pic); free(img.mem);
         }
     }
     printf(pass ? "SONY BRIDGE OK\n" : "SONY BRIDGE FAILED\n");

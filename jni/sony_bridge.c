@@ -7,7 +7,12 @@
  * bundled. Every call is checked first: the handle must be a valid image or buffer, its real size
  * (asked from Sony) must match what the public API reported, every transfer must fit inside the
  * allocation and be no larger than a block size first verified on a scratch buffer, and a develop
- * must read and write two separate images.
+ * must read and write two separate images, except the in-place develop below.
+ *
+ * In place (sb_develop_inplace): the look applied to one image, as the camera hands it over during
+ * a capture (Sony's own capture-time apps change the developed image before storing it). Safe
+ * because blocks go strictly forward: each block of rows is read before it is written back, and no
+ * row is read again after it was written (the read-ahead only ever reads rows further on).
  *
  * Each Sony transfer costs ~11 ms however small (it maps shared memory), so a develop moves many
  * rows per call: one call per row took 90 s for a 24 MP frame.
@@ -239,14 +244,57 @@ static void on_progress(void *p, int pct) {
 
 static int s_last_direct;   /* the last develop wrote blocks straight back (1) or gathered rows (0) */
 
+static int develop_any(void *src, const int *sg, void *dst, const int *dg, int block, const char *lut, const int *params,
+                       fl_progress_fn progress, void *pctx);
+
 /* Develops src into dst (two separate Sony images) through blocks of at most 'block' bytes. */
 int sb_develop(void *src, const int *sg, void *dst, const int *dg, int block, const char *lut, const int *params,
                fl_progress_fn progress, void *pctx) {
-    develop_ctx c;
-    int ss, ds, rc;
+    s_err[0] = 0;
+    if (src == dst) { snprintf(s_err, sizeof s_err, "source and output must be separate images"); return -1; }
+    return develop_any(src, sg, dst, dg, block, lut, params, progress, pctx);
+}
+
+/* The look applied to one image in place (see the top of this file). */
+int sb_develop_inplace(void *img, const int *g, int block, const char *lut, const int *params, fl_progress_fn progress, void *pctx) {
+    s_err[0] = 0;
+    return develop_any(img, g, img, g, block, lut, params, progress, pctx);
+}
+
+/*
+ * Before an in-place develop: the first 'size' bytes of the picture are read, written back
+ * unchanged, and read again; they must match. Proves the transfers on this very image (no scratch
+ * buffer can be had while the camera is open). Returns 0 when verified.
+ */
+int sb_verify_inplace(void *img, const int *g, int size) {
+    int total;
+    long long offset;
+    unsigned char *a, *b;
+    int ok;
     s_err[0] = 0;
     if (load() != 0) return -1;
-    if (src == dst) { snprintf(s_err, sizeof s_err, "source and output must be separate images"); return -1; }
+    total = checked_size(img, 1);
+    if (total < 0 || !geometry_ok(g, total)) { snprintf(s_err, sizeof s_err, "not a valid Sony image"); return -1; }
+    offset = row_offset(g, 0);
+    if (size <= 0 || size > MAX_TRANSFER || offset + size > total) { snprintf(s_err, sizeof s_err, "check out of bounds"); return -1; }
+    a = (unsigned char *)malloc((size_t)size);
+    b = (unsigned char *)malloc((size_t)size);
+    if (!a || !b) { free(a); free(b); snprintf(s_err, sizeof s_err, "out of memory"); return -1; }
+    ok = S.read(img, a, (unsigned)size, (unsigned)offset) == size
+            && S.write(img, a, (unsigned)size, (unsigned)offset) == size
+            && S.read(img, b, (unsigned)size, (unsigned)offset) == size
+            && memcmp(a, b, (size_t)size) == 0;
+    if (!ok) snprintf(s_err, sizeof s_err, "read / write back / read did not match at %d bytes", size);
+    free(a);
+    free(b);
+    return ok ? 0 : -1;
+}
+
+static int develop_any(void *src, const int *sg, void *dst, const int *dg, int block, const char *lut, const int *params,
+                       fl_progress_fn progress, void *pctx) {
+    develop_ctx c;
+    int ss, ds, rc;
+    if (load() != 0) return -1;
     memcpy(c.sg, sg, sizeof c.sg);
     memcpy(c.dg, dg, sizeof c.dg);
     c.src = src;
@@ -318,6 +366,41 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_develop(JNIEnv *env, jc
     rc = sb_develop((void *)(intptr_t)src, sg, (void *)(intptr_t)dst, dg, block, lut, params, on_progress, &pc);
     if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
     return rc;
+}
+
+JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_developInPlace(JNIEnv *env, jclass cls, jint img, jintArray jg,
+        jint block, jstring jlut, jintArray jparams, jobject listener) {
+    struct progress_ctx pc;
+    int g[G_COUNT], params[FL_PARAM_COUNT], rc;
+    const char *lut = NULL;
+    (void)cls;
+    s_err[0] = 0;
+    if (!jg || (*env)->GetArrayLength(env, jg) < G_COUNT || !jparams || (*env)->GetArrayLength(env, jparams) < FL_PARAM_COUNT) {
+        snprintf(s_err, sizeof s_err, "bad arguments");
+        return -1;
+    }
+    (*env)->GetIntArrayRegion(env, jg, 0, G_COUNT, (jint *)g);
+    (*env)->GetIntArrayRegion(env, jparams, 0, FL_PARAM_COUNT, (jint *)params);
+    pc.env = env;
+    pc.listener = listener;
+    pc.method = NULL;
+    if (listener) {
+        jclass lc = (*env)->GetObjectClass(env, listener);
+        pc.method = (*env)->GetMethodID(env, lc, "onProgress", "(I)V");
+        (*env)->DeleteLocalRef(env, lc);
+    }
+    if (jlut) lut = (*env)->GetStringUTFChars(env, jlut, NULL);
+    rc = sb_develop_inplace((void *)(intptr_t)img, g, block, lut, params, on_progress, &pc);
+    if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
+    return rc;
+}
+
+JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_verifyInPlace(JNIEnv *env, jclass cls, jint img, jintArray jg, jint size) {
+    int g[G_COUNT];
+    (void)cls;
+    if (!jg || (*env)->GetArrayLength(env, jg) < G_COUNT) { snprintf(s_err, sizeof s_err, "bad arguments"); return -1; }
+    (*env)->GetIntArrayRegion(env, jg, 0, G_COUNT, (jint *)g);
+    return sb_verify_inplace((void *)(intptr_t)img, g, size);
 }
 
 JNIEXPORT jstring JNICALL Java_com_latent_camera_SonyMemory_lastError(JNIEnv *env, jclass cls) {

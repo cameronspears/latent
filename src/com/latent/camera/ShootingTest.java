@@ -12,10 +12,8 @@ import android.os.SystemClock;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 
-import android.content.Intent;
 
 import java.io.File;
-import java.util.concurrent.CountDownLatch;
 import java.io.FileOutputStream;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -35,8 +33,8 @@ import java.lang.reflect.Proxy;
  */
 final class ShootingTest implements SurfaceHolder.Callback {
     static final String[] STEPS = { "Open the camera", "Live view", "Focus options", "Level sensor", "Focus", "Take a picture",
-            "Darkroom while shooting", "Memory after release", "Develop the shot", "Camera closed" };
-    static final int S_OPEN = 0, S_LIVE = 1, S_OPTIONS = 2, S_LEVEL = 3, S_FOCUS = 4, S_SHOT = 5, S_DARK = 6, S_MEMORY = 7, S_DEVELOP = 8,
+            "Developed in the camera", "Look on the capture", "Stored", "Camera closed" };
+    static final int S_OPEN = 0, S_LIVE = 1, S_OPTIONS = 2, S_LEVEL = 3, S_FOCUS = 4, S_SHOT = 5, S_DEVCAM = 6, S_LOOKCAP = 7, S_STORED = 8,
             S_CLOSED = 9;
     /** Live frames and the look on one: known from v0.21-0.23 (up to 19 a second; 143 ms at 320 px), not on screen this run. */
     static final int S_FRAMES = -1, S_LOOK = -1;
@@ -104,7 +102,6 @@ final class ShootingTest implements SurfaceHolder.Callback {
             }
         });
         highestBefore = Roll.highest(Library.photos(card));
-        new File(Library.home(card), "DARKPROC.TXT").delete();   // the darkroom process's answers, this run's only
         step(S_OPEN, RUN, "opening…");
         long t = SystemClock.uptimeMillis();
         try {
@@ -396,7 +393,9 @@ final class ShootingTest implements SurfaceHolder.Callback {
             }
         });
         if (!listening) { report(S_SHOT, FAIL, "no shutter listener on this camera"); afterPicture(); return; }
+        sequenced = hookCapture();
         shutterStart = SystemClock.uptimeMillis();
+        if (sequenced) ui.postDelayed(captureWatchdog, 15000);
         try {
             call("burstableTakePicture");
         } catch (Throwable e) {
@@ -423,7 +422,13 @@ final class ShootingTest implements SurfaceHolder.Callback {
         safely("cancelTakePicture");
         set("setShutterListener", null, null);
         try { camera.cancelAutoFocus(); } catch (Throwable ignored) { }
-        if (status != 0) { report(S_SHOT, FAIL, status == 1 ? "cancelled by the camera" : "the camera reported an error"); afterPicture(); return; }
+        if (status != 0) {
+            report(S_SHOT, FAIL, status == 1 ? "cancelled by the camera" : "the camera reported an error");
+            if (sequenced) unlockShutter("the shutter failed");
+            afterPicture();
+            return;
+        }
+        if (sequenced) { step(S_SHOT, RUN, "exposed; developing…"); return; }   // the capture hook carries on from here
         step(S_SHOT, RUN, "saving…");
         waitForFile(ms, SystemClock.uptimeMillis());
     }
@@ -445,7 +450,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
                     shot = dcfFile(row.folder, row.number);
                     try { Library.ignore(card, shot); note(shot.getName() + " kept off every roll (IGNORE.TXT)"); } catch (Exception e) { note("ignore: " + Probe.why(e)); }
                     // the camera has stored it: that is enough to go on (Linux sees the file only once the card is read afresh)
-                    report(S_SHOT, OK, shot.getName() + " stored: shutter " + shutterMs + " ms, in the catalogue " + waited + " ms later");
+                    report(S_SHOT, OK, shot.getName() + (sequenced ? " in the catalogue" : " stored: shutter " + shutterMs + " ms, in the catalogue " + waited + " ms later"));
                     ui.postDelayed(new Runnable() { public void run() { afterPicture(); } }, 1500);
                     return;
                 }
@@ -500,91 +505,203 @@ final class ShootingTest implements SurfaceHolder.Callback {
         }
     }
 
-    /** Live frames and the look timing are known (v0.21-0.23); this run tries the darkroom in its own process instead. */
+    /** Live frames and the look timing are known (v0.21-0.23): off for this run. */
     static final boolean FRAMES = false;
 
     private void afterPicture() {
         if (closed) return;
         if (FRAMES) { frames(); return; }
-        step(S_DARK, RUN, "asking the darkroom process…");
-        final File answers = new File(Library.home(card), "DARKPROC.TXT");
-        new Thread(new Runnable() {
-            public void run() {
-                // 1. with the camera still open (as while shooting): does a process that never opened it get image memory?
-                final String[] open = ask(answers, new Intent(context, DarkroomService.class).putExtra(DarkroomService.WHAT, "check"), 30000);
-                final CountDownLatch released = new CountDownLatch(1);
-                ui.post(new Runnable() {
-                    public void run() {
-                        report(S_DARK, Integer.parseInt(open[0]), open[1]);
-                        closeCamera();
-                        step(S_MEMORY, RUN, "asking…");
-                        released.countDown();
-                    }
-                });
-                try { released.await(); } catch (InterruptedException e) { return; }
-                // 2. released Sony's way (the Android camera first): does Latent's own process get image memory back now?
-                final String here = memoryHere();
-                ui.post(new Runnable() {
-                    public void run() {
-                        report(S_MEMORY, here.startsWith("a buffer") ? OK : FAIL, here);
-                        step(S_DEVELOP, RUN, "developing in the darkroom process…");
-                    }
-                });
-                // 3. develop the shot in the darkroom process, as Photo mode would between shots
-                final String[] dev = shot == null || stock == null ? new String[] { String.valueOf(INFO), shot == null ? "no shot to develop" : "no film looks" }
-                        : ask(answers, new Intent(context, DarkroomService.class).putExtra(DarkroomService.WHAT, "develop")
-                                .putExtra(DarkroomService.SHOT, shot.getPath()).putExtra(DarkroomService.LUT, stock.lut.getPath())
-                                .putExtra(DarkroomService.PARAMS, lookParams()), 120000);
-                ui.post(new Runnable() { public void run() { report(S_DEVELOP, Integer.parseInt(dev[0]), dev[1]); finish(); } });
-            }
-        }, "darkroom-ask").start();
+        close();
     }
 
-    /** One small buffer from Sony's image processor in this process; what came back. Background thread. */
-    private String memoryHere() {
-        Object proc = null, buf = null;
+    // ------------------------------------------------------------------------------ the look at capture (Sony's own capture-time path)
+
+    private Object sequence2;          // the capture sequence (CameraSequence) holding the shutter callback
+    private boolean sequenced, locked, stored;
+    private volatile boolean lookRunning;
+    private boolean closeAfterLook;
+    private long captureAt;
+
+    /**
+     * Sony's capture-time path, as its Picture Effect app does: a shutter-sequence callback gets each
+     * capture before it is stored. With it installed the camera stores nothing by itself, and locks the
+     * shutter after each capture until we say so. Returns false (and the camera stores as usual) if
+     * this camera won't have it.
+     */
+    private boolean hookCapture() {
+        try {
+            Class<?> cs = Class.forName("com.sony.scalar.hardware.CameraSequence");
+            Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
+            Class<?> oc = Class.forName("com.sony.scalar.hardware.CameraSequence$Options");
+            Class<?> cb = Class.forName("com.sony.scalar.hardware.CameraSequence$ShutterSequenceCallback");
+            sequence2 = cs.getMethod("open", cx).invoke(null, cameraEx);
+            Object o = oc.newInstance();
+            oc.getMethod("setOption", String.class, int.class).invoke(o, oc.getField("EXPOSURE_COUNT").get(null), 1);
+            oc.getMethod("setOption", String.class, int.class).invoke(o, oc.getField("RECORD_COUNT").get(null), 1);
+            oc.getMethod("setOption", String.class, boolean.class).invoke(o, oc.getField("AUTO_RELEASE_LOCK_ENABLED").get(null), true);
+            Object callback = Proxy.newProxyInstance(cb.getClassLoader(), new Class<?>[] { cb }, new InvocationHandler() {
+                public Object invoke(Object p, Method m, Object[] a) {
+                    if (m.getName().equals("onShutterSequence") && a != null && a.length > 0) onCapture(a[0]);
+                    return objectMethod(p, m, a);
+                }
+            });
+            cs.getMethod("setShutterSequenceCallback", cb, oc).invoke(sequence2, callback, o);
+            cs.getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
+            locked = true;   // from the shutter until unlockShutter
+            note("capture hook set");
+            return true;
+        } catch (Throwable e) {
+            note("capture hook: " + Probe.why(e) + "; the camera stores as usual");
+            releaseSequence();
+            return false;
+        }
+    }
+
+    /** Never leave the shutter locked: if the capture never reaches us, unlock and give up. */
+    private final Runnable captureWatchdog = new Runnable() {
+        public void run() {
+            if (captureAt != 0 || closed) return;
+            report(S_DEVCAM, FAIL, "the capture never arrived (15 s)");
+            unlockShutter("watchdog");
+            afterPicture();
+        }
+    };
+
+    /** The capture: developed by the camera into an image we may change, then the look, then stored. UI thread. */
+    private void onCapture(Object raw) {
+        captureAt = SystemClock.uptimeMillis();
+        ui.removeCallbacks(captureWatchdog);
+        note("capture arrived " + (captureAt - shutterStart) + " ms after the shutter");
+        Object img = null;
         long t = SystemClock.uptimeMillis();
         try {
-            Class<?> dsp = Class.forName("com.sony.scalar.hardware.DSP");
-            proc = dsp.getMethod("createProcessor", String.class).invoke(null, "sony-di-dsp");
-            buf = HardwareDevelop.call(proc, "createBuffer", 65536);
-            return (buf != null ? "a buffer" : "none") + " in " + (SystemClock.uptimeMillis() - t) + " ms";
+            Object filter = Class.forName("com.sony.scalar.hardware.CameraSequence$DefaultDevelopFilter").newInstance();
+            Class<?> rd = Class.forName("com.sony.scalar.hardware.CameraSequence$RawData");
+            filter.getClass().getMethod("setSource", rd, boolean.class).invoke(filter, raw, true);   // the filter owns raw now
+            raw = null;
+            HardwareDevelop.call(filter, "execute");
+            img = HardwareDevelop.call(filter, "getOutput");
+            HardwareDevelop.call(filter, "release");
+            if (img == null) throw new IllegalStateException("the develop filter gave no image");
+            int w = (Integer) HardwareDevelop.call(img, "getWidth"), h = (Integer) HardwareDevelop.call(img, "getHeight");
+            report(S_DEVCAM, OK, w + "x" + h + " in " + (SystemClock.uptimeMillis() - t) + " ms");
         } catch (Throwable e) {
-            return Probe.why(e);
+            report(S_DEVCAM, FAIL, Probe.why(e));
+            if (img == null && raw != null) storeRaw(raw);   // the photo, as the camera would have stored it
+            else if (img != null) store(img, false, "stored untouched");
+            else unlockShutter("no image");
+            return;
+        }
+        // the image's layout, as the darkroom reads it (Sony's DSP properties)
+        final int[] g = new int[8];
+        Object proc = null;
+        t = SystemClock.uptimeMillis();
+        try {
+            Class<?> dsp = Class.forName("com.sony.scalar.hardware.DSP");
+            Class<?> memory = Class.forName("com.sony.scalar.hardware.DeviceMemory");
+            proc = dsp.getMethod("createProcessor", String.class).invoke(null, "sony-di-dsp");
+            Method prop = dsp.getMethod("getPropertyAsInt", memory, String.class);
+            for (int i = 0; i < 8; i++) g[i] = (Integer) prop.invoke(proc, img, SonyMemory.KEYS[i]);
+            note("layout " + java.util.Arrays.toString(g) + " (read in " + (SystemClock.uptimeMillis() - t) + " ms)");
+        } catch (Throwable e) {
+            report(S_LOOKCAP, FAIL, "layout unreadable: " + Probe.why(e));
+            store(img, false, "stored untouched");
+            return;
         } finally {
-            try { if (buf != null) HardwareDevelop.call(buf, "release"); } catch (Throwable ignored) { }
             try { if (proc != null) HardwareDevelop.call(proc, "release"); } catch (Throwable ignored) { }
         }
+        // the look, off the UI thread; then stored on it
+        step(S_LOOKCAP, RUN, "the look…");
+        final Object image = img;
+        lookRunning = true;
+        new Thread(new Runnable() {
+            public void run() {
+                String result;
+                boolean changed = false;
+                int status;
+                long t0 = SystemClock.uptimeMillis();
+                try {
+                    if (stock == null) throw new IllegalStateException("no film looks on the card");
+                    int handle = SonyMemory.handle(image);
+                    if (SonyMemory.verifyInPlace(handle, g, 1048576) != 0) throw new IllegalStateException(SonyMemory.lastError());
+                    int[] p = lookParams();
+                    p[FilmCore.THREADS] = 3;
+                    changed = true;   // from here on the image may be partly changed
+                    if (SonyMemory.developInPlace(handle, g, 1048576, stock.lut.getPath(), p, null) != 0) throw new IllegalStateException(SonyMemory.lastError());
+                    int[] tm = new int[FilmCore.T_COUNT];
+                    FilmCore.timing(tm);
+                    result = stock.title + " in " + (SystemClock.uptimeMillis() - t0) + " ms (read " + tm[FilmCore.T_READ] + ", look "
+                            + tm[FilmCore.T_LOOK] + ", write " + tm[FilmCore.T_WRITE] + ", " + tm[FilmCore.T_THREADS] + " threads)";
+                    status = OK;
+                } catch (Throwable e) {
+                    result = Probe.why(e) + (changed ? " (part-way)" : " (image untouched)");
+                    status = FAIL;
+                }
+                final String r = result;
+                final int st = status;
+                ui.post(new Runnable() {
+                    public void run() {
+                        lookRunning = false;
+                        report(S_LOOKCAP, st, r);
+                        store(image, st == OK, st == OK ? "with the look" : "as it is");
+                        if (closeAfterLook) close();
+                    }
+                });
+            }
+        }, "capture-look").start();
     }
 
-    private int asked;
-
-    /** Starts the darkroom process with this request and waits for its answer line. {status, detail}. Background thread. */
-    private String[] ask(File answers, Intent request, long timeoutMs) {
-        String tag = "t" + (++asked) + "-" + SystemClock.uptimeMillis();
-        long t0 = SystemClock.uptimeMillis();
+    /** sequence.storeImage(img, true): the camera encodes, names, catalogues and frees it. Then the shutter is unlocked. UI thread. */
+    private void store(Object img, boolean looked, String how) {
+        long t = SystemClock.uptimeMillis();
         try {
-            if (context.startService(request.putExtra(DarkroomService.TAG, tag)) == null) return new String[] { String.valueOf(FAIL), "the darkroom process wouldn't start" };
+            Class<?> oi = Class.forName("com.sony.scalar.graphics.OptimizedImage");
+            sequence2.getClass().getMethod("storeImage", oi, boolean.class).invoke(sequence2, img, true);
+            stored = true;
+            report(S_STORED, looked ? OK : INFO, how + ": stored in " + (SystemClock.uptimeMillis() - t) + " ms, "
+                    + (SystemClock.uptimeMillis() - shutterStart) + " ms after the shutter");
         } catch (Throwable e) {
-            return new String[] { String.valueOf(FAIL), "the darkroom process wouldn't start: " + Probe.why(e) };
+            report(S_STORED, FAIL, Probe.why(e));
+            try { HardwareDevelop.call(img, "release"); } catch (Throwable ignored) { }
         }
-        while (SystemClock.uptimeMillis() - t0 < timeoutMs) {
-            try { Thread.sleep(250); } catch (InterruptedException e) { break; }
-            try {
-                java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(answers));
-                try {
-                    for (String line; (line = r.readLine()) != null; ) {
-                        if (!line.startsWith(tag + "|")) continue;
-                        String[] f = line.split("\\|", 3);
-                        note("darkroom process answered in " + (SystemClock.uptimeMillis() - t0) + " ms: " + line);
-                        return new String[] { f[1], f.length > 2 ? f[2] : "" };
-                    }
-                } finally { r.close(); }
-            } catch (java.io.IOException e) {
-                // not written yet
-            }
+        unlockShutter("stored");
+        step(S_SHOT, RUN, "finding it in the catalogue…");
+        waitForFile(SystemClock.uptimeMillis() - shutterStart, SystemClock.uptimeMillis());
+    }
+
+    private void storeRaw(Object raw) {
+        try {
+            Class<?> rd = Class.forName("com.sony.scalar.hardware.CameraSequence$RawData");
+            sequence2.getClass().getMethod("storeImage", rd, boolean.class).invoke(sequence2, raw, true);
+            report(S_STORED, INFO, "stored as the camera develops it");
+        } catch (Throwable e) {
+            report(S_STORED, FAIL, Probe.why(e));
         }
-        return new String[] { String.valueOf(FAIL), "no answer from the darkroom process in " + timeoutMs / 1000 + " s" };
+        unlockShutter("stored raw");
+        afterPicture();
+    }
+
+    /** The shutter lock the capture hook set: always lifted. */
+    private void unlockShutter(String why) {
+        if (!locked || sequence2 == null) return;
+        try {
+            sequence2.getClass().getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
+            note("shutter unlocked (" + why + ")");
+        } catch (Throwable e) {
+            note("unlock: " + Probe.why(e));
+        }
+        locked = false;
+    }
+
+    private void releaseSequence() {
+        if (sequence2 == null) return;
+        unlockShutter("closing");
+        try {
+            Class<?> cb = Class.forName("com.sony.scalar.hardware.CameraSequence$ShutterSequenceCallback");
+            sequence2.getClass().getMethod("setShutterSequenceCallback", cb).invoke(sequence2, (Object) null);
+        } catch (Throwable ignored) { }
+        try { sequence2.getClass().getMethod("release").invoke(sequence2); } catch (Throwable e) { note("capture sequence release: " + Probe.why(e)); }
+        sequence2 = null;
     }
 
     private int[] lookParams() {
@@ -732,6 +849,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
     /** MENU, leaving Latent, or a failed step: the camera goes back at once. Safe to call more than once. */
     void close() {
         if (closed) return;
+        if (lookRunning) { closeAfterLook = true; note("close asked during the look: after it's stored"); return; }   // never free the capture under the look
         closeCamera();
         finish();
     }
@@ -748,6 +866,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         ui.removeCallbacks(poll);
         stopSensors();
         stopSequence();
+        releaseSequence();
         if (cameraEx == null) return;
         try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable ignored) { }
         if (shooting) safely("cancelTakePicture");

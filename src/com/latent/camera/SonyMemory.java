@@ -28,6 +28,10 @@ final class SonyMemory {
     static native int write(int handle, byte[] src, int size, int offset);
     /** block: bytes per Sony transfer, a size already verified on a scratch buffer. */
     static native int develop(int src, int[] srcGeometry, int dst, int[] dstGeometry, int block, String lut, int[] params, FilmCore.Progress progress);
+    /** The look applied to one image in place (a capture, before the camera stores it). */
+    static native int developInPlace(int img, int[] geometry, int block, String lut, int[] params, FilmCore.Progress progress);
+    /** The first 'size' bytes of the picture read, written back unchanged and read again: 0 when they match. */
+    static native int verifyInPlace(int img, int[] geometry, int size);
     /** Whether the last develop could write its blocks straight back (output laid out like the source). */
     static native boolean lastDirect();
     static native String lastError();
