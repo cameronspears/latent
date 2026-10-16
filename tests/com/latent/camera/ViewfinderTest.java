@@ -24,108 +24,141 @@ public class ViewfinderTest {
     static final class Cam implements Release.Camera {
         final StringBuilder did = new StringBuilder();
         final List<Runnable> pending = new ArrayList<Runnable>();
-        public void focus() { did.append("F"); }
+        public void takeButton() { did.append("T"); }
+        public void appFocus() { did.append("F"); }
         public void cancelFocus() { did.append("c"); }
         public void shoot() { did.append("S"); }
+        public void handBack() { did.append("B"); }
         public void later(Runnable r, long ms) { pending.add(r); }
         void runLater() { List<Runnable> p = new ArrayList<Runnable>(pending); pending.clear(); for (Runnable r : p) r.run(); }
         String take() { String s = did.toString(); did.setLength(0); return s; }
     }
 
     static void release() {
-        // half-press, lock, full press: one picture; still held, it focuses again for the next
+        // the camera's own button: it focuses and shoots by itself; Latent follows its reports
         Cam c = new Cam();
         Release r = new Release(c, true);
         r.halfDown();
-        check(r.state == Release.SEARCHING && c.take().equals("F"), "a half-press focuses");
-        r.focused(true);
-        check(r.state == Release.LOCKED, "locked");
+        check(r.state == Release.SEARCHING && !r.app && c.take().equals(""), "a half-press: the camera focuses by itself");
+        r.cameraFocus(Release.AF_LOCK);
+        check(r.state == Release.LOCKED, "the camera's lock shows");
         r.fullDown();
-        check(r.shooting && c.take().equals("S"), "full press on a lock shoots at once");
-        r.fullDown();
-        check(c.take().equals(""), "a second full press while shooting does nothing");
-        r.shot(true);
-        check(!r.shooting && r.state == Release.SEARCHING && c.take().equals("cF"), "after the shot, still held: focus again");
+        check(!r.shooting && c.take().equals(""), "a full press: the camera takes it itself, Latent does nothing");
+        r.cameraFocus(Release.AF_CLEAR);
+        check(r.state == Release.LOCKED, "the camera letting focus go after the picture changes nothing while held");
         r.halfUp();
-        check(r.state == Release.READY && c.take().equals("c"), "let go: focus cancelled, brackets ready");
+        check(r.state == Release.READY && c.take().equals(""), "let go: ready, the button still the camera's");
+        r.cameraFocus(Release.AF_WORKING);
+        check(r.state == Release.SEARCHING, "the camera's reports count even without the key (it has the button)");
+        r.cameraFocus(Release.AF_CLEAR);
+        check(r.state == Release.READY, "and clear when it lets go");
 
-        // no lock: tries again while held, up to MAX_TRIES, then rests on can't focus
+        // the camera can't lock while held: Latent takes the button and tries again, up to MAX_TRIES
         c = new Cam();
         r = new Release(c, true);
         r.halfDown();
-        for (int i = 1; i <= Release.MAX_TRIES; i++) {
-            check(r.tries == i && r.state == Release.SEARCHING, "try " + i + " searching");
-            r.focused(false);
-            check(r.state == Release.NO_LOCK, "try " + i + " can't lock");
-            c.runLater();
-        }
-        check(r.state == Release.NO_LOCK && r.tries == Release.MAX_TRIES && c.pending.isEmpty(), "after " + Release.MAX_TRIES + " tries it rests");
-        check(c.take().equals("FcFcFcFcFcFc"), "each failed try is cancelled before the next");
+        r.cameraFocus(Release.AF_WARN);
+        check(r.state == Release.NO_LOCK && !r.app && c.pending.size() == 1, "the camera couldn't lock: a retry is scheduled");
+        c.runLater();
+        check(r.app && r.state == Release.SEARCHING && r.tries == 2 && c.take().equals("F"), "Latent takes the button and focuses (try 2)");
+        r.cameraFocus(Release.AF_LOCK);
+        check(r.state == Release.SEARCHING, "in app mode the camera's own reports are ignored");
+        for (int i = 2; i < Release.MAX_TRIES; i++) { r.focused(false); c.runLater(); }
+        check(r.tries == Release.MAX_TRIES && r.state == Release.SEARCHING, "tries go on while held");
+        r.focused(false);
+        c.runLater();
+        check(r.state == Release.NO_LOCK && c.pending.isEmpty(), "after " + Release.MAX_TRIES + " tries it rests on can't focus");
+        check(c.take().replace("cF", "").equals("c"), "each failed try is cancelled before the next");
+        r.halfUp();
+        check(!r.app && r.state == Release.READY && c.take().equals("B"), "let go: the button goes back to the camera");
+
+        // a retry, then a lock, then a full press: Latent takes the picture, then hands the button back
+        c = new Cam();
+        r = new Release(c, true);
+        r.halfDown();
+        r.cameraFocus(Release.AF_WARN);
+        c.runLater();
+        r.focused(true);
+        check(r.state == Release.LOCKED, "Latent's retry locked");
+        r.fullDown();
+        check(r.shooting && c.take().equals("FS"), "full press: Latent shoots");
+        r.fullDown();
+        check(c.take().equals(""), "a second full press while shooting does nothing");
+        r.shot(true);
+        check(!r.shooting && !r.app && r.state == Release.READY && c.take().equals("B"), "after the picture the button goes back to the camera");
+        r.halfUp();
+        check(c.take().equals(""), "let go afterwards: nothing more to hand back");
+
+        // focus first in app mode: a full press while searching waits for the lock
+        c = new Cam();
+        r = new Release(c, true);
+        r.halfDown();
+        r.cameraFocus(Release.AF_WARN);
+        c.runLater();
+        r.fullDown();
+        check(!r.shooting && r.waiting, "focus first: waits while Latent searches");
+        r.focused(true);
+        check(r.shooting && c.take().equals("FS"), "focus first: shoots once it locks");
+
+        // focus first, never locks: no picture
+        c = new Cam();
+        r = new Release(c, true);
+        r.halfDown();
+        r.cameraFocus(Release.AF_WARN);
+        c.runLater();
+        r.fullDown();
+        for (int i = 0; i < Release.MAX_TRIES; i++) { r.focused(false); c.runLater(); }
+        check(!r.shooting && r.refused && !c.take().contains("S"), "focus first: no lock, no picture");
+        r.fullDown();
+        check(r.state == Release.SEARCHING && r.waiting && r.tries == 1, "another full press starts Latent's focus again");
+
+        // focus first off: Latent shoots at once in app mode
+        c = new Cam();
+        r = new Release(c, false);
+        r.halfDown();
+        r.cameraFocus(Release.AF_WARN);
+        c.runLater();
+        c.take();
+        r.fullDown();
+        check(r.shooting && c.take().equals("cS"), "focus first off: the search is cancelled and it shoots");
+        r.focused(true);
+        check(r.shooting, "a late focus answer while shooting is ignored");
+        r.shot(false);
+        check(!r.app && !r.shooting && c.take().equals("B"), "the camera wouldn't shoot: the button goes back");
 
         // a retry scheduled before the button was let go doesn't run after
         c = new Cam();
         r = new Release(c, true);
         r.halfDown();
-        r.focused(false);
+        r.cameraFocus(Release.AF_WARN);
         r.halfUp();
         c.runLater();
-        check(r.state == Release.READY && c.take().equals("Fc"), "no retry once let go");
-        r.halfDown();
-        r.focused(false);
-        r.halfUp();
-        r.halfDown();
-        c.take();
-        c.runLater();   // the old retry: stale
-        check(r.tries == 1 && c.take().equals(""), "a stale retry from an earlier press does nothing");
+        check(!r.app && r.state == Release.READY && c.take().equals(""), "no retry once let go");
 
-        // focus first: a full press while searching waits for the lock, then shoots
-        c = new Cam();
-        r = new Release(c, true);
-        r.halfDown();
-        r.fullDown();
-        check(!r.shooting && r.waiting && c.take().equals("F"), "focus first: waits while searching");
-        r.focused(false);
-        c.runLater();
-        r.focused(true);
-        check(r.shooting && c.take().equals("cFS"), "focus first: shoots once it locks");
-
-        // focus first, never locks: no picture, refused
-        c = new Cam();
-        r = new Release(c, true);
-        r.halfDown();
-        r.fullDown();
-        for (int i = 0; i < Release.MAX_TRIES; i++) { r.focused(false); c.runLater(); }
-        check(!r.shooting && r.refused && !r.waiting && !c.take().contains("S"), "focus first: no lock, no picture");
-        r.fullDown();
-        check(r.tries == 1 && r.state == Release.SEARCHING && r.waiting, "another full press starts focusing again");
-
-        // release priority: a full press shoots at once, whatever focus is doing
+        // letting go while Latent's picture is taken: it finishes, then the button goes back
         c = new Cam();
         r = new Release(c, false);
         r.halfDown();
-        r.fullDown();
-        check(r.shooting && c.take().equals("FcS"), "focus first off: the search is cancelled and it shoots");
-        r.focused(true);
-        check(r.shooting && r.state == Release.SEARCHING, "a late focus answer while shooting is ignored");
-        r.shot(false);
-        check(!r.shooting && r.state == Release.SEARCHING, "the camera wouldn't shoot: focusing again (still held)");
-
-        // a full press with no half-press first (it shouldn't happen) still focuses
-        c = new Cam();
-        r = new Release(c, true);
-        r.fullDown();
-        check(r.half && r.waiting && c.take().equals("F"), "a lone full press focuses first");
-
-        // letting go during the picture: the shot finishes, then brackets go back to ready
-        c = new Cam();
-        r = new Release(c, false);
-        r.halfDown();
+        r.cameraFocus(Release.AF_WARN);
+        c.runLater();
         r.focused(true);
         r.fullDown();
         r.halfUp();
         check(r.shooting, "the picture finishes after the button is let go");
         r.shot(true);
-        check(r.state == Release.READY && !r.half && c.take().equals("FSc"), "then ready, no new focus");
+        check(r.state == Release.READY && !r.app && c.take().equals("FSB"), "then ready, the button the camera's");
+
+        // the roll is full: the button becomes Latent's and takes nothing
+        c = new Cam();
+        r = new Release(c, true);
+        r.lock();
+        check(r.app && r.locked && c.take().equals("T"), "full roll: Latent takes the button");
+        r.halfDown();
+        r.focused(true);
+        r.fullDown();
+        check(!r.shooting && r.refused && !c.take().contains("S"), "and a full press takes nothing");
+        r.halfUp();
+        check(r.app && !c.take().contains("B"), "and it never goes back to the camera");
     }
 
     static void level() {

@@ -223,9 +223,14 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             fail("Live view didn't start");
             return;
         }
-        note("live view on");
+        note("live view on; load " + loadAvg());
         catalogue.execute(baseline);
         listen();
+        // the shutter button is the camera's own, as in Sony's apps and sony-remote-reboot: started
+        // before the live frames, it is what lets the camera store pictures with the frames running
+        startDirect();
+        note(direct ? "direct shutter on" : "no direct shutter: Latent takes the pictures");
+        if (!direct) release.app = true;
         readSettings();
         startFrames();
         ui.post(tick);
@@ -258,8 +263,20 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         set("setAutoFocusDoneListener", "com.sony.scalar.hardware.CameraEx$AutoFocusDoneListener", new InvocationHandler() {
             private int logged;
             public Object invoke(Object p, Method m, Object[] a) {
-                if (m.getName().equals("onDone") && a != null && a.length > 1 && logged++ < 6)
-                    note("AF done: status " + a[0] + ", areas " + (a[1] instanceof int[] ? java.util.Arrays.toString((int[]) a[1]) : String.valueOf(a[1])));
+                if (m.getName().equals("onDone") && a != null && a.length > 1 && a[0] instanceof Integer) {
+                    int status = (Integer) a[0];
+                    lastReportAt = SystemClock.uptimeMillis();
+                    if (logged++ < 20) note("camera's focus: status " + status + ", areas " + (a[1] instanceof int[] ? java.util.Arrays.toString((int[]) a[1]) : String.valueOf(a[1])));
+                    if (!release.app && status == Release.AF_WARN) lampThisTry = lamp || lampThisTry;
+                    release.cameraFocus(status);
+                    host.changed();
+                }
+                return objectMethod(p, m, a);
+            }
+        });
+        set("setAutoFocusStartListener", "com.sony.scalar.hardware.CameraEx$AutoFocusStartListener", new InvocationHandler() {
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().equals("onStart")) { lampThisTry = lamp; release.cameraFocus(Release.AF_WORKING); host.changed(); }
                 return objectMethod(p, m, a);
             }
         });
@@ -474,26 +491,57 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     // ------------------------------------------------------------------------------ keys
 
-    void halfDown() { if (ready()) { release.halfDown(); host.changed(); } }
-
-    void halfUp() { release.halfUp(); host.changed(); }
-
-    /** A full press; full is false when the roll has no frames left (then nothing is taken). */
-    void fullDown(boolean roomOnRoll) {
+    void halfDown() {
         if (!ready()) return;
-        if (!roomOnRoll) { say("Roll finished"); return; }
+        release.halfDown();
+        if (!release.app) {   // the camera focuses; if it says nothing at all (manual focus, say), Latent tries
+            final long at = SystemClock.uptimeMillis();
+            ui.postDelayed(new Runnable() {
+                public void run() {
+                    if (release.half && !release.app && release.state == Release.SEARCHING && lastReportAt < at) {
+                        note("the camera's focus said nothing in 4 s");
+                        release.cameraFocus(Release.AF_WARN);
+                        host.changed();
+                    }
+                }
+            }, 4000);
+        }
+        host.changed();
+    }
+
+    private long lastReportAt;
+
+    void halfUp() { if (ready()) { release.halfUp(); host.changed(); } }
+
+    /**
+     * A full press. While the camera has the button it has taken the picture itself: Latent keeps the
+     * frame as the print and watches the catalogue for it. In app mode Latent takes it (Release).
+     */
+    void fullDown() {
+        if (!ready()) return;
+        if (release.locked) { say("Roll finished"); return; }
+        if (!release.app) {
+            keepPrint();
+            expectPicture();
+            if (nativeShots++ < 30) note("full press: the camera's own shutter");
+            flushLog();
+            return;
+        }
         release.fullDown();
         if (release.refused) say("Not in focus");
         host.changed();
     }
 
-    private boolean ready() { return previewing && !closed; }
+    /** The roll is full: the button becomes Latent's and takes nothing more. */
+    void lockRoll() { release.lock(); host.changed(); }
+
+    private boolean ready() { return previewing && !closed && !closing; }
 
     /** Centre: the film look on live view, or the camera's own picture (smooth, at full speed). */
     void toggleLook() {
         if (lookFailed) { say("Film look unavailable on live view"); return; }
         lookOn = !lookOn;
-        say(lookOn ? "Film look on" : "Film look off  ·  the camera's own view");
+        say(lookOn ? "Film look on" : "Film look off  \u00b7  the camera's own view");
         host.changed();
     }
 
@@ -509,10 +557,59 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     void setFocusFirst(boolean on) { release.focusFirst = on; }
 
-    // ------------------------------------------------------------------------------ focus (Release.Camera)
+    // ------------------------------------------------------------------------------ the button: the camera's, or Latent's (Release.Camera)
 
-    public void focus() {
+    private boolean direct;           // direct shutter is on: the camera has the button
+    private boolean directStopping;   // stopDirectShutter asked, its answer not yet in
+    private Runnable afterStop;       // what to do once it has stopped
+    private int nativeShots;
+
+    private void startDirect() {
+        try {
+            call("startDirectShutter");
+            direct = true;
+        } catch (Throwable e) {
+            note("startDirectShutter: " + Probe.why(e));
+        }
+    }
+
+    /** Direct shutter off (asynchronous), then 'then'. At once if it's off already. */
+    private void stopDirect(Runnable then) {
+        if (!direct) { if (then != null) then.run(); return; }
+        afterStop = then;
+        if (directStopping) return;
+        directStopping = true;
+        final long t = SystemClock.uptimeMillis();
+        boolean asked = set("stopDirectShutter", "com.sony.scalar.hardware.CameraEx$DirectShutterStoppedCallback", new InvocationHandler() {
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().equals("onShutterStopped")) {
+                    note("direct shutter stopped in " + (SystemClock.uptimeMillis() - t) + " ms");
+                    stopped();
+                }
+                return objectMethod(p, m, a);
+            }
+        });
+        if (!asked) { stopped(); return; }
+        ui.postDelayed(new Runnable() { public void run() { if (directStopping) { note("direct shutter: no answer in 1.5 s"); stopped(); } } }, 1500);
+    }
+
+    private void stopped() {
+        if (!directStopping) return;
+        directStopping = false;
+        direct = false;
+        Runnable r = afterStop;
+        afterStop = null;
+        if (r != null) r.run();
+    }
+
+    public void takeButton() { stopDirect(null); }
+
+    public void appFocus() {
         if (camera == null || closed) return;
+        stopDirect(new Runnable() { public void run() { if (!closed && release.app && release.state == Release.SEARCHING) autoFocus(); } });
+    }
+
+    private void autoFocus() {
         final int g = ++focusGen;
         focusStart = SystemClock.uptimeMillis();
         lampThisTry = lamp;
@@ -533,7 +630,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         focusGen++;   // this try is answered
         long ms = SystemClock.uptimeMillis() - focusStart;
         if (locked) locks++; else misses++;
-        if (locks + misses <= 12) note("focus try " + release.tries + ": " + (locked ? "locked" : "no lock") + " in " + ms + " ms" + (lampThisTry ? ", AF lamp" : ""));
+        if (locks + misses <= 12) note("Latent's focus, try " + release.tries + ": " + (locked ? "locked" : "no lock") + " in " + ms + " ms" + (lampThisTry ? ", AF lamp" : ""));
         release.focused(locked);
         host.changed();
     }
@@ -543,34 +640,44 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable e) { note("cancelAutoFocus: " + Probe.why(e)); }
     }
 
+    public void handBack() {
+        cancelFocus();
+        if (closed || closing || camera == null) return;
+        if (directStopping) { afterStop = new Runnable() { public void run() { if (!closed && !closing) startDirect(); } }; return; }
+        if (!direct) startDirect();
+    }
+
     public void later(Runnable r, long ms) { ui.postDelayed(r, ms); }
 
     // ------------------------------------------------------------------------------ the picture
 
     /**
-     * The picture, the way the Shooting test proved safe: no live frames running while the camera
-     * captures and stores it. v0.31.0 took a picture with the frames running, and the camera catalogued
-     * it, never wrote it to the card, and hung (it wouldn't even switch off). So the frames stop before
-     * the shutter (the camera's own live view shows meanwhile), the catalogue is asked no more than every
-     * 300 ms, and the frames come back only once every picture is in the catalogue and has had a moment.
+     * Latent takes the picture (app mode: the camera couldn't focus by itself and Latent's own focus
+     * did, or focus first is off). The sequence sony-remote-reboot uses on the A5000: direct shutter
+     * off (it is, in app mode), burstableTakePicture, and in the shutter's answer cancelTakePicture,
+     * then the button goes back to the camera. The live frames keep running, as they do there.
      */
     public void shoot() {
         if (closed) return;
-        pauseFrames();
+        keepPrint();
         shutterAt = SystemClock.uptimeMillis();
-        note("shutter (frames stopped)");
+        note("Latent's shutter");
         flushLog();   // if the camera hangs from here, the card already says how far it got
-        try {
-            call("burstableTakePicture");
-        } catch (Throwable e) {
-            note("burstableTakePicture: " + Probe.why(e));
-            safely("cancelTakePicture");
-            say("The camera wouldn't take it");
-            release.shot(false);
-            resumeFramesLater(RESUME_MS);
-            return;
-        }
-        ui.postDelayed(shutterTimeout, SHUTTER_TIMEOUT_MS);
+        stopDirect(new Runnable() {
+            public void run() {
+                if (closed) return;
+                try {
+                    call("burstableTakePicture");
+                } catch (Throwable e) {
+                    note("burstableTakePicture: " + Probe.why(e));
+                    safely("cancelTakePicture");
+                    say("The camera wouldn't take it");
+                    release.shot(false);
+                    return;
+                }
+                ui.postDelayed(shutterTimeout, SHUTTER_TIMEOUT_MS);
+            }
+        });
     }
 
     private final Runnable shutterTimeout = new Runnable() {
@@ -580,77 +687,82 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             safely("cancelTakePicture");
             say("The camera didn't answer");
             release.shot(false);
-            resumeFramesLater(RESUME_MS);
-        }
-    };
-
-    /** The shutter's answer: 0 taken, 1 cancelled, 2 error. The capture is always ended, or the next one never fires. */
-    private void onShutter(int status) {
-        if (!release.shooting || closed) return;
-        ui.removeCallbacks(shutterTimeout);
-        long ms = SystemClock.uptimeMillis() - shutterAt;
-        safely("cancelTakePicture");
-        if (status == 0) {
-            shots++;
-            long now = SystemClock.uptimeMillis();
-            flashUntil = now + FLASH_MS;
-            if (frame != null) {   // the print: the last frame before the shutter, in the look
-                if (print != null) print.recycle();
-                print = frame.copy(Bitmap.Config.ARGB_8888, false);
-                printAt = now;
-            }
-            if (shots <= 30) note("shot " + shots + ": shutter " + ms + " ms");
-            storeSince = now;
-            findStored();
-            ui.removeCallbacks(tick);
-            ui.post(tick);
-        } else {
-            note("shutter status " + status + " after " + ms + " ms");
-            say(status == 1 ? "The camera cancelled it" : "The camera reported an error");
-            resumeFramesLater(RESUME_MS);
-        }
-        flushLog();
-        release.shot(status == 0);
-        host.changed();
-    }
-
-    /** After a picture is in the catalogue, this long before the frames come back. */
-    static final long RESUME_MS = 1200;
-
-    private void pauseFrames() {
-        ui.removeCallbacks(resume);
-        ui.removeCallbacks(poll);
-        if (!sequenceStopped) { stopSequence(); sequenceStopped = true; }
-        host.changed();
-    }
-
-    private void resumeFramesLater(long ms) { ui.removeCallbacks(resume); ui.postDelayed(resume, ms); }
-
-    /** The frames back, once nothing is being taken or stored. */
-    private final Runnable resume = new Runnable() {
-        public void run() {
-            if (closed || !sequenceStopped) return;
-            if (release.shooting || stored < shots) { resumeFramesLater(300); return; }
-            sequenceStopped = false;
-            if (!lookFailed) startFrames();
-            host.changed();
         }
     };
 
     /**
+     * The shutter's answer: 0 taken, 1 cancelled, 2 error. For Latent's own picture the capture is
+     * ended (cancelTakePicture), or the next one never fires. A picture the camera took by itself
+     * (its own button) is only counted.
+     */
+    private void onShutter(int status) {
+        if (closed) return;
+        boolean ours = release.shooting;
+        long now = SystemClock.uptimeMillis();
+        if (ours) {
+            ui.removeCallbacks(shutterTimeout);
+            safely("cancelTakePicture");
+        }
+        if (status == 0) {
+            shots++;
+            flashUntil = now + FLASH_MS;
+            if (pendingPrint != null) { if (print != null) print.recycle(); print = pendingPrint; pendingPrint = null; printAt = now; }
+            if (shots <= 30) note("shot " + shots + (ours ? ": Latent's shutter " + (now - shutterAt) + " ms" : ": the camera's shutter"));
+            expectPicture();
+            ui.removeCallbacks(tick);
+            ui.post(tick);
+        } else {
+            note("shutter status " + status + (ours ? " after " + (now - shutterAt) + " ms" : " (the camera's)"));
+            say(status == 1 ? "The camera cancelled it" : "The camera reported an error");
+        }
+        flushLog();
+        if (ours) release.shot(status == 0);
+        host.changed();
+    }
+
+    private Bitmap pendingPrint;   // the frame at the full press, the print once the shutter answers
+
+    private void keepPrint() {
+        if (frame == null) return;
+        if (pendingPrint != null) pendingPrint.recycle();
+        pendingPrint = frame.copy(Bitmap.Config.ARGB_8888, false);
+    }
+
+    /** Pictures to look for in the catalogue: watched for this long after the last shutter or full press. */
+    private long watchUntil;
+
+    private void expectPicture() {
+        long now = SystemClock.uptimeMillis();
+        if (now >= watchUntil) storeSince = now;
+        watchUntil = now + STORE_WAIT_MS;
+        ui.removeCallbacks(findAgain);
+        ui.postDelayed(findAgain, 300);
+    }
+
+    /** A picture is being taken or stored (or may be): the camera mustn't be given back yet. */
+    private boolean storing() {
+        return release.shooting || stored < shots || SystemClock.uptimeMillis() < watchUntil && stored < shots + (pendingPrint != null ? 1 : 0);
+    }
+
+    /**
      * The camera stores and catalogues each picture itself (about 0.2 s after the shutter); Linux sees
      * the file only once the card is read again, so its name comes from the catalogue, asked on a
-     * thread of its own every 300 ms (as the Shooting test did) until every picture taken is found (or 8 s pass).
+     * thread of its own every 300 ms (as the Shooting test did) while pictures are expected. Every new
+     * photo found is an exposure, also one whose shutter wasn't reported.
      */
     private void findStored() {
-        if (catalogueBusy || closed || stored >= shots) return;
-        if (!baselineKnown && mediaId != null && SystemClock.uptimeMillis() - storeSince < STORE_WAIT_MS) { ui.postDelayed(findAgain, 300); return; }
-        if (mediaId == null || SystemClock.uptimeMillis() - storeSince > STORE_WAIT_MS) {   // not seen: counted anyway, found by number next time
-            note((shots - stored) + " picture(s) not seen in the catalogue");
-            for (; stored < shots; stored++) host.shot(null);
-            resumeFramesLater(RESUME_MS);
+        if (catalogueBusy || closed) return;
+        long now = SystemClock.uptimeMillis();
+        if (now >= watchUntil) {   // the wait is over
+            if (stored < shots) {   // taken but never seen: counted anyway, found by number next time
+                note((shots - stored) + " picture(s) not seen in the catalogue");
+                for (; stored < shots; stored++) host.shot(null);
+            }
+            if (pendingPrint != null) { pendingPrint.recycle(); pendingPrint = null; }   // a full press that took nothing
+            flushLog();
             return;
         }
+        if (!baselineKnown || mediaId == null) { ui.postDelayed(findAgain, 300); return; }
         catalogueBusy = true;
         final int after = highestKnown;
         catalogue.execute(new Runnable() {
@@ -674,15 +786,21 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                         if (why != null) note("catalogue: " + why);
                         for (Probe.Row r : found) {
                             int n = r.folder * 10000 + r.number;
-                            if (n <= highestKnown || stored >= shots) continue;
+                            if (n <= highestKnown) continue;
                             highestKnown = n;
                             stored++;
+                            if (stored > shots) {   // the shutter wasn't reported: it's an exposure all the same
+                                shots = stored;
+                                flashUntil = SystemClock.uptimeMillis() + FLASH_MS;
+                                if (pendingPrint != null) { if (print != null) print.recycle(); print = pendingPrint; pendingPrint = null; printAt = SystemClock.uptimeMillis(); }
+                            }
                             File f = dcfFile(r.folder, r.number);
                             if (stored <= 30) note(f.getName() + " in the catalogue " + (SystemClock.uptimeMillis() - storeSince) + " ms after the shutter");
                             host.shot(f);
                         }
-                        if (stored < shots && !closed) ui.postDelayed(findAgain, 300);   // never pressing the catalogue while the camera writes it
-                        else if (!closed) { flushLog(); resumeFramesLater(RESUME_MS); }
+                        if (!found.isEmpty()) { flushLog(); host.changed(); }
+                        if (stored >= shots && !found.isEmpty() && !release.shooting) watchUntil = Math.min(watchUntil, SystemClock.uptimeMillis() + 1500);
+                        if (!closed) ui.postDelayed(findAgain, 300);   // never pressing the catalogue while the camera writes it
                     }
                 });
             }
@@ -749,7 +867,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     void fill(UiState s) {
         long now = SystemClock.uptimeMillis();
         s.mode = UiState.PHOTO;
-        boolean look = lookOn && frame != null && !sequenceStopped;   // frames stopped for a picture: the camera's own view
+        boolean look = lookOn && frame != null && !sequenceStopped;   // frames stopped (the camera struggling): the camera's own view
         s.liveImage = look ? frame : null;
         s.liveThrough = previewing && !look;   // the camera's own live view shows through
         s.lookLive = look;
@@ -781,17 +899,59 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     // ------------------------------------------------------------------------------ closing
 
-    /** MENU, leaving Latent, or a failure: the camera goes back at once. Safe to call more than once. */
+    private boolean closing;
+    private long closingAt;
+    private String closeWhy;
+
+    /**
+     * MENU, leaving Latent, or a failure: the camera goes back. Never while a picture is being taken
+     * or stored (v0.31.1 released the camera with pictures unstored and it hung): "Saving" waits for
+     * the catalogue, up to 10 s. Then direct shutter is stopped and the camera released, as Sony's
+     * apps do. Safe to call more than once.
+     */
     void close(String why) {
+        if (closed || closing) return;
+        closing = true;
+        closingAt = SystemClock.uptimeMillis();
+        closeWhy = why;
+        if (why != null) note("closing: " + why);
+        cancelFocus();
+        if (storing()) { say("Saving\u2026"); note("closing: waiting for " + Math.max(1, shots - stored) + " picture(s) to be stored"); }
+        flushLog();
+        ui.post(closeStep);
+    }
+
+    private final Runnable closeStep = new Runnable() {
+        public void run() {
+            if (closed) return;
+            if (storing() && SystemClock.uptimeMillis() - closingAt < 10000 && cameraEx != null) { ui.postDelayed(this, 200); return; }
+            ui.removeCallbacks(poll);
+            stopSequence();
+            if (cameraEx != null && direct) {
+                stopDirect(new Runnable() { public void run() { finishClose(); } });
+                return;
+            }
+            finishClose();
+        }
+    };
+
+    /** Now, without waiting (Latent is closing down): the camera is given back at once. */
+    void closeNow() {
+        if (closed) return;
+        if (!closing) { closing = true; note("closing at once"); }
+        finishClose();
+    }
+
+    private void finishClose() {
         if (closed) return;
         closed = true;
-        if (why != null) note("closing: " + why);
+        String why = closeWhy;
         releaseCamera();
         host.showLive(false);
         Thread.setDefaultUncaughtExceptionHandler(previousHandler);
         long liveMs = Math.max(1, (lastFrameAt > 0 ? lastFrameAt : SystemClock.uptimeMillis()) - framesAskedAt);
-        note("closed: " + shots + " picture(s), " + frames + " live frames (" + String.format(Locale.US, "%.1f", frames * 1000.0 / liveMs)
-                + " a second, look " + (frames > 0 ? lookMsSum / frames : 0) + " ms each), focus " + locks + " locked / " + misses
+        note("closed: " + shots + " picture(s), " + stored + " in the catalogue, " + frames + " live frames (" + String.format(Locale.US, "%.1f", frames * 1000.0 / liveMs)
+                + " a second, look " + (frames > 0 ? lookMsSum / frames : 0) + " ms each), Latent's focus " + locks + " locked / " + misses
                 + " missed, level sure on " + level.sure + " of " + level.frames + " frames");
         flushLog();
         catalogue.shutdown();
@@ -799,10 +959,11 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         for (; stored < shots; stored++) host.shot(null);   // taken but not yet named: still exposures on the roll
         if (frame != null) { frame.recycle(); frame = null; }
         if (print != null) { print.recycle(); print = null; }
+        if (pendingPrint != null) { pendingPrint.recycle(); pendingPrint = null; }
         host.closed(why);
     }
 
-    private void fail(String why) { close(why); }
+    private void fail(String why) { closeWhy = why; closing = true; note("failed: " + why); finishClose(); }
 
     /** cancel focus and capture, stop the frames and live view, then release: the order the verified apps use. */
     private void releaseCamera() {
@@ -814,6 +975,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         set("setShutterListener", null, null);
         set("setFocusLightStateListener", null, null);
         set("setAutoFocusDoneListener", null, null);
+        set("setAutoFocusStartListener", null, null);
         set("setShutterSpeedChangeListener", null, null);
         set("setApertureChangeListener", null, null);
         set("setAutoISOSensitivityListener", null, null);
@@ -832,6 +994,13 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         try { sequence.getClass().getMethod("stopPreviewSequence").invoke(sequence); } catch (Throwable e) { note("stopPreviewSequence: " + Probe.why(e)); }
         try { sequence.getClass().getMethod("release").invoke(sequence); } catch (Throwable e) { note("sequence release: " + Probe.why(e)); }
         sequence = null;
+    }
+
+    /** The live frames stop for good (the camera's own live view shows). */
+    private void pauseFrames() {
+        ui.removeCallbacks(poll);
+        if (!sequenceStopped) { stopSequence(); sequenceStopped = true; }
+        host.changed();
     }
 
     /** Every 10 s while live: how the frames are keeping up (a camera slowing down shows here first). */

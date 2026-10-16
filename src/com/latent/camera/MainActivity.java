@@ -201,10 +201,22 @@ public class MainActivity extends Activity {
         filer.shutdown();
         if (Viewfinder.opened) {
             devLog("closing Latent: the camera was opened, so its image memory comes back only once Latent has closed");
-            try { worker.awaitTermination(1500, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
-            filer.shutdownNow();
-            android.os.Process.killProcess(android.os.Process.myPid());
+            if (vf != null) {   // still giving the camera back (a picture storing): close once it has, or at the latest in 12 s
+                killWhenClosed = true;
+                ui.postDelayed(new Runnable() { public void run() { if (vf != null) vf.closeNow(); killNow(); } }, 12000);
+                return;
+            }
+            killNow();
         }
+    }
+
+    private boolean killWhenClosed;
+
+    /** Latent ends here, so the next open is a fresh one (with the camera's image memory back). */
+    private void killNow() {
+        try { worker.awaitTermination(1500, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
+        filer.shutdownNow();
+        android.os.Process.killProcess(android.os.Process.myPid());
     }
 
     /** Re-read the card (looks, rolls, photos), then run 'then' on the UI thread. */
@@ -707,10 +719,11 @@ public class MainActivity extends Activity {
                 screen.invalidate();
             }
             public void changed() { screen.invalidate(); }
-            public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
+            public void live() { }   // a half-press still held from the camera back: the next one focuses (the button is the camera's)
             public void shot(File photo) { vfShot(photo); }
             public void closed(String why) {
                 vf = null;
+                if (killWhenClosed) { killNow(); return; }
                 ui.removeCallbacks(closeWhenFinished);
                 if (mode == PHOTO) mode = BACK;
                 devLog("viewfinder: closed" + (why != null ? " (" + why + ")" : "") + ", " + exposed + " exposed");
@@ -728,13 +741,15 @@ public class MainActivity extends Activity {
         exposed++;
         if (photo != null) {
             highestOnCard = Math.max(highestOnCard, Roll.number(photo));
-            worker.execute(new Runnable() {
+            Runnable note = new Runnable() {
                 public void run() {
                     try { Library.recordShot(card, photo); } catch (Exception e) { devLog("viewfinder: " + photo.getName() + " not noted (" + Probe.why(e) + ")"); }
                 }
-            });
+            };
+            try { worker.execute(note); } catch (java.util.concurrent.RejectedExecutionException e) { note.run(); }   // Latent closing down
         }
         if (current != null && !current.endless() && exposed >= current.length && vf != null) {   // the last frame: back to the camera back
+            vf.lockRoll();   // the button takes no more pictures
             vf.say("Roll finished");
             ui.removeCallbacks(closeWhenFinished);
             ui.postDelayed(closeWhenFinished, 1800);
@@ -782,7 +797,10 @@ public class MainActivity extends Activity {
             return;
         }
         if (full) {
-            if (down && e.getRepeatCount() == 0) vf.fullDown(current != null && (current.endless() || vfBase + vf.shots < current.length));
+            if (down && e.getRepeatCount() == 0) {
+                if (current != null && !current.endless() && vfBase + vf.shots >= current.length) vf.lockRoll();
+                vf.fullDown();
+            }
             return;
         }
         if (!down) {
