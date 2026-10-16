@@ -553,8 +553,19 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 note("capture hook set, with options");
             } catch (java.lang.reflect.InvocationTargetException e) {
                 note("capture hook with options: " + Probe.why(e.getCause()) + "; trying it plain");
-                cs.getMethod("setShutterSequenceCallback", cb).invoke(sequence2, callback);
-                note("capture hook set, plain");
+                try {
+                    cs.getMethod("setShutterSequenceCallback", cb).invoke(sequence2, callback);
+                    note("capture hook set, plain");
+                } catch (java.lang.reflect.InvocationTargetException e2) {
+                    // Sony's Graduated Filter sets this allocation policy on platform 2.x bodies before its first capture
+                    note("capture hook plain: " + Probe.why(e2.getCause()) + "; platform " + platform() + ", trying allocation policy 1");
+                    Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("setAllocationPolicy", int.class).invoke(null, 1);
+                    policyChanged = true;
+                    cs.getMethod("setShutterSequenceCallback", cb, oc).invoke(sequence2, callback, o);
+                    cs.getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
+                    locked = true;
+                    note("capture hook set, with options, under allocation policy 1");
+                }
             }
             return true;
         } catch (Throwable e) {
@@ -700,7 +711,23 @@ final class ShootingTest implements SurfaceHolder.Callback {
         locked = false;
     }
 
+    private boolean policyChanged;
+
+    private static String platform() {
+        try {
+            Class<?> sp = Class.forName("com.sony.scalar.sysutil.ScalarProperties");
+            return String.valueOf(sp.getMethod("getString", String.class).invoke(null, "version.platform"));
+        } catch (Throwable e) {
+            return "?";
+        }
+    }
+
     private void releaseSequence() {
+        if (policyChanged) {   // back to the default, whatever happens
+            try { Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("setAllocationPolicy", int.class).invoke(null, 0); note("allocation policy back to default"); }
+            catch (Throwable e) { note("allocation policy: " + Probe.why(e)); }
+            policyChanged = false;
+        }
         if (sequence2 == null) return;
         unlockShutter("closing");
         try {
@@ -915,6 +942,28 @@ final class ShootingTest implements SurfaceHolder.Callback {
             // the screen shows the same
         }
         host.finished();
+        restartForMemoryCheck();
+    }
+
+    /**
+     * Does a fresh process get image memory back? Latent restarts itself in two seconds and checks
+     * (MainActivity, on the "memcheck" extra), appending the answer to LATENT/SHOOTING.TXT.
+     */
+    private void restartForMemoryCheck() {
+        try {
+            android.content.Intent i = new android.content.Intent(context, MainActivity.class).putExtra("memcheck", true)
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            android.app.PendingIntent pi = android.app.PendingIntent.getActivity(context, 1, i, android.app.PendingIntent.FLAG_CANCEL_CURRENT);
+            ((android.app.AlarmManager) context.getSystemService(Context.ALARM_SERVICE)).set(android.app.AlarmManager.RTC, System.currentTimeMillis() + 2000, pi);
+            ui.postDelayed(new Runnable() {
+                public void run() {
+                    if (context instanceof android.app.Activity) ((android.app.Activity) context).finish();
+                    android.os.Process.killProcess(android.os.Process.myPid());   // the process goes; the alarm brings Latent back
+                }
+            }, 1500);
+        } catch (Throwable e) {
+            note("restart: " + Probe.why(e));
+        }
     }
 
     public void surfaceChanged(SurfaceHolder h, int format, int w, int hh) { }
