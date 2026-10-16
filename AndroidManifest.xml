@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.latent.camera" android:versionCode="62" android:versionName="0.32.1">
+    package="com.latent.camera" android:versionCode="63" android:versionName="0.33.0">
     <uses-sdk android:minSdkVersion="10" android:targetSdkVersion="10" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -19,5 +19,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- a blank screen, in its own process, while Latent ends and starts again (the camera's image memory comes back only then) -->
+        <activity android:name=".Relaunch" android:process=":relaunch" android:screenOrientation="landscape"
+            android:configChanges="keyboardHidden|orientation" android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
     </application>
 </manifest>
