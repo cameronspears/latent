@@ -741,11 +741,11 @@ final class Ui {
             "Changes no camera setting. Point the camera at something and hold still.",
     };
     static final String[] LOOK_PLAN = {
-            "Opens the camera and asks for the live frames Latent's film look needs, the way Sony's Smart Remote does, and puts the film on each one as the viewfinder will.",
-            "Takes two photos with the frames and the look running, and checks each is stored. Kept off your rolls. If both are, Film look on live view comes on.",
-            "Saves the camera's own log after the first photo. If a photo isn't stored, the camera is kept open (releasing it froze the camera before) and the screen says what to do.",
+            "Opens the camera and runs the film look on its live frames exactly as the viewfinder does, pausing while each photo is written.",
+            "Takes two photos, gives the camera 12 seconds to write them, gives it back, and restarts Latent. Kept off your rolls.",
+            "Then counts the new photos on the card itself. If both are there, Film look on live view comes on.",
     };
-    static final String LOOK_FOOTER = "About half a minute. Logs: LATENT/LIVELOOK.TXT and LOOKLOG.TXT.";
+    static final String LOOK_FOOTER = "About 45 seconds. Log: LATENT/LIVELOOK.TXT.";
 
     static final String[] RESTART_PLAN = {
             "Copies Sony's own camera apps (Smart Remote among them) to LATENT/APPS, to be read on a computer. Only reads.",

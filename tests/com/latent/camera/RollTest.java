@@ -67,6 +67,19 @@ public class RollTest {
             Roll eb = Roll.open(e.dir);
             check(eb.stockFor(0).equals("CUBANNEG") && eb.stockFor(1).equals("PORTRA4W") && eb.stockFor(2).equals("TRIX400"),
                     "an endless roll develops each frame in the film it was shot in: " + eb.stockFor(0) + " " + eb.stockFor(1) + " " + eb.stockFor(2));
+            // the viewfinder's pictures, named only once the camera is back: their films by the order they were shot
+            Roll v = Roll.create(card, "NATURAL", Roll.ENDLESS, 0, 1001015);
+            v.shotFilm(1001015, "CLASSNEG");
+            v.shotFilm(1001015, "TRIX400");
+            v.save();
+            Roll vb = Roll.open(v.dir);
+            check(vb.shotFilms.size() == 2 && vb.shotsAfter == 1001015, "the films of pictures not yet named round-trip");
+            check(!vb.resolveShots(new java.util.ArrayList<File>()) && vb.shotFilms.size() == 2, "nothing on the card yet: kept for later");
+            java.util.List<File> newestFirst = java.util.Arrays.asList(p18, p17, p16);
+            check(vb.resolveShots(newestFirst) && "CLASSNEG".equals(vb.looks.get(1001016)) && "TRIX400".equals(vb.looks.get(1001017))
+                    && !vb.looks.containsKey(1001018) && vb.shotFilms.isEmpty(), "named in shot order once the card shows them: " + vb.looks);
+            for (File f : v.dir.listFiles()) f.delete();
+            v.dir.delete();
             r.lookFor(p16, "PORTRA4W");
             check(r.looks.isEmpty() && back.stockFor(0).equals("CUBANNEG"), "a roll of 12 keeps its one film");
             for (File f : e.dir.listFiles()) f.delete();

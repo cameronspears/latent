@@ -160,7 +160,34 @@ public class MainActivity extends Activity {
             return;
         }
         card = Environment.getExternalStorageDirectory();
-        if (getIntent().getLongExtra(Relaunch.EXTRA_AT, 0) > 0) relaunched();
+        if (getIntent().getLongExtra(Relaunch.EXTRA_AT, 0) > 0) {
+            developNow = "develop".equals(getIntent().getStringExtra(Relaunch.EXTRA_WHY));
+            relaunched();
+        }
+    }
+
+    /** Started again by Relaunch at the end of the Live look test: its screen, and whether its pictures are on the card. */
+    private void lookTestBack(final long createdAt) {
+        mode = PROBE;
+        lookTest = true;
+        fromSettings = true;
+        probeStage = 1;
+        probeStatus = new int[LiveLookTest.STEPS.length];
+        probeDetail = new String[LiveLookTest.STEPS.length];
+        java.util.Arrays.fill(probeStatus, -1);
+        java.util.Arrays.fill(probeDetail, "");
+        LiveLookTest.restoreSteps(prefs, probeStatus, probeDetail);
+        final Probe.Listener listener = new Probe.Listener() {
+            public void step(final int i, final int status, final String detail) {
+                ui.post(new Runnable() { public void run() { probeStatus[i] = status; probeDetail[i] = detail; screen.invalidate(); } });
+            }
+        };
+        worker.execute(new Runnable() {
+            public void run() {
+                LiveLookTest.checkCard(card, prefs, createdAt, listener);
+                ui.post(new Runnable() { public void run() { probeStage = 2; screen.invalidate(); } });
+            }
+        });
     }
 
     /**
@@ -170,6 +197,7 @@ public class MainActivity extends Activity {
      */
     private void relaunched() {
         final long createdAt = startAt;
+        if (prefs.getLong(LiveLookTest.P_AT, 0) > 0) { lookTestBack(createdAt); return; }
         if (prefs.getLong(RestartTest.P_AT, 0) == 0) return;
         mode = PROBE;
         restartTest = true;
@@ -222,7 +250,7 @@ public class MainActivity extends Activity {
         if (Viewfinder.opened) {
             devLog("leaving: the camera was opened, so Latent closes itself (its image memory comes back only then)");
             killWhenClosed = true;
-            if (lookRun != null) {   // the test ends first (never with a picture on its way); it ends Latent then
+            if (lookRun != null && lookRun.busy()) {   // the test ends first (never with a picture on its way); it ends Latent then
                 lookRun.close();
             } else if (vf != null) {
                 vf.close(null);
@@ -484,8 +512,12 @@ public class MainActivity extends Activity {
     private boolean neutralOn() { return prefs.getBoolean("neutral", true); }
     private boolean viewfinderOn() { return prefs.getBoolean("viewfinder", true); }
     private boolean focusFirst() { return prefs.getBoolean("focusFirst", true); }
-    /** The film look on live view: off until the Live look test has stored pictures with the frames running (it turns it on). */
-    private boolean liveLook() { return prefs.getBoolean("liveLook", false); }
+    /**
+     * The film look on live view: off until the Live look test has found its pictures on the card, taken
+     * with the look running (it turns it on). "liveLook2": v0.35.0's test turned "liveLook" on from
+     * catalogue entries whose files were never written.
+     */
+    private boolean liveLook() { return prefs.getBoolean("liveLook2", false); }
 
     /** The camera shoots neutral while a roll is loaded: every look starts from a plain picture. */
     private boolean neutralWanted(boolean filmLoaded) { return neutralOn() && filmLoaded; }
@@ -518,7 +550,7 @@ public class MainActivity extends Activity {
                 prefs.edit().putBoolean("focusFirst", !focusFirst()).commit();
             } else if (action.equals("liveLook")) {
                 if (vf != null) toast("It changes the next time the viewfinder opens");
-                prefs.edit().putBoolean("liveLook", !liveLook()).commit();
+                prefs.edit().putBoolean("liveLook2", !liveLook()).commit();
             } else if (action.equals("lab")) {
                 openLab();
                 fromSettings = true;
@@ -790,6 +822,7 @@ public class MainActivity extends Activity {
     private int vfBase;                // the roll's exposures when it opened
     private int vfWaiting;             // pictures taken in it since Latent opened: they develop next time
     private int highestOnCard;         // the highest photo number the card listed
+    private int vfHighestAtOpen;       // ... when the viewfinder opened: its pictures are numbered above it
     private volatile boolean filing;   // an original is being removed with Sony's delete: the camera waits
     private boolean s1Held;            // the shutter button is half-pressed now
 
@@ -813,6 +846,7 @@ public class MainActivity extends Activity {
         Stock st = Stock.byId(stocks, current.stock);
         mode = PHOTO;
         vfBase = exposed;
+        vfHighestAtOpen = highestOnCard;
         readBattery();
         devLog("viewfinder: opening (" + current.label() + ", " + exposed + " exposed)");
         vf = new Viewfinder(this, card, liveSurface, worker, st, focusFirst(), highestOnCard, liveLook(), new Viewfinder.Host() {
@@ -822,7 +856,7 @@ public class MainActivity extends Activity {
             }
             public void changed() { screen.invalidate(); }
             public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
-            public void shot(File photo) { vfShot(photo); }
+            public void shot(File photo, String film) { vfShot(photo, film); }
             public void closed(String why) {
                 vf = null;
                 if (relaunchWhenClosed) { relaunch(); return; }   // the camera is back: Latent starts again and develops
@@ -839,24 +873,24 @@ public class MainActivity extends Activity {
     }
 
     /** One picture stored (photo is its file, or null when the catalogue didn't name it). */
-    private void vfShot(final File photo) {
+    private void vfShot(final File photo, final String shotFilm) {
         vfWaiting++;
         exposed++;
-        if (photo != null) {
-            highestOnCard = Math.max(highestOnCard, Roll.number(photo));
-            final Roll r = current;
-            final String film = r != null && r.endless() ? r.stock : null;   // an endless roll: this frame's own film (decision A)
-            Runnable note = new Runnable() {
-                public void run() {
-                    try { Library.recordShot(card, photo); } catch (Exception e) { devLog("viewfinder: " + photo.getName() + " not noted (" + Probe.why(e) + ")"); }
-                    if (film != null) {
-                        r.lookFor(photo, film);
-                        try { r.save(); } catch (Exception e) { devLog("viewfinder: " + photo.getName() + "'s film not noted (" + Probe.why(e) + ")"); }
-                    }
+        final Roll r = current;
+        final String film = r != null && r.endless() ? (shotFilm != null && shotFilm.length() > 0 ? shotFilm : r.stock) : null;   // an endless roll: this frame's own film (decision A)
+        if (photo != null) highestOnCard = Math.max(highestOnCard, Roll.number(photo));
+        final int after = vfHighestAtOpen;
+        Runnable note = new Runnable() {
+            public void run() {
+                if (photo != null) try { Library.recordShot(card, photo); } catch (Exception e) { devLog("viewfinder: " + photo.getName() + " not noted (" + Probe.why(e) + ")"); }
+                if (film != null) {
+                    if (photo != null) r.lookFor(photo, film);
+                    else r.shotFilm(after, film);   // named once the card shows it (after the camera is back)
+                    try { r.save(); } catch (Exception e) { devLog("viewfinder: a picture's film not noted (" + Probe.why(e) + ")"); }
                 }
-            };
-            try { worker.execute(note); } catch (java.util.concurrent.RejectedExecutionException e) { note.run(); }   // Latent closing down
-        }
+            }
+        };
+        try { worker.execute(note); } catch (java.util.concurrent.RejectedExecutionException e) { note.run(); }   // Latent closing down
         if (current != null && !current.endless() && exposed >= current.length && vf != null) {   // the last frame: back to the camera back
             vf.lockRoll();   // the button takes no more pictures
             vf.say("Roll finished");
@@ -1478,8 +1512,22 @@ public class MainActivity extends Activity {
     /** An endless roll's new photos start developing as soon as nothing else needs the camera. */
     private void developWaiting() {
         if (developing != null || shootPending || shootAfterFrame || !ready || !quietAllowed() || endlessWaiting.isEmpty()) return;
+        // an endless roll develops when you're not about to shoot: a half-press right after opening Latent
+        // shoots at once, rather than waiting for a frame in the darkroom (v0.35.0: "finishing up some frames")
+        long idle = SystemClock.uptimeMillis() - Math.max(lastPressAt, readyAt);
+        if (s1Held || (idle < IDLE_BEFORE_DEVELOP_MS && !developNow)) {
+            ui.removeCallbacks(developWhenIdle);
+            ui.postDelayed(developWhenIdle, Math.max(250, IDLE_BEFORE_DEVELOP_MS - idle));
+            return;
+        }
+        developNow = false;
         startDevelop(endlessWaiting.get(0), true);
     }
+
+    static final long IDLE_BEFORE_DEVELOP_MS = 4000;
+    private long lastPressAt;
+    private boolean developNow;   // started again to develop (Relaunch): at once
+    private final Runnable developWhenIdle = new Runnable() { public void run() { developWaiting(); } };
 
     private void endDarkroom() {
         devQuiet = false;
@@ -2008,6 +2056,7 @@ public class MainActivity extends Activity {
         int k = key(keyCode, sc);
         if (k == 0 || (k == K_ENTER && e.getRepeatCount() > 0)) return true;
         if (e.getRepeatCount() == 0) keyAt = SystemClock.uptimeMillis();
+        lastPressAt = SystemClock.uptimeMillis();
         switch (mode) {
             case BACK: backKey(k); break;
             case LOAD: loadKey(k); break;

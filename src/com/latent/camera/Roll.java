@@ -54,6 +54,10 @@ final class Roll {
     List<String> frames = new ArrayList<String>();   // source paths, frozen when developing starts
     List<String> prints = new ArrayList<String>();   // per frame: its developed photo in the camera roll, or ""
     final java.util.Map<Integer, String> looks = new java.util.TreeMap<Integer, String>();   // photo number -> film it was shot in
+    // pictures shot in the viewfinder whose names aren't known yet (the card shows them once the camera is
+    // back): their films, in the order they were taken, after photo number shotsAfter
+    int shotsAfter;
+    List<String> shotFilms = new ArrayList<String>();
 
     private Roll(File dir, int number) { this.dir = dir; this.number = number; }
 
@@ -102,6 +106,9 @@ final class Roll {
         if (f.length() > 0) r.frames = new ArrayList<String>(Arrays.asList(f.split("\\|")));
         String pr = p.getProperty("prints", "");
         if (pr.length() > 0) r.prints = new ArrayList<String>(Arrays.asList(pr.split("\\|", -1)));
+        r.shotsAfter = parseInt(p.getProperty("shotsAfter"), 0);
+        String sf = p.getProperty("shotFilms", "");
+        if (sf.length() > 0) r.shotFilms = new ArrayList<String>(Arrays.asList(sf.split("\\|")));
         for (String e : p.getProperty("looks", "").split("\\|")) {   // 1004706:CUBANNEG|1004707:NATURAL
             int c = e.indexOf(':');
             if (c <= 0 || c == e.length() - 1) continue;
@@ -140,6 +147,12 @@ final class Roll {
         StringBuilder pr = new StringBuilder();
         for (int i = 0; i < prints.size(); i++) { if (i > 0) pr.append('|'); pr.append(prints.get(i)); }
         p.setProperty("prints", pr.toString());
+        if (!shotFilms.isEmpty()) {
+            StringBuilder sf = new StringBuilder();
+            for (String film : shotFilms) { if (sf.length() > 0) sf.append('|'); sf.append(film); }
+            p.setProperty("shotsAfter", String.valueOf(shotsAfter));
+            p.setProperty("shotFilms", sf.toString());
+        }
         if (!looks.isEmpty()) {
             StringBuilder lk = new StringBuilder();
             for (java.util.Map.Entry<Integer, String> e : looks.entrySet()) { if (lk.length() > 0) lk.append('|'); lk.append(e.getKey()).append(':').append(e.getValue()); }
@@ -178,6 +191,33 @@ final class Roll {
     void lookFor(File photo, String film) {
         int n = number(photo);
         if (endless() && n > 0 && film != null && film.length() > 0) looks.put(n, film);
+    }
+
+    /**
+     * A picture just taken in the viewfinder, before its name is known: its film, after photo number
+     * 'highestBefore' (the card's highest when the viewfinder opened). Endless rolls only.
+     */
+    void shotFilm(int highestBefore, String film) {
+        if (!endless() || film == null || film.length() == 0) return;
+        if (shotFilms.isEmpty()) shotsAfter = highestBefore;
+        shotFilms.add(film);
+    }
+
+    /**
+     * Gives the viewfinder's pictures their films, once the card shows them: the photos numbered above
+     * shotsAfter, oldest first, take the films in the order they were shot. Returns true if anything
+     * changed. Nothing shown yet (the camera still open): kept for later.
+     */
+    boolean resolveShots(List<File> photosNewestFirst) {
+        if (shotFilms.isEmpty()) return false;
+        List<Integer> nums = new ArrayList<Integer>();
+        for (File f : photosNewestFirst) { int n = number(f); if (n > shotsAfter && !looks.containsKey(n)) nums.add(n); }   // named ones are known already
+        if (nums.isEmpty()) return false;
+        Collections.sort(nums);
+        for (int i = 0; i < nums.size() && i < shotFilms.size(); i++) looks.put(nums.get(i), shotFilms.get(i));
+        shotFilms.clear();
+        shotsAfter = 0;
+        return true;
     }
 
     /** The highest photo number among these photos (0 if none). */
@@ -235,13 +275,14 @@ final class Roll {
      * Saved if any were added. Returns how many.
      */
     int collect(List<File> photosNewestFirst) throws IOException {
+        boolean named = resolveShots(photosNewestFirst);
         int newest = afterNo;
         for (String f : frames) newest = Math.max(newest, number(new File(f)));
         int added = 0;
         for (File f : exposures(photosNewestFirst)) {
             if (number(f) > newest) { frames.add(f.getPath()); added++; }
         }
-        if (added > 0) save();
+        if (added > 0 || named) save();
         return added;
     }
 

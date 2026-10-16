@@ -53,8 +53,11 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         void changed();
         /** Live view is on: the shutter button works from now. */
         void live();
-        /** A picture was taken: its file (from the catalogue), or null if the catalogue didn't say. */
-        void shot(File photo);
+        /**
+         * A picture was taken: its file (from the catalogue), or null if the catalogue didn't say (the
+         * usual case: the camera lists it once given back), and the film it was taken in.
+         */
+        void shot(File photo, String film);
         /** The camera is given back; why is null when asked to close, else what went wrong. */
         void closed(String why);
     }
@@ -170,8 +173,12 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         setFilm(stock);
     }
 
-    /** The film whose look is on live view. */
+    private String filmId;                                                   // the film on live view now
+    private final java.util.LinkedList<String> shotFilms = new java.util.LinkedList<String>();   // each picture's film, until it's counted
+
+    /** The film whose look is on live view (and the next picture's). */
     void setFilm(Stock stock) {
+        filmId = stock == null ? null : stock.id;
         lut = stock == null ? null : stock.lut.getPath();
         params[FilmCore.HIGHLIGHT] = stock == null ? 0 : stock.highlight;
         params[FilmCore.SHADOW] = stock == null ? 0 : stock.shadow;
@@ -443,10 +450,19 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         host.changed();
     }
 
+    /**
+     * While the camera writes a picture, Latent stays off its processor: no frames asked for, no look
+     * (the camera's own live view shows for the moment). v0.34.1 stored with plain frames running; the
+     * v0.35.0 runs that also ran the look lost theirs.
+     */
+    static final long STORE_QUIET_MS = 3000;
+    private long quietUntil;
+
     private final Runnable poll = new Runnable() {
         public void run() {
             if (closed || sequence == null || sequenceStopped) return;
             long now = SystemClock.uptimeMillis();
+            if (now < quietUntil) { ui.postDelayed(this, 100); return; }
             // with the look off the camera's own picture shows, and frames still come now and then, for the level
             // at most about 8 frames a second (each ask is a call to the camera's own processor); with the
             // look off the camera's own picture shows, and frames still come now and then, for the level
@@ -806,6 +822,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         keepPrint();
         shutterAt = SystemClock.uptimeMillis();
         note("Latent's shutter");
+        quietUntil = shutterAt + STORE_QUIET_MS + SHUTTER_TIMEOUT_MS;   // from the press; set again at the answer
         flushLog();   // if the camera hangs from here, the card already says how far it got
         stopDirect(new Runnable() {
             public void run() {
@@ -849,6 +866,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         }
         if (status == 0) {
             shots++;
+            shotFilms.add(filmId != null ? filmId : "");
+            quietUntil = now + STORE_QUIET_MS;
             flashUntil = now + FLASH_MS;
             if (pendingPrint != null) { if (print != null) print.recycle(); print = pendingPrint; pendingPrint = null; printAt = now; }
             if (shots <= 30) note("shot " + shots + (ours ? ": Latent's shutter " + (now - shutterAt) + " ms" : ": the camera's shutter"));
@@ -856,6 +875,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             ui.removeCallbacks(tick);
             ui.post(tick);
         } else {
+            quietUntil = 0;   // nothing being written
             note("shutter status " + status + (ours ? " after " + (now - shutterAt) + " ms" : " (the camera's)"));
             say(status == 1 ? "The camera cancelled it" : "The camera reported an error");
         }
@@ -900,7 +920,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (now >= watchUntil) {   // the wait is over
             if (stored < shots) {   // taken but never seen: counted anyway, found by number next time
                 note((shots - stored) + " picture(s) not seen in the catalogue");
-                for (; stored < shots; stored++) host.shot(null);
+                for (; stored < shots; stored++) host.shot(null, nextFilm());
             }
             if (pendingPrint != null) { pendingPrint.recycle(); pendingPrint = null; }   // a full press that took nothing
             flushLog();
@@ -914,7 +934,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 final java.util.ArrayList<Probe.Row> found = new java.util.ArrayList<Probe.Row>();
                 String problem = null;
                 try {
-                    flushCatalogue();
+                    // never flushCatalogue() here: v0.35.0 flushed 0.3 s after the shutter, the picture was
+                    // listed at once and never written, and giving the camera back then froze it
                     Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
                     android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
                     // any new entry: a picture just taken is catalogued before it is marked as having its JPEG
@@ -943,7 +964,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                             }
                             File f = dcfFile(r.folder, r.number);
                             if (stored <= 30) note(f.getName() + " in the catalogue " + (SystemClock.uptimeMillis() - storeSince) + " ms after the shutter");
-                            host.shot(f);
+                            host.shot(f, nextFilm());
                         }
                         if (!found.isEmpty()) { flushLog(); host.changed(); }
                         if (stored >= shots && !found.isEmpty() && !release.shooting) watchUntil = Math.min(watchUntil, SystemClock.uptimeMillis() + 1500);
@@ -956,30 +977,13 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     private final Runnable findAgain = new Runnable() { public void run() { findStored(); } };
 
-    private long lastFlushAt;
+    /** The film of the oldest picture not yet counted (taken in this order). */
+    private String nextFilm() { return shotFilms.isEmpty() ? filmId : shotFilms.removeFirst(); }
 
-    /**
-     * Sony's catalogue lists a new picture only once told to look, which Smart Remote does after each
-     * picture (MediaObserverAggregator.invokeFlushingMediaDatabase): loadMedia, Images.waitAndUpdateDatabase,
-     * waitLoadMediaComplete. v0.34.1: the picture listed ~2.2 s after the shutter, 40-55 ms per flush.
-     * Catalogue thread; at most every 1.2 s.
-     */
-    private void flushCatalogue() {
-        long now = SystemClock.uptimeMillis();
-        if (now - lastFlushAt < 1200) return;
-        lastFlushAt = now;
-        try {
-            Class<?> store = Class.forName("com.sony.scalar.provider.AvindexStore");
-            store.getMethod("loadMedia", String.class, int.class).invoke(null, mediaId, 1);
-            Class.forName("com.sony.scalar.provider.AvindexStore$Images").getMethod("waitAndUpdateDatabase", android.content.ContentResolver.class, String.class)
-                    .invoke(null, activity.getContentResolver(), mediaId);
-            store.getMethod("waitLoadMediaComplete", String.class).invoke(null, mediaId);
-        } catch (Throwable e) {
-            if (flushFails++ < 3) note("catalogue flush: " + Probe.why(e));
-        }
-    }
-
-    private int flushFails;
+    // Sony's catalogue lists a new picture only once told to look (AvindexStore.loadMedia, then
+    // Images.waitAndUpdateDatabase and waitLoadMediaComplete, as Smart Remote does once each picture is
+    // written). Never while the camera may still be writing one: v0.35.0 asked 0.3 s after the shutter and
+    // its four pictures were listed but never written; Latent asks only once the camera is given back.
 
     /**
      * Before any picture: the highest photo number in the catalogue, so a picture is known by being
@@ -1040,7 +1044,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     void fill(UiState s) {
         long now = SystemClock.uptimeMillis();
         s.mode = UiState.PHOTO;
-        boolean look = lookOn && frame != null && !sequenceStopped;   // frames stopped (the camera struggling): the camera's own view
+        boolean look = lookOn && frame != null && !sequenceStopped && now >= quietUntil;   // frames stopped, or a picture being written: the camera's own view
         s.liveImage = look ? frame : null;
         s.liveThrough = previewing && !look;   // the camera's own live view shows through
         s.lookLive = look;
@@ -1131,7 +1135,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         flushLog();
         catalogue.shutdown();
         ui.removeCallbacksAndMessages(null);
-        for (; stored < shots; stored++) host.shot(null);   // taken but not yet named: still exposures on the roll
+        for (; stored < shots; stored++) host.shot(null, nextFilm());   // taken but not yet named: still exposures on the roll
         if (frame != null) { frame.recycle(); frame = null; }
         if (print != null) { print.recycle(); print = null; }
         if (pendingPrint != null) { pendingPrint.recycle(); pendingPrint = null; }

@@ -1,6 +1,7 @@
 package com.latent.camera;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.hardware.Camera;
 import android.os.Handler;
@@ -13,37 +14,32 @@ import java.io.FileOutputStream;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.List;
 import java.util.Locale;
 
 /**
- * Can the camera store pictures while it hands Latent live frames? One hypothesis, from Sony's own
- * Smart Remote (SmartRemote.odex, read on a Mac): it streams live view to a phone as these same JPEG
- * frames (CameraSequence's preview sequence, never stopped for a picture) and takes the picture as
- * Latent does (burstableTakePicture), but for every picture taken with the stream running it first
- * sets Auto Review to 0 (NormalCaptureStateEx: "disalbePictureReview") through Sony's
- * AutoPictureReviewControl, which its framework always installs, and puts your time back afterwards.
- * Latent never installed that control, and v0.31.0-0.31.2 lost every picture once frames had started.
+ * Does the camera store pictures while Latent runs the film look on its live frames? Exactly the
+ * viewfinder's way: the frames as Sony's Smart Remote asks for them (320 px), the look on each on
+ * Latent's worker at the viewfinder's pace, Latent's own focus and shutter, and Latent off the
+ * processor while each picture is written (Viewfinder.STORE_QUIET_MS).
  *
- * So: open the camera, Auto Review to 0 (your time kept in prefs and put back at the end, or on the
- * next start if Latent stops on the way), frames on, then two pictures with the frames running, each
- * waited for in Sony's catalogue. Every picture must be stored before the camera goes back; if one
- * isn't, the camera is NOT released (that froze it before) and the screen says so.
+ * The answer comes from the card itself, not from Sony's catalogue: v0.35.0's test was fooled by
+ * catalogue entries a frozen session had left without files, and telling the catalogue to look while
+ * a picture is being written lost that picture. So: two pictures, 12 s for the camera to write them,
+ * the camera given back, Latent restarted (Relaunch), and the new process counts the new files on the
+ * card. Both there: Film look on live view comes on.
  *
  * Kept off every roll (IGNORE.TXT). Log: LATENT/LIVELOOK.TXT, written before every risky step.
  */
 final class LiveLookTest implements SurfaceHolder.Callback {
-    static final String[] STEPS = { "Open the camera", "Live frames", "Picture 1, frames running", "The camera's own log", "Picture 2, frames running",
-            "Camera closed" };
-    static final int S_OPEN = 0, S_FRAMES = 1, S_SHOT1 = 2, S_SYSLOG = 3, S_SHOT2 = 4, S_CLOSED = 5;
-    /** v0.34.0: Auto Review is 0 on this camera already, so it isn't what stopped pictures. Left alone now. */
-    static final boolean REVIEW_OFF = false;
-    static final int S_REVIEW = -1, S_RESTORE = -1;
+    static final String[] STEPS = { "Open the camera", "Live frames and the look", "Picture 1, look running", "Picture 2, look running",
+            "Camera given back", "Latent restarted", "Pictures on the card" };
+    static final int S_OPEN = 0, S_FRAMES = 1, S_SHOT1 = 2, S_SHOT2 = 3, S_BACK = 4, S_RESTART = 5, S_CARD = 6;
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
-    static final int FRAME_W = 320;
     static final long FIRST_FRAME_MS = 15000, FRAMES_BEFORE_MS = 2500, FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000,
-            STORE_MS = 15000, STORE_MORE_MS = 20000;
-    /** Prefs: your Auto Review time while Latent has it at 0 (-1 = nothing to put back). */
-    static final String P_REVIEW = "reviewToRestore";
+            BETWEEN_MS = 8000, WRITE_MS = 12000;
+    /** Prefs across the restart: when it was asked for, the card's highest photo before, pictures taken, the steps so far. */
+    static final String P_AT = "lookTestAt", P_BEFORE = "lookTestBefore", P_SHOTS = "lookTestShots", P_STEPS = "lookTestSteps";
 
     private final Activity activity;
     private final File card;
@@ -54,25 +50,30 @@ final class LiveLookTest implements SurfaceHolder.Callback {
     private final Handler ui = new Handler();
     private final StringBuilder log = new StringBuilder();
     private final long t0 = SystemClock.uptimeMillis();
+    private final int[] status = new int[STEPS.length];
+    private final String[] detail = new String[STEPS.length];
     private Thread.UncaughtExceptionHandler previousHandler;
 
-    private Object cameraEx, sequence, review;
+    private Object cameraEx, sequence;
     private Camera camera;
     private String mediaId;
-    private boolean previewing, closed, held, closeAsked;
-    private int yourReview = -1;
+    private boolean previewing, closed, held;
+    private int highestBefore;
 
-    // frames
+    // frames and the look, as the viewfinder does them (its thread, its priority, its pace)
+    private final String lut;
+    private final int[] params = new int[FilmCore.COUNT];
+    private final java.util.concurrent.ExecutorService looker = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private final int[] px = new int[Viewfinder.FRAME_W * Viewfinder.FRAME_H], info = new int[FilmCore.L_COUNT];
     private Method mFrames, mSize, mRead, mRelease;
-    private long framesAskedAt, firstFrameAt;
-    private int frames, framesAtShot, grabFails;
-    private long lastFrameAt, biggestGap;
+    private long framesAskedAt, firstFrameAt, lastFrameAt, lastLookAt, quietUntil;
+    private int frames, grabFails, looks, lookMsSum, lookFails, levelSure;
+    private volatile boolean looking;
 
     // pictures
-    private int shotNo, highestBefore, highestSeen, stored;
+    private int shotNo, taken;
     private boolean shooting, focusing;
-    private long shutterAt, shutterAnsweredAt;
-    private String storeReport;
+    private long shutterAt, lastShutterAt;
 
     LiveLookTest(Activity activity, File card, SurfaceView surface, SharedPreferences prefs, Stock stock, Probe.Listener out, LiveViewTest.Host host) {
         this.activity = activity; this.card = card; this.surface = surface; this.prefs = prefs; this.out = out; this.host = host;
@@ -82,21 +83,17 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         params[FilmCore.GRAIN_SIZE] = 1;
         params[FilmCore.QUALITY] = 90;
         params[FilmCore.THREADS] = 1;
+        java.util.Arrays.fill(status, -1);
+        java.util.Arrays.fill(detail, "");
     }
 
-    // the film look on each frame, as the viewfinder does it (its thread, its priority, its pace)
-    private final String lut;
-    private final int[] params = new int[FilmCore.COUNT];
-    private final java.util.concurrent.ExecutorService looker = java.util.concurrent.Executors.newSingleThreadExecutor();
-    private final int[] px = new int[Viewfinder.FRAME_W * Viewfinder.FRAME_H], info = new int[FilmCore.L_COUNT];
-    private volatile boolean looking;
-    private long lastLookAt;
-    private int looks, lookMsSum, lookFails, levelSure;
-
-    private void report(int i, int status, String detail) {
-        if (i < 0) { if (status != RUN) note(detail); return; }
-        if (status != RUN) log.append(STEPS[i]).append(": ").append(status == OK ? "ok" : status == FAIL ? "FAILED" : "info").append(" - ").append(detail).append("\r\n");
-        out.step(i, status, detail);
+    private void report(int i, int st, String d) {
+        if (st != RUN) {
+            log.append(STEPS[i]).append(": ").append(st == OK ? "ok" : st == FAIL ? "FAILED" : "info").append(" - ").append(d).append("\r\n");
+            status[i] = st;
+            detail[i] = d;
+        }
+        out.step(i, st, d);
     }
 
     private void note(String line) { log.append("  ").append(SystemClock.uptimeMillis() - t0).append(" ms  ").append(line).append("\r\n"); }
@@ -108,9 +105,13 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         if (flushed >= log.length()) return;
         String add = log.substring(flushed);
         flushed = log.length();
+        append(card, add);
+    }
+
+    private static void append(File card, String text) {
         try {
             FileOutputStream o = new FileOutputStream(new File(Library.home(card), "LIVELOOK.TXT"), true);
-            try { o.write(add.getBytes("UTF-8")); } finally { o.close(); }
+            try { o.write(text.getBytes("UTF-8")); } finally { o.close(); }
         } catch (Exception ignored) {
             // the screen says the same
         }
@@ -119,16 +120,15 @@ final class LiveLookTest implements SurfaceHolder.Callback {
     // ------------------------------------------------------------------------------ open
 
     void start() {
-        log.append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new java.util.Date())).append(" Latent live look test\r\n");
+        log.append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new java.util.Date())).append(" Latent live look test (v2: checked on the card)\r\n");
         previousHandler = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
             public void uncaughtException(Thread t, Throwable e) {
-                try { note("crash: " + Probe.why(e)); flush(); if (!holding()) close(); } catch (Throwable ignored) { }
+                try { note("crash: " + Probe.why(e)); flush(); } catch (Throwable ignored) { }
                 if (previousHandler != null) previousHandler.uncaughtException(t, e);
             }
         });
         highestBefore = Roll.highest(Library.photos(card));
-        highestSeen = highestBefore;
         out.step(S_OPEN, RUN, "opening…");
         Viewfinder.opened = true;   // the image memory is the camera's now, until this process ends
         long t = SystemClock.uptimeMillis();
@@ -147,7 +147,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
             camera = (Camera) cx.getMethod("getNormalCamera").invoke(cameraEx);
         } catch (Throwable e) {
             report(S_OPEN, FAIL, Probe.why(e));
-            finish();
+            finish(false);
             return;
         }
         note("camera open in " + (SystemClock.uptimeMillis() - t) + " ms (media " + mediaId + "); the card's highest photo " + highestBefore);
@@ -173,137 +173,32 @@ final class LiveLookTest implements SurfaceHolder.Callback {
             return;
         }
         report(S_OPEN, OK, "live view on");
-        listen();
-        if (REVIEW_OFF) reviewOff(); else startFrames();
-    }
-
-    public void surfaceChanged(SurfaceHolder h, int format, int w, int hh) { }
-
-    public void surfaceDestroyed(SurfaceHolder h) { if (!closed && !holding()) close(); }
-
-    /** The shutter, the store and the capture's own reports (the Shooting test's set, which saw its picture at once). */
-    private void listen() {
         set("setShutterListener", "com.sony.scalar.hardware.CameraEx$ShutterListener", new InvocationHandler() {
             public Object invoke(Object p, Method m, Object[] a) {
                 if (m.getName().equals("onShutter") && a != null && a.length > 0) shutter((Integer) a[0]);
                 return objectMethod(p, m, a);
             }
         });
-        set("setStoreImageCompleteListener", "com.sony.scalar.hardware.CameraEx$StoreImageCompleteListener", new InvocationHandler() {
-            public Object invoke(Object p, Method m, Object[] a) {
-                if (m.getName().equals("onDone") && a != null && a.length > 1) {
-                    storeReport = field(a[1], "DirectoryName") + "/" + field(a[1], "FileName");
-                    note("store report: status " + a[0] + ", " + storeReport);
-                }
-                return objectMethod(p, m, a);
-            }
-        });
-        for (String iface : new String[] { "com.sony.scalar.hardware.CameraEx$OnCaptureStatusListener", "com.sony.scalar.hardware.CameraEx$CaptureStatusListener" }) {
-            if (set("setCaptureStatusListener", iface, new InvocationHandler() {
-                public Object invoke(Object p, Method m, Object[] a) {
-                    if (m.getName().equals("onStart") || m.getName().equals("onEnd"))
-                        note("capture " + m.getName().substring(2).toLowerCase(Locale.US) + (a != null && a.length > 1 ? " " + java.util.Arrays.toString(a) : ""));
-                    return objectMethod(p, m, a);
-                }
-            })) break;
-        }
-    }
-
-    // ------------------------------------------------------------------------------ Auto Review, as Smart Remote does
-
-    private void reviewOff() {
-        
-        String back = restore(cameraEx, prefs);   // a time left at 0 by a test that stopped on the way
-        if (back != null) note(back);
-        try {
-            Class<?> rc = Class.forName("com.sony.scalar.hardware.CameraEx$AutoPictureReviewControl");
-            review = rc.newInstance();
-            cameraEx.getClass().getMethod("setAutoPictureReviewControl", rc).invoke(cameraEx, review);   // installed first, then asked (better-timelapse: an NPE otherwise)
-            yourReview = (Integer) rc.getMethod("getPictureReviewTime").invoke(review);
-            String times = "?";
-            try { times = java.util.Arrays.toString((int[]) rc.getMethod("getPictureReviewSupportedTimes").invoke(review)); } catch (Throwable ignored) { }
-            note("Auto Review: yours is " + yourReview + " (times offered " + times + ")");
-            if (yourReview == 0) {   // the hypothesis can't explain v0.31's lost pictures: don't risk the frames
-                report(S_REVIEW, FAIL, "it was off already, so it can't be what stopped pictures; no frames started");
-                flush();
-                close();
-                return;
-            }
-            prefs.edit().putInt(P_REVIEW, yourReview).commit();   // put back on the next start if Latent stops on the way
-            note("setting Auto Review to 0");
-            flush();
-            rc.getMethod("setPictureReviewTime", int.class).invoke(review, 0);
-            NeutralSettings.wrote();
-            int now = (Integer) rc.getMethod("getPictureReviewTime").invoke(review);
-            if (now != 0) {
-                report(S_REVIEW, FAIL, "asked for 0, the camera says " + now + "; no frames started");
-                close();
-                return;
-            }
-            report(S_REVIEW, OK, "0 (yours was " + yourReview + "; it goes back at the end)");
-        } catch (Throwable e) {
-            report(S_REVIEW, FAIL, Probe.why(e) + "; no frames started");
-            close();
-            return;
-        }
         startFrames();
     }
 
-    /** Your Auto Review time back, if Latent has it at 0. Safe to call more than once. */
-    private void reviewBack() {
-        if (yourReview <= 0 || review == null) return;
-        try {
-            review.getClass().getMethod("setPictureReviewTime", int.class).invoke(review, yourReview);
-            NeutralSettings.wrote();
-            int now = (Integer) review.getClass().getMethod("getPictureReviewTime").invoke(review);
-            report(S_RESTORE, now == yourReview ? OK : FAIL, now == yourReview ? "back to " + yourReview : "asked for " + yourReview + ", the camera says " + now);
-            if (now == yourReview) prefs.edit().remove(P_REVIEW).commit();
-        } catch (Throwable e) {
-            report(S_RESTORE, FAIL, Probe.why(e) + " (it goes back on the next start)");
-        }
-        yourReview = -1;
-    }
+    public void surfaceChanged(SurfaceHolder h, int format, int w, int hh) { }
 
-    /**
-     * On Latent's start: an Auto Review time left at 0 by a test that stopped on the way. It can only be
-     * set with the camera open; the next camera open puts it back (restore()).
-     */
-    static int pending(SharedPreferences prefs) { return prefs.getInt(P_REVIEW, -1); }
+    public void surfaceDestroyed(SurfaceHolder h) { if (!closed && !held) close(); }
 
-    /**
-     * With the camera open (the viewfinder or a test, before anything else): puts back an Auto Review
-     * time a test left at 0. Returns a line for the log, or null if there was nothing to do.
-     */
-    static String restore(Object cameraEx, SharedPreferences prefs) {
-        int t = pending(prefs);
-        if (t <= 0) return null;
-        try {
-            Class<?> rc = Class.forName("com.sony.scalar.hardware.CameraEx$AutoPictureReviewControl");
-            Object r = rc.newInstance();
-            cameraEx.getClass().getMethod("setAutoPictureReviewControl", rc).invoke(cameraEx, r);
-            rc.getMethod("setPictureReviewTime", int.class).invoke(r, t);
-            NeutralSettings.wrote();
-            prefs.edit().remove(P_REVIEW).commit();
-            return "Auto Review put back to " + t + " (a test had left it at 0)";
-        } catch (Throwable e) {
-            return "Auto Review not put back: " + Probe.why(e);
-        }
-    }
-
-    // ------------------------------------------------------------------------------ frames, as Smart Remote asks for them
+    // ------------------------------------------------------------------------------ frames and the look
 
     private void startFrames() {
         out.step(S_FRAMES, RUN, "asking for frames…");
-        note("starting the live frames (" + FRAME_W + " px)");
+        note("starting the live frames (" + Viewfinder.FRAME_W + " px) and the look");
         flush();
         try {
             Class<?> cs = Class.forName("com.sony.scalar.hardware.CameraSequence");
             sequence = cs.getMethod("open", Class.forName("com.sony.scalar.hardware.CameraEx")).invoke(null, cameraEx);
-            catchTickets(cs);
             Class<?> oc = Class.forName("com.sony.scalar.hardware.CameraSequence$Options");
             Object o = oc.newInstance();
             option(o, "PREVIEW_FRAME_RATE", 30000);
-            option(o, "PREVIEW_FRAME_WIDTH", FRAME_W);
+            option(o, "PREVIEW_FRAME_WIDTH", Viewfinder.FRAME_W);
             option(o, "PREVIEW_FRAME_HEIGHT", 0);
             option(o, "PREVIEW_FRAME_FORMAT", 0x100);
             option(o, "PREVIEW_FRAME_MAX_NUM", 1);
@@ -314,7 +209,6 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         } catch (Throwable e) {
             report(S_FRAMES, FAIL, Probe.why(e));
             stopFrames();
-            reviewBack();
             close();
             return;
         }
@@ -322,90 +216,52 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         ui.post(poll);
     }
 
-    /**
-     * The camera's HAL can hand a capture to the sequence as a RAW "ticket" (libcamera.so:
-     * "CAMERASEQ_EVENT_RAW_CAPTURE(ticket=..)"), and Sony's Java drops it when no shutter-sequence
-     * callback is set: the picture is lost and the ticket never given back ("the ticket is lost!!!").
-     * Not the capture hook (nothing is asked of the camera: no 0x0120): only the Java field is filled,
-     * so a ticket that comes anyway is seen, logged, and stored as it is (Sony's storeImage) rather than lost.
-     */
-    private void catchTickets(Class<?> cs) {
-        try {
-            final Class<?> cb = Class.forName("com.sony.scalar.hardware.CameraSequence$ShutterSequenceCallback");
-            java.lang.reflect.Field f = cs.getDeclaredField("mShutterSeqCallback");
-            f.setAccessible(true);
-            f.set(sequence, Proxy.newProxyInstance(cb.getClassLoader(), new Class<?>[] { cb }, new InvocationHandler() {
-                public Object invoke(Object p, Method m, Object[] a) {
-                    if (m.getName().equals("onShutterSequence") && a != null && a.length > 1) ticket(a[0], a[1]);
-                    return objectMethod(p, m, a);
-                }
-            }));
-            note("listening for RAW tickets (Java field only)");
-        } catch (Throwable e) {
-            note("no RAW ticket listener: " + Probe.why(e));
-        }
-    }
-
-    private int tickets;
-
-    private void ticket(Object raw, Object seq) {
-        tickets++;
-        note("RAW TICKET for picture " + shotNo + " (" + raw + "): storing it as it is");
-        flush();
-        try {
-            Class<?> rd = Class.forName("com.sony.scalar.hardware.CameraSequence$RawData");
-            seq.getClass().getMethod("storeImage", rd, boolean.class).invoke(seq, raw, true);
-            note("RAW ticket stored (storeImage, released)");
-        } catch (Throwable e) {
-            note("RAW ticket store failed: " + Probe.why(e) + "; releasing it");
-            try { raw.getClass().getMethod("release").invoke(raw); } catch (Throwable e2) { note("RAW release: " + Probe.why(e2)); }
-        }
-        flush();
-    }
-
+    /** As the viewfinder's poll: the next frame once the last look is done, nothing while a picture is written. */
     private final Runnable poll = new Runnable() {
         public void run() {
             if (closed || sequence == null) return;
             long now = SystemClock.uptimeMillis();
-            if (grab()) {
-                if (frames == 1) {
-                    firstFrameAt = now;
-                    note("first frame after " + (now - framesAskedAt) + " ms");
-                    report(S_FRAMES, OK, "coming, the first after " + (now - framesAskedAt) + " ms");
-                    flush();
-                    ui.postDelayed(new Runnable() { public void run() { nextShot(); } }, FRAMES_BEFORE_MS);
+            if (now < quietUntil) { ui.postDelayed(this, 100); return; }
+            if (!looking && now - lastLookAt >= Viewfinder.MIN_FRAME_MS) {
+                byte[] f = grab();
+                if (f != null) {
+                    lastLookAt = now;
+                    look(f);
+                    if (frames == 1) {
+                        firstFrameAt = now;
+                        report(S_FRAMES, OK, "the first after " + (now - framesAskedAt) + " ms");
+                        flush();
+                        ui.postDelayed(new Runnable() { public void run() { nextShot(); } }, FRAMES_BEFORE_MS);
+                    }
                 }
-            } else if (frames == 0 && now - framesAskedAt > FIRST_FRAME_MS) {   // no frames: nothing to test, nothing pending
+            }
+            if (frames == 0 && now - framesAskedAt > FIRST_FRAME_MS) {   // no frames: nothing to test, nothing pending
                 report(S_FRAMES, FAIL, "none in " + FIRST_FRAME_MS / 1000 + " s");
                 stopFrames();
-                reviewBack();
                 close();
                 return;
             }
-            ui.postDelayed(this, 60);
+            ui.postDelayed(this, 40);
         }
     };
 
-    private boolean grab() {
+    private byte[] grab() {
         Object[] got = null;
         try {
             got = (Object[]) mFrames.invoke(sequence, 1);
-            if (got == null || got.length == 0 || got[0] == null) return false;
+            if (got == null || got.length == 0 || got[0] == null) return null;
             Object fr = got[0];
             if (mSize == null) { mSize = fr.getClass().getMethod("getSize"); mRead = fr.getClass().getMethod("read", byte[].class); mRelease = fr.getClass().getMethod("release"); }
             int size = (Integer) mSize.invoke(fr);
-            if (size <= 0) return false;
-            final byte[] jpeg = new byte[size];
+            if (size <= 0) return null;
+            byte[] jpeg = new byte[size];
             mRead.invoke(fr, jpeg);
-            long now = SystemClock.uptimeMillis();
-            if (!looking && now - lastLookAt >= Viewfinder.MIN_FRAME_MS) { lastLookAt = now; look(jpeg); }
-            if (lastFrameAt > 0) biggestGap = Math.max(biggestGap, now - lastFrameAt);
-            lastFrameAt = now;
+            lastFrameAt = SystemClock.uptimeMillis();
             frames++;
-            return true;
+            return jpeg;
         } catch (Throwable e) {
             if (grabFails++ < 3) note("frame: " + Probe.why(e));
-            return false;
+            return null;
         } finally {
             if (got != null) for (Object fr : got) if (fr != null) try { (mRelease != null ? mRelease : fr.getClass().getMethod("release")).invoke(fr); } catch (Throwable ignored) { }
         }
@@ -438,17 +294,16 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         try { sequence.getClass().getMethod("release").invoke(sequence); } catch (Throwable e) { note("sequence release: " + Probe.why(e)); }
         sequence = null;
         long span = Math.max(1, lastFrameAt - firstFrameAt);
-        note("frames stopped: " + frames + " in all, the longest gap " + biggestGap + " ms; the look on " + looks + " ("
-                + String.format(Locale.US, "%.1f", looks * 1000.0 / span) + " a second, " + (looks > 0 ? lookMsSum / looks : 0) + " ms each), the level sure on " + levelSure);
+        note("frames stopped: " + frames + " in all; the look on " + looks + " (" + String.format(Locale.US, "%.1f", looks * 1000.0 / span)
+                + " a second over the run, " + (looks > 0 ? lookMsSum / looks : 0) + " ms each), the level sure on " + levelSure);
     }
 
-    // ------------------------------------------------------------------------------ the pictures, with the frames running
+    // ------------------------------------------------------------------------------ the pictures
 
     private int step() { return shotNo == 1 ? S_SHOT1 : S_SHOT2; }
 
     private void nextShot() {
         if (closed) return;
-        if (closeAsked) { endPictures(); return; }
         shotNo++;
         out.step(step(), RUN, "focusing…");
         focusing = true;
@@ -475,20 +330,20 @@ final class LiveLookTest implements SurfaceHolder.Callback {
     private void shoot() {
         if (closed) return;
         out.step(step(), RUN, "shooting…");
-        framesAtShot = frames;
-        storeReport = null;
-        note("picture " + shotNo + ": shutter, " + frames + " frames so far, the frames still running");
-        flush();   // if the camera hangs from here, the card already says how far it got
         shooting = true;
         shutterAt = SystemClock.uptimeMillis();
+        quietUntil = shutterAt + SHUTTER_TIMEOUT_MS + Viewfinder.STORE_QUIET_MS;   // off the processor from the press
+        note("picture " + shotNo + ": shutter, " + frames + " frames and " + looks + " looks so far");
+        flush();   // if the camera hangs from here, the card already says how far it got
         try {
             call("burstableTakePicture");
         } catch (Throwable e) {
             note("burstableTakePicture: " + Probe.why(e));
             safely("cancelTakePicture");
             shooting = false;
+            quietUntil = 0;
             report(step(), FAIL, "the camera wouldn't shoot: " + Probe.why(e));
-            endPictures();
+            afterPicture();
             return;
         }
         ui.postDelayed(new Runnable() {
@@ -498,273 +353,164 @@ final class LiveLookTest implements SurfaceHolder.Callback {
                 note("no shutter answer in " + SHUTTER_TIMEOUT_MS / 1000 + " s");
                 safely("cancelTakePicture");
                 report(step(), FAIL, "no answer from the shutter");
-                waitStored(SystemClock.uptimeMillis(), true);   // something may still be on its way
+                hold("a picture may be on its way with no answer from the shutter");
             }
         }, SHUTTER_TIMEOUT_MS);
     }
 
     /** The shutter's answer: 0 taken, 1 cancelled, 2 error. The capture is always ended (cancelTakePicture). */
-    private void shutter(int status) {
+    private void shutter(int st) {
         if (!shooting) return;
         shooting = false;
-        shutterAnsweredAt = SystemClock.uptimeMillis();
+        long now = SystemClock.uptimeMillis();
         safely("cancelTakePicture");
         try { camera.cancelAutoFocus(); } catch (Throwable ignored) { }
-        note("picture " + shotNo + ": shutter status " + status + " after " + (shutterAnsweredAt - shutterAt) + " ms");
+        note("picture " + shotNo + ": shutter status " + st + " after " + (now - shutterAt) + " ms");
+        if (st == 0) {
+            taken++;
+            lastShutterAt = now;
+            quietUntil = now + Viewfinder.STORE_QUIET_MS;
+            report(step(), OK, "taken; the look paused " + Viewfinder.STORE_QUIET_MS / 1000 + " s while it's written");
+        } else {
+            quietUntil = 0;
+            report(step(), FAIL, st == 1 ? "cancelled by the camera" : "the camera reported an error");
+        }
         flush();
-        if (status != 0) { report(step(), FAIL, status == 1 ? "cancelled by the camera" : "the camera reported an error"); endPictures(); return; }
-        out.step(step(), RUN, "storing…");
-        waitStored(shutterAnsweredAt, false);
+        afterPicture();
     }
 
-    /**
-     * The picture is stored once Sony's catalogue has it (asked on this thread, as the Shooting test did,
-     * which saw its picture 0.2 s after the shutter). The frames keep running meanwhile.
-     */
-    private void waitStored(final long since, final boolean framesStopped) {
+    private void afterPicture() {
         if (closed) return;
-        long waited = SystemClock.uptimeMillis() - since;
-        if (waited >= 1500 && SystemClock.uptimeMillis() - lastFlushAt >= 3000) flushCatalogue();
-        Probe.Row row = newestCatalogued();
-        if (row != null && row.folder * 10000 + row.number > highestSeen) {
-            highestSeen = row.folder * 10000 + row.number;
-            stored++;
-            File f = dcfFile(row.folder, row.number);
-            try { Library.ignore(card, f); } catch (Exception e) { note("ignore: " + Probe.why(e)); }
-            note("picture " + shotNo + ": " + f.getName() + " in the catalogue " + waited + " ms after the shutter's answer" + (tickets > 0 ? " (" + tickets + " RAW ticket(s) so far)" : "")
-                    + (storeReport != null ? "; store report " + storeReport : "; no store report") + "; " + (frames - framesAtShot) + " frames since the shutter");
-            report(step(), OK, f.getName() + " stored " + waited + " ms after the shutter" + (framesStopped ? " (frames stopped by then)" : ", " + (frames - framesAtShot) + " frames since"));
-            flush();
-            if (shotNo == 1) saveSystemLog();
-            if (shotNo < 2 && !framesStopped && !closeAsked) ui.postDelayed(new Runnable() { public void run() { nextShot(); } }, 2000);
-            else endPictures();
-            return;
+        if (shotNo < 2) ui.postDelayed(new Runnable() { public void run() { nextShot(); } }, BETWEEN_MS);
+        else {
+            out.step(S_BACK, RUN, "giving the camera " + WRITE_MS / 1000 + " s to write…");
+            ui.postDelayed(new Runnable() { public void run() { handBack(); } }, WRITE_MS);
         }
-        if (storeReport != null && waited > 4000) {   // the camera says it stored it, the catalogue doesn't list it yet
-            stored++;
-            note("picture " + shotNo + ": the camera reports it stored (" + storeReport + "), not in the catalogue after " + waited + " ms");
-            report(step(), OK, storeReport + " stored (the camera's report; not yet in the catalogue)");
-            storeReport = null;
-            flush();
-            if (shotNo == 1) saveSystemLog();
-            if (shotNo < 2 && !framesStopped && !closeAsked) ui.postDelayed(new Runnable() { public void run() { nextShot(); } }, 2000);
-            else endPictures();
-            return;
-        }
-        if (!framesStopped && waited > STORE_MS) {   // not stored with the frames running: stop them, and give it longer
-            note("picture " + shotNo + ": not in the catalogue in " + STORE_MS / 1000 + " s; stopping the frames and waiting " + STORE_MORE_MS / 1000 + " s more");
-            flush();
-            stopFrames();
-            waitStored(SystemClock.uptimeMillis() - STORE_MS, true);
-            return;
-        }
-        if (framesStopped && waited > STORE_MS + STORE_MORE_MS) {
-            hold("picture " + shotNo + " was never stored");
-            return;
-        }
-        if (waited / 1000 != (waited - 300) / 1000) out.step(step(), RUN, "storing… " + waited / 1000 + " s");
-        ui.postDelayed(new Runnable() { public void run() { waitStored(since, framesStopped); } }, 300);
     }
 
-    /** Every picture asked for is stored: frames off, your Auto Review back, the camera released. */
-    private void endPictures() {
+    /** Every picture has had its time: frames off, the camera back, then Latent restarts to count the files. */
+    private void handBack() {
         if (closed) return;
         stopFrames();
-        if (stored < shotNo && shutterAnsweredAt > 0) {   // a shutter that fired may still be storing
-            hold("a picture may still be storing");
-            return;
-        }
-        reviewBack();
-        if (stored == 2 && stored == shotNo) {   // both stored with the frames and the look running: the viewfinder may use them
-            prefs.edit().putBoolean("liveLook", true).commit();
-            note("both pictures stored with the look running: Film look on live view is on");
-        }
+        note("giving the camera back, " + (SystemClock.uptimeMillis() - lastShutterAt) / 1000 + " s after the last picture");
         flush();
-        ui.postDelayed(new Runnable() { public void run() { close(); } }, 1000);
+        releaseCamera();
+        report(S_BACK, OK, "released, " + taken + " picture(s) taken");
+        flush();
+        if (taken == 0) { finish(false); return; }
+        out.step(S_RESTART, RUN, "restarting…");
+        long at = SystemClock.uptimeMillis();
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < STEPS.length; i++) b.append(status[i]).append('|').append(detail[i].replace('\n', ' ')).append('\n');
+        prefs.edit().putLong(P_AT, at).putInt(P_BEFORE, highestBefore).putInt(P_SHOTS, taken).putString(P_STEPS, b.toString()).commit();
+        finish(true);
+        Intent i = new Intent(activity, Relaunch.class);
+        i.putExtra(Relaunch.EXTRA_PID, android.os.Process.myPid());
+        i.putExtra(Relaunch.EXTRA_AT, at);
+        activity.startActivity(i);
+        activity.overridePendingTransition(0, 0);
+        // MainActivity.onPause ends this process (the camera was opened here)
     }
 
     /**
-     * A picture the camera may still be holding: releasing the camera now froze it (v0.31.1, v0.31.2).
-     * Your Auto Review goes back, the camera stays open, and the screen says what to do.
+     * In the new process: are the pictures on the card? Worker thread. Both there: the film look on live
+     * view comes on. They're kept off every roll either way.
+     */
+    static void checkCard(File card, SharedPreferences prefs, long createdAt, Probe.Listener out) {
+        long at = prefs.getLong(P_AT, 0);
+        int before = prefs.getInt(P_BEFORE, 0), shots = prefs.getInt(P_SHOTS, 0);
+        StringBuilder log = new StringBuilder();
+        String restart = at > 0 ? "back in " + (createdAt - at) + " ms" : "back";
+        out.step(S_RESTART, OK, restart);
+        log.append(STEPS[S_RESTART]).append(": ok - ").append(restart).append("\r\n");
+        out.step(S_CARD, RUN, "looking…");
+        List<File> photos = Library.photos(card);
+        int found = 0;
+        StringBuilder names = new StringBuilder();
+        for (File f : photos) {
+            if (Roll.number(f) <= before) continue;
+            found++;
+            names.append(names.length() > 0 ? ", " : "").append(f.getName()).append(" (").append(f.length() / 1024).append(" KB)");
+            try { Library.ignore(card, f); } catch (Exception ignored) { }
+        }
+        boolean ok = shots > 0 && found >= shots;
+        if (ok) prefs.edit().putBoolean("liveLook2", true).commit();
+        String d = found + " of " + shots + " on the card" + (names.length() > 0 ? ": " + names : "") + (ok ? ". Film look on live view is on" : ". The film look stays off");
+        out.step(S_CARD, ok ? OK : FAIL, d);
+        log.append(STEPS[S_CARD]).append(": ").append(ok ? "ok" : "FAILED").append(" - ").append(d).append("\r\n");
+        prefs.edit().remove(P_AT).remove(P_BEFORE).remove(P_SHOTS).remove(P_STEPS).commit();
+        append(card, log.toString());
+    }
+
+    /** The steps as they were before the restart, into status and detail (for the new process). */
+    static void restoreSteps(SharedPreferences prefs, int[] status, String[] detail) {
+        String[] lines = prefs.getString(P_STEPS, "").split("\n");
+        for (int i = 0; i < lines.length && i < status.length; i++) {
+            int bar = lines[i].indexOf('|');
+            if (bar <= 0) continue;
+            try { status[i] = Integer.parseInt(lines[i].substring(0, bar)); } catch (NumberFormatException ignored) { }
+            detail[i] = lines[i].substring(bar + 1);
+        }
+    }
+
+    /**
+     * No answer from the shutter: a picture may be in the camera, and releasing it then froze it before.
+     * The camera stays open, and the screen says what to do.
      */
     private void hold(String why) {
         held = true;
-        saveSystemLog();
+        stopFrames();
         note("HOLDING the camera: " + why + "; not released (that froze it before)");
-        reviewBack();
-        report(S_CLOSED, FAIL, why + ". The camera is kept open. Turn the camera off; if it won't go off, take the battery out.");
+        report(S_BACK, FAIL, why + ". The camera is kept open. Turn the camera off; if it won't go off, take the battery out.");
         flush();
         host.note("Turn the camera off (battery out if it won't)");
     }
 
-    private boolean holding() { return held; }
-
     // ------------------------------------------------------------------------------ closing
 
-    /** MENU, leaving Latent, or the end: the camera goes back, unless a picture may still be in it. */
+    /** MENU or leaving Latent: the camera goes back, unless a picture may be on its way (then: when it's had its time). */
     void close() {
-        if (closed) return;
-        if (held) { note("close asked while holding: the camera stays open"); flush(); return; }
-        if (shooting || (stored < shotNo && shutterAnsweredAt > 0)) {   // never released with a picture on its way
-            if (closeAsked) return;
-            closeAsked = true;
-            note("close asked with a picture on its way: waiting for it first");
+        if (closed || held) return;
+        if (shooting || (lastShutterAt > 0 && SystemClock.uptimeMillis() - lastShutterAt < WRITE_MS)) {
+            note("close asked with a picture being written: the camera goes back once it's had its time");
             flush();
-            if (!shooting) waitStored(shutterAnsweredAt, sequence == null);
+            ui.removeCallbacksAndMessages(null);
+            ui.postDelayed(new Runnable() { public void run() { if (!closed) { stopFrames(); releaseCamera(); finish(false); } } },
+                    Math.max(500, WRITE_MS - (SystemClock.uptimeMillis() - lastShutterAt)));
             return;
         }
-        closed = true;
-        ui.removeCallbacksAndMessages(null);
         stopFrames();
-        reviewBack();
-        if (cameraEx != null) {
-            try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable ignored) { }
-            set("setShutterListener", null, null);
-            set("setStoreImageCompleteListener", null, null);
-            set("setCaptureStatusListener", null, null);
-            try {
-                Class<?> rc = Class.forName("com.sony.scalar.hardware.CameraEx$AutoPictureReviewControl");
-                cameraEx.getClass().getMethod("setAutoPictureReviewControl", rc).invoke(cameraEx, (Object) null);
-            } catch (Throwable ignored) { }
-            try { if (camera != null && previewing) camera.stopPreview(); } catch (Throwable e) { note("stopPreview: " + Probe.why(e)); }
-            try { if (camera != null) camera.release(); } catch (Throwable e) { note("camera release: " + Probe.why(e)); }
-            try { cameraEx.getClass().getMethod("release").invoke(cameraEx); } catch (Throwable e) { note("release: " + Probe.why(e)); }
-            report(S_CLOSED, OK, "released, " + stored + " of " + shotNo + " picture(s) stored, " + frames + " frames, the look on " + looks
-                    + (stored == 2 ? ". Film look on live view is on" : ""));
-        }
-        finish();
+        releaseCamera();
+        finish(false);
     }
 
-    private void finish() {
-        closed = true;
-        looker.shutdown();
-        try { surface.getHolder().removeCallback(this); } catch (Throwable ignored) { }
+    /** Still holding the camera (or waiting to give it back). */
+    boolean busy() { return !closed; }
+
+    private void releaseCamera() {
+        if (cameraEx == null) return;
+        try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable ignored) { }
+        set("setShutterListener", null, null);
+        try { if (camera != null && previewing) camera.stopPreview(); } catch (Throwable e) { note("stopPreview: " + Probe.why(e)); }
+        try { if (camera != null) camera.release(); } catch (Throwable e) { note("camera release: " + Probe.why(e)); }
+        try { cameraEx.getClass().getMethod("release").invoke(cameraEx); } catch (Throwable e) { note("release: " + Probe.why(e)); }
         cameraEx = null;
         camera = null;
+        previewing = false;
+    }
+
+    private void finish(boolean restarting) {
+        closed = true;
+        ui.removeCallbacksAndMessages(null);
+        looker.shutdown();
+        try { surface.getHolder().removeCallback(this); } catch (Throwable ignored) { }
         host.showLive(false);
         Thread.setDefaultUncaughtExceptionHandler(previousHandler);
         flush();
-        host.finished();
-    }
-
-    private volatile boolean flushing;
-    private long lastFlushAt;
-
-    /**
-     * Sony's catalogue may not list a stored picture until it is told to look (Smart Remote's
-     * MediaObserverAggregator.invokeFlushingMediaDatabase, after each picture): loadMedia, then
-     * Images.waitAndUpdateDatabase, then waitLoadMediaComplete. They wait, so on a thread of their own.
-     */
-    private void flushCatalogue() {
-        if (flushing || mediaId == null) return;
-        flushing = true;
-        lastFlushAt = SystemClock.uptimeMillis();
-        final long t = lastFlushAt;
-        new Thread(new Runnable() {
-            public void run() {
-                String r;
-                try {
-                    Class<?> store = Class.forName("com.sony.scalar.provider.AvindexStore");
-                    Object a = store.getMethod("loadMedia", String.class, int.class).invoke(null, mediaId, 1);
-                    Object b = Class.forName("com.sony.scalar.provider.AvindexStore$Images").getMethod("waitAndUpdateDatabase", android.content.ContentResolver.class, String.class)
-                            .invoke(null, activity.getContentResolver(), mediaId);
-                    Object c = store.getMethod("waitLoadMediaComplete", String.class).invoke(null, mediaId);
-                    r = "catalogue flushed in " + (SystemClock.uptimeMillis() - t) + " ms (" + a + ", " + b + ", " + c + ")";
-                } catch (Throwable e) {
-                    r = "catalogue flush: " + Probe.why(e);
-                }
-                final String line = r;
-                ui.post(new Runnable() { public void run() { flushing = false; if (flushNotes++ < 6) note(line); } });
-            }
-        }, "catalogue-flush").start();
-    }
-
-    private int flushNotes;
-    private boolean logSaved;
-
-    /**
-     * The system log as it stands (the camera service's and Sony's libraries' own lines: the SDCom
-     * messages and their answers, any RAW tickets), to LATENT/LOOKLOG.TXT. Read from /dev/log/main on
-     * a thread of its own, up to 3 s; never touches the camera.
-     */
-    private void saveSystemLog() {
-        if (logSaved) return;
-        logSaved = true;
-        out.step(S_SYSLOG, RUN, "saving…");
-        final StringBuilder text = new StringBuilder();
-        final int[] entries = { 0 };
-        Thread t = new Thread(new Runnable() {
-            public void run() {
-                java.io.FileInputStream in = null;
-                try {
-                    in = new java.io.FileInputStream("/dev/log/main");
-                    byte[] b = new byte[5 * 1024 + 20];
-                    for (int n; (n = in.read(b)) > 20; ) {
-                        int len = (b[0] & 0xff) | (b[1] & 0xff) << 8;
-                        int pid = le(b, 4), sec = le(b, 12);
-                        int end = Math.min(n, 20 + len), p = 20;
-                        int prio = b[p++];
-                        int tagEnd = p;
-                        while (tagEnd < end && b[tagEnd] != 0) tagEnd++;
-                        String tag = new String(b, p, tagEnd - p, "UTF-8");
-                        int msgEnd = tagEnd + 1;
-                        while (msgEnd < end && b[msgEnd] != 0) msgEnd++;
-                        String msg = msgEnd > tagEnd + 1 ? new String(b, tagEnd + 1, msgEnd - tagEnd - 1, "UTF-8") : "";
-                        synchronized (text) {
-                            text.append(sec).append(' ').append(pid).append(' ').append("VDIWEF".charAt(Math.max(0, Math.min(5, prio - 2))))
-                                    .append('/').append(tag).append(": ").append(msg.trim()).append("\r\n");
-                            entries[0]++;
-                        }
-                    }
-                } catch (Throwable e) {
-                    synchronized (text) { text.append("stopped: ").append(Probe.why(e)).append("\r\n"); }
-                } finally {
-                    try { if (in != null) in.close(); } catch (Throwable ignored) { }
-                }
-            }
-        }, "log-reader");
-        t.start();
-        try { t.join(3000); } catch (InterruptedException ignored) { }   // the device blocks once it has given all it holds
-        synchronized (text) {
-            try {
-                FileOutputStream o = new FileOutputStream(new File(Library.home(card), "LOOKLOG.TXT"));
-                try { o.write(text.toString().getBytes("UTF-8")); } finally { o.close(); }
-                report(S_SYSLOG, OK, entries[0] + " lines in LATENT/LOOKLOG.TXT" + (tickets > 0 ? "; " + tickets + " RAW ticket(s)" : ""));
-            } catch (Exception e) {
-                report(S_SYSLOG, FAIL, Probe.why(e));
-            }
-        }
-        flush();
-    }
-
-    private static int le(byte[] b, int i) {
-        return (b[i] & 0xff) | (b[i + 1] & 0xff) << 8 | (b[i + 2] & 0xff) << 16 | (b[i + 3] & 0xff) << 24;
+        if (!restarting) host.finished();
     }
 
     // ------------------------------------------------------------------------------ helpers
-
-    private Probe.Row newestCatalogued() {
-        if (mediaId == null) return null;
-        try {
-            Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
-            android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
-            Probe.Row best = null;
-            for (Probe.Row r : Probe.query(activity.getContentResolver(), uri)) {
-                int n = r.folder * 10000 + r.number;
-                if (n > highestBefore && (best == null || n > best.folder * 10000 + best.number)) best = r;
-            }
-            return best;
-        } catch (Throwable e) {
-            return null;
-        }
-    }
-
-    private File dcfFile(int folder, int number) {
-        File dcim = new File(card, "DCIM"), dir = new File(dcim, folder + "MSDCF");
-        File[] dirs = dcim.listFiles();
-        if (dirs != null) for (File d : dirs) if (d.getName().startsWith(String.valueOf(folder))) dir = d;
-        return new File(dir, String.format(Locale.US, "DSC%05d.JPG", number % 100000));
-    }
 
     private boolean set(String name, String iface, InvocationHandler h) {
         if (cameraEx == null) return false;
@@ -805,10 +551,6 @@ final class LiveLookTest implements SurfaceHolder.Callback {
             if (m.getName().equals("setOption") && t.length == 2 && t[0] == String.class && t[1] == int.class) { m.invoke(options, key, value); return; }
         }
         throw new NoSuchMethodException("setOption(String, int)");
-    }
-
-    private static String field(Object o, String name) {
-        try { return String.valueOf(o.getClass().getField(name).get(o)); } catch (Throwable e) { return "?"; }
     }
 
     private static Object objectMethod(Object proxy, Method m, Object[] a) {
