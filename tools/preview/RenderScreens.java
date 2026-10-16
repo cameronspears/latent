@@ -245,9 +245,9 @@ public class RenderScreens {
         s.probePlan = Ui.DEVTEST_PLAN; s.probeFooter = Ui.DEVTEST_FOOTER;
         render(s, fonts, out, "17b-develop-intro");
         s.probeStage = 2;
-        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
-        s.probeDetail = new String[] { "6000x4000, canvas 6080 -> 6000", "verified up to 4096 KB per transfer", "read 24 MB/s, write 42 MB/s at 4 MB",
-                "4380 ms", "4120 ms, -260 ms", "4510 ms, +130 ms", "every develop identical, source untouched", "4 MB blocks, 260 ms faster a photo" };
+        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
+        s.probeDetail = new String[] { "6000x4000, canvas 6080 -> 6000", "verified up to 2048 KB per transfer", "6 identical, 830 -> 90 ms each",
+                "3750 ms, setup 900", "2950 ms, setup 160, -800 ms", "every develop identical, source untouched", "reads film files the fast way, 800 ms faster a new film" };
         render(s, fonts, out, "17c-develop-results");
 
         s = state();

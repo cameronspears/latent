@@ -26,7 +26,8 @@
 #define FL_TIME_WAIT   7   /* block develop: ms this thread waited for the helpers after its share */
 #define FL_TIME_ROWS   8   /* block develop: rows this thread looked itself (the rest: helpers)    */
 #define FL_TIME_HCPU   9   /* block develop: CPU ms of the helpers together                        */
-#define FL_TIME_COUNT  10
+#define FL_TIME_SETUP  10  /* block develop: ms before the first block (look, grain, tables, threads) */
+#define FL_TIME_COUNT  11
 
 typedef void (*fl_progress_fn)(void *ctx, int percent);
 
@@ -137,6 +138,13 @@ typedef int (*fl_block_put)(void *ctx, int y, int n, int buf);
 /* The look a block at a time; params[FL_PARAM_THREADS] 1..3 = this core plus helpers on cores 1 and 2. */
 int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_block_get get, fl_block_put put, void *ctx,
                       fl_progress_fn progress, void *pctx, char *err, int errlen);
+/* .cube rows read by Latent's own exact decimal reader (1) or sscanf (0, the default). */
+void fl_set_fast_cube(int on);
+/* The cached LUT forgotten: the next look reads its file again. */
+void fl_forget_lut(void);
+/* Reads path both ways: ms[0] ms with sscanf, ms[1] ms with the fast reader, ms[2] rows the fast reader took,
+ * ms[3] rows it left to sscanf. 0 = identical tables and identical floats in every row it took, 1 = not, -1 = error. */
+int fl_cube_check(const char *path, int *ms, char *err, int errlen);
 /* Threads the last fl_develop_blocks used; note gets why a helper didn't join, if one didn't. */
 int fl_last_threads(char *note, int len);
 

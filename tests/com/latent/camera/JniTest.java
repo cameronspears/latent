@@ -27,6 +27,17 @@ public class JniTest {
         rc = FilmCore.preview(in, null, p, FilmCore.PREVIEW_CROP, px, 432, 288, size);
         check(rc == 0 && size[0] == 432 && size[1] == 288, "crop preview without LUT");
 
+        // film files read Latent's own way (v0.39.0): the same floats in every row, and the same developed file
+        int[] cms = new int[4];
+        check(FilmCore.cubeCheck(lut, cms) == 0 && cms[2] > 30000 && cms[3] == 0, "fast film read matches sscanf row for row (" + cms[0] + " -> " + cms[1] + " ms) " + FilmCore.lastError());
+        check(FilmCore.cubeCheck(lut + ".missing", cms) < 0, "fast film read reports a missing file");
+        FilmCore.forgetLut();
+        FilmCore.setFastCube(true);
+        rc = FilmCore.process(in, outDir + "/FLF04491.JPG", lut, null, p, null);
+        FilmCore.setFastCube(false);
+        FilmCore.forgetLut();
+        check(rc == 0 && java.util.Arrays.equals(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(outDir, "FLA04491.JPG")),
+                java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(outDir, "FLF04491.JPG"))), "developed with the fast film read: the same file, byte for byte");
         rc = FilmCore.process(in, outDir + "/FLB04491.JPG", outDir + "/MISSING.CUB", null, p, null);
         check(rc != 0 && FilmCore.lastError().contains("cannot open look"), "missing LUT reported: " + FilmCore.lastError());
         rc = FilmCore.preview(in, lut, p, 0, new int[10], 432, 288, size);

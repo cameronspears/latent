@@ -1255,6 +1255,7 @@ public class MainActivity extends Activity {
             public void run() {
                 // developing into the camera roll needs the catalogue and a verified memory path
                 FilmCore.setVariant(prefs.getInt("lookVariant", 0));   // the inner loop the speed test chose
+                FilmCore.setFastCube(prefs.getBoolean(DevelopTest.P_FAST_CUBE, false));   // film files read Latent's way, once the Develop test passed it
                 StringBuilder hl = new StringBuilder();
                 HardwareDevelop h = new HardwareDevelop(MainActivity.this, card, hl, null);
                 try {
@@ -1343,7 +1344,9 @@ public class MainActivity extends Activity {
                     try {
                         int[] hp = p.clone();
                         hp[FilmCore.THREADS] = developCores();   // the look's threads (the software fallback keeps its own)
+                        final long draws0 = drawCount, drawMs0 = drawMs;
                         HardwareDevelop.Print print = h.develop(src, lut, hp, progress);
+                        final String draws = " setup=" + h.look[FilmCore.T_SETUP] + " draws=" + (drawCount - draws0) + "/" + (drawMs - drawMs0) + "ms";
                         made = print.file;
                         r.setPrint(frame, print.file);
                         try { r.save(); } catch (Exception e) { devLog("roll not saved after " + print.file.getName() + ": " + Probe.why(e)); }
@@ -1357,7 +1360,8 @@ public class MainActivity extends Activity {
                                 + " write " + h.look[FilmCore.T_WRITE] + ") " + (HardwareDevelop.extraFine() ? "xfine" : "fine")
                                 + " loop=" + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, prefs.getInt("lookVariant", 0)))]
                                 + " rows=" + (SonyMemory.lastDirect() ? "direct" : "gathered") + " block=" + HardwareDevelop.block() / 1024 + "K"
-                                + " threads=" + h.look[FilmCore.T_THREADS] + (FilmCore.helperNote().length() > 0 ? " (" + FilmCore.helperNote() + ")" : ""), System.currentTimeMillis() - t0);
+                                + " threads=" + h.look[FilmCore.T_THREADS] + (FilmCore.helperNote().length() > 0 ? " (" + FilmCore.helperNote() + ")" : "")
+                                + draws + " cube=" + (prefs.getBoolean(DevelopTest.P_FAST_CUBE, false) ? "fast" : "sscanf"), System.currentTimeMillis() - t0);
                     } catch (Throwable e) {
                         hw = null;
                         devLog(src.getName() + ": camera roll develop failed (" + Probe.why(e) + "); developing in software");
@@ -1910,6 +1914,9 @@ public class MainActivity extends Activity {
     }
 
     /** Called after each frame is drawn. */
+    /** Screen redraws so far and the ms they took (the UI thread shares core 3 with a develop's reads and writes). */
+    private volatile long drawCount, drawMs;
+
     private void drawn() {
         long now = SystemClock.uptimeMillis();
         if (firstFrameAt == 0) firstFrameAt = now;
@@ -2380,6 +2387,8 @@ public class MainActivity extends Activity {
             if (mode == PHOTO && vf != null) vf.layer(s);   // the type over the picture comes in the frames themselves
             Ui.draw(gfx, s);
             c.restore();
+            drawCount++;
+            drawMs += SystemClock.uptimeMillis() - t;
             drawn();
             if (mode == PHOTO && vf != null) vf.drew(SystemClock.uptimeMillis() - t, gfx.takeExactMs());
         }

@@ -282,6 +282,29 @@ JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_setVariant(JNIEnv *env, j
     fl_set_variant(v);
 }
 
+JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_setFastCube(JNIEnv *env, jclass cls, jboolean on) {
+    (void)env; (void)cls;
+    fl_set_fast_cube(on == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_forgetLut(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    fl_forget_lut();
+}
+
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_cubeCheck(JNIEnv *env, jclass cls, jstring jpath, jintArray jms) {
+    int ms[4], rc;
+    const char *path;
+    (void)cls;
+    g_err[0] = 0;
+    if (!jpath || !jms || (*env)->GetArrayLength(env, jms) < 4) { strcpy(g_err, "bad arguments"); return -1; }
+    path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    rc = fl_cube_check(path, ms, g_err, sizeof g_err);
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    (*env)->SetIntArrayRegion(env, jms, 0, 4, (const jint *)ms);
+    return rc;
+}
+
 JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_cores(JNIEnv *env, jclass cls) {
     static char report[1024];
     (void)cls;
