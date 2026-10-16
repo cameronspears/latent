@@ -1297,15 +1297,44 @@ public class MainActivity extends Activity {
         return "Almost done";
     }
 
+    /**
+     * The darkroom's view of the roll, worked out once per frame in developNext: each redraw used to ask the
+     * card about every frame of the roll (developedCount, the strip, the tray's source), ~400 ms a draw on
+     * the UI thread, which shares core 3 with the develop's reads and writes (v0.39.1: 5.3-5.9 s of drawing
+     * in each ~8 s frame).
+     */
+    private volatile File[] devView = new File[0];   // per frame: its developed file, or null
+    private volatile Roll devViewOf;
+    private volatile File devSource;                // the photo of the frame in the tray
+
+    /** Progress redraws during a develop: at most one per DEV_REDRAW_MS. */
+    private static final long DEV_REDRAW_MS = 250;
+    private long devDrawnAt;
+    private boolean devRedrawPending;
+    private final Runnable devRedraw = new Runnable() {
+        public void run() { devRedrawPending = false; devDrawnAt = SystemClock.uptimeMillis(); screen.invalidate(); }
+    };
+
+    private void redrawSoon() {
+        if (devRedrawPending) return;
+        devRedrawPending = true;
+        ui.postDelayed(devRedraw, Math.max(0, devDrawnAt + DEV_REDRAW_MS - SystemClock.uptimeMillis()));
+    }
+
     private void developNext() {
         final Roll r = developing;
+        File[] view = new File[r.frames.size()];   // the roll asked about once per frame, for the screen too
+        for (int i = 0; i < view.length; i++) view[i] = r.developed(i);
+        devView = view;
+        devViewOf = r;
         if (devQuiet && !quietAllowed()) paused = true;
         if (paused) { stopDevelop(devQuiet ? null : "Paused. Press the centre button to carry on."); return; }
         int next = -1;
-        for (int i = 0; i < r.frames.size() && next < 0; i++) if (!failed.contains(i) && r.developed(i) == null) next = i;
+        for (int i = 0; i < view.length && next < 0; i++) if (!failed.contains(i) && view[i] == null) next = i;
         if (next < 0) { finishDevelop(); return; }   // the last originals are filed in the background (refresh)
         final int frame = next;
         final File src = r.source(frame), out = r.output(frame), prv = r.preview(out);
+        devSource = src;
         final String film = r.stockFor(frame);   // on an endless roll, the film this frame was shot in
         final Stock stock = Stock.byId(stocks, film);
         devFrame = frame;
@@ -1329,7 +1358,7 @@ public class MainActivity extends Activity {
                 }
                 FilmCore.Progress progress = new FilmCore.Progress() {
                     public void onProgress(final int pct) {
-                        ui.post(new Runnable() { public void run() { devPct = pct; screen.invalidate(); } });
+                        ui.post(new Runnable() { public void run() { devPct = pct; redrawSoon(); } });
                     }
                 };
                 File made = null;
@@ -1344,9 +1373,10 @@ public class MainActivity extends Activity {
                     try {
                         int[] hp = p.clone();
                         hp[FilmCore.THREADS] = developCores();   // the look's threads (the software fallback keeps its own)
-                        final long draws0 = drawCount, drawMs0 = drawMs;
+                        final long draws0 = drawCount, drawMs0 = drawMs, stateMs0 = drawStateMs;
                         HardwareDevelop.Print print = h.develop(src, lut, hp, progress);
-                        final String draws = " setup=" + h.look[FilmCore.T_SETUP] + " draws=" + (drawCount - draws0) + "/" + (drawMs - drawMs0) + "ms";
+                        final String draws = " setup=" + h.look[FilmCore.T_SETUP] + " draws=" + (drawCount - draws0) + "/" + (drawMs - drawMs0) + "ms"
+                                + " (state " + (drawStateMs - stateMs0) + "ms)";
                         made = print.file;
                         r.setPrint(frame, print.file);
                         try { r.save(); } catch (Exception e) { devLog("roll not saved after " + print.file.getName() + ": " + Probe.why(e)); }
@@ -1915,7 +1945,7 @@ public class MainActivity extends Activity {
 
     /** Called after each frame is drawn. */
     /** Screen redraws so far and the ms they took (the UI thread shares core 3 with a develop's reads and writes). */
-    private volatile long drawCount, drawMs;
+    private volatile long drawCount, drawMs, drawStateMs;   // drawStateMs: of drawMs, working out what to draw (state())
 
     private void drawn() {
         long now = SystemClock.uptimeMillis();
@@ -2285,20 +2315,23 @@ public class MainActivity extends Activity {
                 s.film = st == null ? null : film(st);
                 s.devFrame = devFrame;
                 s.devTotal = r.frames.size();
-                s.devDone = r.developedCount();
+                File[] dv = devView, view = devViewOf == r && dv.length == r.frames.size() ? dv : null;   // the card asked once per frame
+                if (view == null) s.devDone = r.developedCount();
+                else { int n = 0; for (File d : view) if (d != null) n++; s.devDone = n; }
                 s.devFramePct = devPct / 100f;
                 long per = msPerFrame();
                 // frames already developed, plus how far the one in hand is (counted once: when it has just
                 // finished it is both "developed" and "at 100%" until the next frame starts)
-                boolean inHandDone = devFrame < s.devTotal && r.developed(devFrame) != null;
+                boolean inHandDone = devFrame < s.devTotal && (view != null ? view[devFrame] : r.developed(devFrame)) != null;
                 float done = Math.min(s.devDone - (inHandDone ? 1 : 0) + (inHandDone ? 1f : s.devFramePct), s.devTotal);
                 progressShown = Math.max(progressShown, done / Math.max(1, s.devTotal));   // never goes backwards
                 s.devProgress = progressShown;
                 s.paused = paused;
                 s.devLeft = timeLeft((long) ((s.devTotal - done) * per));
-                s.devPrint = devFrame < r.frames.size() ? thumb(r.source(devFrame)) : null;
+                File tray = devSource;
+                s.devPrint = devFrame < r.frames.size() ? thumb(view != null && tray != null ? tray : r.source(devFrame)) : null;
                 for (int i = 0; i < s.devTotal; i++) {
-                    File d = r.developed(i);
+                    File d = view != null ? view[i] : r.developed(i);
                     s.devStrip.add(d != null ? thumb(d) : null);
                 }
                 break;
@@ -2383,7 +2416,9 @@ public class MainActivity extends Activity {
             c.save();
             c.scale(getWidth() / logicalWidth, getHeight() / 480f);
             gfx.begin(c);
+            long ts = SystemClock.uptimeMillis();
             UiState s = state();
+            drawStateMs += SystemClock.uptimeMillis() - ts;
             if (mode == PHOTO && vf != null) vf.layer(s);   // the type over the picture comes in the frames themselves
             Ui.draw(gfx, s);
             c.restore();
