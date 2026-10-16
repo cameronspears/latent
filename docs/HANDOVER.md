@@ -1,6 +1,7 @@
 # Latent: notes for the next session
 
-Written 2026-10-16 at **v0.26.5** (commit `f6c7325`), the version installed on the camera.
+Written 2026-10-16 at **v0.30.1**. The camera has **v0.30.0** installed: its Shooting test loads a
+memory map and then can't open the camera, so install v0.30.1 next (it switches that off).
 `README.md` is the user guide and explains the develop pipeline. This file is the working context.
 
 ## The project in one paragraph
@@ -24,6 +25,10 @@ per screen. They like the current designs.
   risks, then build. The user doesn't want the camera harmed.
 - `latent.keystore` signs every build. It's gitignored and must be kept, or new builds won't install
   over old ones.
+- In a git worktree, `latent.keystore` and `tools/pmca/` are missing (both gitignored). Link the key
+  from the main checkout first (`ln -s /Users/cam/Projects/latent/latent.keystore latent.keystore`),
+  or `./build.sh` makes a new key and the APK won't install. Run the installer by its full path,
+  `/Users/cam/Projects/latent/tools/pmca/pmca-console-v0.18-osx`, from the worktree.
 
 ## Build and test
 
@@ -80,8 +85,11 @@ per screen. They like the current designs.
   app closes. Photos shot inside Latent can only develop on the next open.
 - **No tilt sensor:** the motion sensors give no readings on this body, so a level has to come from
   the picture (a horizon from live frames).
-- **In-camera capture processing:** this isn't available to Latent. It's a closed topic; don't
-  revisit it.
+- **In-camera capture processing:** this isn't available to Latent. It was investigated to the end
+  in v0.25.0–v0.30.0; `docs/CALLBACK-FINDINGS.md` has the evidence. The hook (`0x0120`) needs a memory
+  map loaded first (`MemoryMapConfig.loadExtraMap`), and the only map this body ships (Portrait
+  Lighting's) stops the camera hardware from opening. The experiment is still in `ShootingTest`
+  behind `CAPTURE_HOOK = false`. It's a closed topic; don't revisit it.
 
 ## Next: the Latent viewfinder (the user's choice)
 
@@ -97,9 +105,10 @@ Remaining work:
    - a "focus first" option;
    - the focus areas drawn on screen.
 4. Develop viewfinder shots the next time Latent opens, reusing the ∞-roll path.
-5. Tidy `ShootingTest`: keep only the focus, shot and live-frame checks.
+5. Tidy `ShootingTest`: keep only the focus, shot and live-frame checks. The capture-hook code
+   (`CAPTURE_HOOK`, the memory map, `SEQUENCE_LIVE`) can go then.
 
 ## Card housekeeping
 
-`LATENT/FW`, `LOGCAT.TXT`, `DARKPROC.TXT` and `LIVEFRM.JPG` are diagnostic leftovers, and the user can
-delete them. Roll 13 (Tri-X, 12 exposures) is loaded.
+`LATENT/FW` (with `FW/M0001.BIN` and `FW/MEMMAP.TXT`, the copied memory map), `LOGCAT.TXT`,
+`DARKPROC.TXT` and `LIVEFRM.JPG` are diagnostic leftovers, and the user can delete them. Roll 13 (Tri-X, 12 exposures) is loaded.
