@@ -191,7 +191,6 @@ final class ShootingTest implements SurfaceHolder.Callback {
             return;
         }
         report(S_OPEN, OK, "opened in " + (SystemClock.uptimeMillis() - t) + " ms");
-        sequenced = hookCapture();   // before live view, as Sony's apps prepare their capture sequence
         step(S_LIVE, RUN, "starting…");
         host.showLive(true);
         SurfaceHolder h = surface.getHolder();
@@ -214,6 +213,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             return;
         }
         report(S_LIVE, OK, "on screen");
+        hookAfterLiveView(false);
         listen();
         focusOptions();
         level();
@@ -586,7 +586,21 @@ final class ShootingTest implements SurfaceHolder.Callback {
      * shutter after each capture until we say so. Returns false (and the camera stores as usual) if
      * this camera won't have it.
      */
-    private boolean hookCapture() {
+    /** The ways tried, in order: Sony's full set; the map alone; the map with the counts. */
+    static final String[] HOOK_VARIANTS = { "counts, release lock and map", "map only", "counts and map" };
+
+    /**
+     * v0.26.4 read the camera's answer in the system log: message 0x120 (the hook) refused with
+     * "RESULT ERROR(2)" by the main processor, set before live view. Now tried with live view
+     * running, in each variant, and once more a second later. Stops at the first the camera takes.
+     */
+    private void hookAfterLiveView(final boolean again) {
+        for (int v = 0; v < HOOK_VARIANTS.length && !sequenced; v++) sequenced = hookCapture(v, again ? "live view 1 s on" : "live view on");
+        if (!sequenced && !again) { ui.postDelayed(new Runnable() { public void run() { if (!closed) hookAfterLiveView(true); } }, 1000); return; }
+        if (!sequenced) saveSystemLog();   // the camera's answers, all of them
+    }
+
+    private boolean hookCapture(int variant, String when) {
         try {
             Class<?> cs = Class.forName("com.sony.scalar.hardware.CameraSequence");
             Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
@@ -594,9 +608,11 @@ final class ShootingTest implements SurfaceHolder.Callback {
             Class<?> cb = Class.forName("com.sony.scalar.hardware.CameraSequence$ShutterSequenceCallback");
             sequence2 = cs.getMethod("open", cx).invoke(null, cameraEx);
             Object o = oc.newInstance();
-            oc.getMethod("setOption", String.class, int.class).invoke(o, oc.getField("EXPOSURE_COUNT").get(null), 1);
-            oc.getMethod("setOption", String.class, int.class).invoke(o, oc.getField("RECORD_COUNT").get(null), 1);
-            oc.getMethod("setOption", String.class, boolean.class).invoke(o, oc.getField("AUTO_RELEASE_LOCK_ENABLED").get(null), true);
+            if (variant != 1) {
+                oc.getMethod("setOption", String.class, int.class).invoke(o, oc.getField("EXPOSURE_COUNT").get(null), 1);
+                oc.getMethod("setOption", String.class, int.class).invoke(o, oc.getField("RECORD_COUNT").get(null), 1);
+            }
+            if (variant == 0) oc.getMethod("setOption", String.class, boolean.class).invoke(o, oc.getField("AUTO_RELEASE_LOCK_ENABLED").get(null), true);
             Object callback = Proxy.newProxyInstance(cb.getClassLoader(), new Class<?>[] { cb }, new InvocationHandler() {
                 public Object invoke(Object p, Method m, Object[] a) {
                     if (m.getName().equals("onShutterSequence") && a != null && a.length > 0) onCapture(a[0]);
@@ -610,17 +626,18 @@ final class ShootingTest implements SurfaceHolder.Callback {
             oc.getMethod("setOption", String.class, String.class).invoke(o, "MEMORY_MAP_FILE", map);
             Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("setAllocationPolicy", int.class).invoke(null, 1);
             policyChanged = true;
-            note("hooking with " + map + " under allocation policy 1");
+            note("hooking (" + when + ", " + HOOK_VARIANTS[variant] + ") with " + map + " under allocation policy 1");
             flushLog();   // if the camera hangs here, the card already says how far it got
             cs.getMethod("setShutterSequenceCallback", cb, oc).invoke(sequence2, callback, o);
-            cs.getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
-            locked = true;   // from the shutter until unlockShutter
-            note("capture hook set, with the firmware map");
+            if (variant == 0) {
+                cs.getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
+                locked = true;   // from the shutter until unlockShutter
+            }
+            note("capture hook SET (" + when + ", " + HOOK_VARIANTS[variant] + ")");
             flushLog();
             return true;
         } catch (Throwable e) {
-            note("capture hook: " + Probe.why(e) + "; the camera stores as usual");
-            saveSystemLog();   // the camera service's own words about the refusal, if it gives any
+            note("capture hook (" + when + ", " + HOOK_VARIANTS[variant] + "): " + Probe.why(e));
             releaseSequence();
             return false;
         }
