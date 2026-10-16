@@ -674,7 +674,7 @@ final class Ui {
     static final String[] SHOOT_PLAN = {
             "Reads the focus options the camera offers (modes, areas, faces) and listens to its motion sensors for two seconds, to see if a level is possible. Only reads.",
             "Opens the camera with live view, then focuses by itself. If it can't lock, as in a dark room, it tries again, up to four times, and notes how long the AF lamp is on.",
-            "Takes one photo with the film look applied as it is captured, the way Sony's own effect apps work. It's kept off your rolls.",
+            "Takes one photo with the film look applied as it is captured, using the camera's own memory map, as Sony's effect apps do. Kept off your rolls. If the camera hangs, pull the battery.",
             "Changes no camera setting. Point the camera at something and hold still.",
     };
     static final String SHOOT_FOOTER = "About twenty seconds. Hold it level at first. MENU stops it. Log: LATENT/SHOOTING.TXT";

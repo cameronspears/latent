@@ -158,31 +158,6 @@ public class MainActivity extends Activity {
             return;
         }
         card = Environment.getExternalStorageDirectory();
-        if (getIntent() != null && getIntent().getBooleanExtra("memcheck", false)) memoryCheckAfterRestart();
-    }
-
-    /** The Shooting test restarted Latent: does this fresh process get Sony's image memory? Answer appended to SHOOTING.TXT. */
-    private void memoryCheckAfterRestart() {
-        toast("Checking image memory after the restart…");
-        worker.execute(new Runnable() {
-            public void run() {
-                StringBuilder l = new StringBuilder();
-                String r;
-                long t = SystemClock.uptimeMillis();
-                try {
-                    new HardwareDevelop(MainActivity.this, card, l, null).prepare(true);
-                    r = "ok - image memory verified in " + (SystemClock.uptimeMillis() - t) + " ms";
-                } catch (Throwable e) {
-                    r = "FAILED - " + Probe.why(e) + " (" + (SystemClock.uptimeMillis() - t) + " ms)";
-                }
-                final String result = r;
-                try {
-                    java.io.FileOutputStream o = new java.io.FileOutputStream(new File(Library.home(card), "SHOOTING.TXT"), true);
-                    try { o.write(("Memory after a restart: " + result + "\r\n" + l).getBytes("UTF-8")); } finally { o.close(); }
-                } catch (Exception ignored) { }
-                ui.post(new Runnable() { public void run() { toast("Memory after a restart: " + (result.startsWith("ok") ? "yes" : "no")); } });
-            }
-        });
     }
 
     @Override

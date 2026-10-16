@@ -546,27 +546,20 @@ final class ShootingTest implements SurfaceHolder.Callback {
                     return objectMethod(p, m, a);
                 }
             });
-            try {
-                cs.getMethod("setShutterSequenceCallback", cb, oc).invoke(sequence2, callback, o);
-                cs.getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
-                locked = true;   // from the shutter until unlockShutter
-                note("capture hook set, with options");
-            } catch (java.lang.reflect.InvocationTargetException e) {
-                note("capture hook with options: " + Probe.why(e.getCause()) + "; trying it plain");
-                try {
-                    cs.getMethod("setShutterSequenceCallback", cb).invoke(sequence2, callback);
-                    note("capture hook set, plain");
-                } catch (java.lang.reflect.InvocationTargetException e2) {
-                    // Sony's Graduated Filter sets this allocation policy on platform 2.x bodies before its first capture
-                    note("capture hook plain: " + Probe.why(e2.getCause()) + "; platform " + platform() + ", trying allocation policy 1");
-                    Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("setAllocationPolicy", int.class).invoke(null, 1);
-                    policyChanged = true;
-                    cs.getMethod("setShutterSequenceCallback", cb, oc).invoke(sequence2, callback, o);
-                    cs.getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
-                    locked = true;
-                    note("capture hook set, with options, under allocation policy 1");
-                }
-            }
+            // v0.25: refused without a memory map, with or without options, under either allocation policy.
+            // Sony's apps give the sequence a map for this body: try the firmware's own, if it has one for this camera.
+            String map = firmwareMap();
+            if (map == null) throw new IllegalStateException("no firmware memory map for this camera");
+            oc.getMethod("setOption", String.class, String.class).invoke(o, "MEMORY_MAP_FILE", map);
+            Class.forName("com.sony.scalar.hardware.MemoryMapConfig").getMethod("setAllocationPolicy", int.class).invoke(null, 1);
+            policyChanged = true;
+            note("hooking with " + map + " under allocation policy 1");
+            flushLog();   // if the camera hangs here, the card already says how far it got
+            cs.getMethod("setShutterSequenceCallback", cb, oc).invoke(sequence2, callback, o);
+            cs.getMethod("setReleaseLock", boolean.class).invoke(sequence2, false);
+            locked = true;   // from the shutter until unlockShutter
+            note("capture hook set, with the firmware map");
+            flushLog();
             return true;
         } catch (Throwable e) {
             note("capture hook: " + Probe.why(e) + "; the camera stores as usual");
@@ -630,6 +623,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         }
         // the look, off the UI thread; then stored on it
         step(S_LOOKCAP, RUN, "the look…");
+        flushLog();
         final Object image = img;
         lookRunning = true;
         new Thread(new Runnable() {
@@ -712,6 +706,53 @@ final class ShootingTest implements SurfaceHolder.Callback {
     }
 
     private boolean policyChanged;
+
+    /**
+     * The firmware's memory map for this camera, named as Sony's MemoryMapFile names them:
+     * lib + device.memory + raw megapixels + "m_" + app + "_" + index + "_" + version + ".so", in
+     * /etc/memmap (which the camera's native side sees under /android/system). Lists what is there
+     * first. Returns the path to give the sequence, or null when there is none for this camera.
+     */
+    private String firmwareMap() {
+        String mem = property("device.memory"), mp = property("mem.rawimage.size.in.mega.pixel");
+        String prefix = "lib" + mem + mp + "m_";
+        note("device.memory " + mem + ", raw megapixels " + mp + ", platform " + platform() + "; maps named " + prefix + "...");
+        String best = null;
+        int bestRank = 0;
+        for (String dir : new String[] { "/etc/memmap", "/system/etc/memmap" }) {
+            String[] names = new File(dir).list();
+            note(dir + ": " + (names == null ? "not readable" : names.length + " files"));
+            if (names == null) continue;
+            java.util.Arrays.sort(names);
+            for (String n : names) {
+                note("  " + n);
+                if (!n.startsWith(prefix) || !n.endsWith(".so")) continue;
+                // closest to ours: Picture Effect (one capture, developed, an effect, stored), then any single capture
+                int rank = n.contains("PictureEffect") ? 3 : n.contains("Single") || n.contains("_00_") ? 2 : 1;
+                if (rank > bestRank || (rank == bestRank && best != null && n.compareTo(best) > 0)) { best = n; bestRank = rank; }
+            }
+            if (best != null) break;
+        }
+        if (best == null) { note("no map for this camera"); return null; }
+        return "/android/system/etc/memmap/" + best;
+    }
+
+    private static String property(String key) {
+        try {
+            Class<?> sp = Class.forName("com.sony.scalar.sysutil.ScalarProperties");
+            return String.valueOf(sp.getMethod("getString", String.class).invoke(null, key));
+        } catch (Throwable e) {
+            return "?";
+        }
+    }
+
+    /** The log so far onto the card, before a step that could hang the camera. */
+    private void flushLog() {
+        try {
+            FileOutputStream o = new FileOutputStream(new File(Library.home(card), "SHOOTING.TXT"));
+            try { o.write((log + "  (written before a risky step; the test went on)\r\n").getBytes("UTF-8")); } finally { o.close(); }
+        } catch (Exception ignored) { }
+    }
 
     private static String platform() {
         try {
@@ -942,28 +983,6 @@ final class ShootingTest implements SurfaceHolder.Callback {
             // the screen shows the same
         }
         host.finished();
-        restartForMemoryCheck();
-    }
-
-    /**
-     * Does a fresh process get image memory back? Latent restarts itself in two seconds and checks
-     * (MainActivity, on the "memcheck" extra), appending the answer to LATENT/SHOOTING.TXT.
-     */
-    private void restartForMemoryCheck() {
-        try {
-            android.content.Intent i = new android.content.Intent(context, MainActivity.class).putExtra("memcheck", true)
-                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-            android.app.PendingIntent pi = android.app.PendingIntent.getActivity(context, 1, i, android.app.PendingIntent.FLAG_CANCEL_CURRENT);
-            ((android.app.AlarmManager) context.getSystemService(Context.ALARM_SERVICE)).set(android.app.AlarmManager.RTC, System.currentTimeMillis() + 2000, pi);
-            ui.postDelayed(new Runnable() {
-                public void run() {
-                    if (context instanceof android.app.Activity) ((android.app.Activity) context).finish();
-                    android.os.Process.killProcess(android.os.Process.myPid());   // the process goes; the alarm brings Latent back
-                }
-            }, 1500);
-        } catch (Throwable e) {
-            note("restart: " + Probe.why(e));
-        }
     }
 
     public void surfaceChanged(SurfaceHolder h, int format, int w, int hh) { }
