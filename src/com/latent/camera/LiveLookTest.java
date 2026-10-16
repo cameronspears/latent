@@ -129,6 +129,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
             }
         });
         highestBefore = Roll.highest(Library.photos(card));
+        if (Viewfinder.SHOOT_16BIT) Display.fullColour(false);   // as the viewfinder shoots
         out.step(S_OPEN, RUN, "opening…");
         Viewfinder.opened = true;   // the image memory is the camera's now, until this process ends
         long t = SystemClock.uptimeMillis();
@@ -542,6 +543,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
 
     private void finish(boolean restarting) {
         closed = true;
+        if (Viewfinder.SHOOT_16BIT) Display.fullColour(true);
         ui.removeCallbacksAndMessages(null);
         looker.shutdown();
         try { surface.getHolder().removeCallback(this); } catch (Throwable ignored) { }

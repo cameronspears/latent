@@ -201,8 +201,18 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     // ------------------------------------------------------------------------------ open
 
+    /**
+     * The camera's own 16-bit drawing plane (RGBA4444) while the camera is Latent's, as Sony's apps shoot
+     * (their BaseApp sets it at boot and keeps it; full colour only for the playback grid). Latent ran
+     * full colour (ABGR8888) everywhere: the first picture after the camera opened was stored, every
+     * later one waited, and each was stored 0.3 s after Latent's pause put the 16-bit plane back
+     * (v0.35.4-v0.35.7). Full colour again once the camera is given back.
+     */
+    static final boolean SHOOT_16BIT = true;
+
     void open() {
         opened = true;
+        if (SHOOT_16BIT) Display.fullColour(false);
         log.append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())).append(" viewfinder\r\n");
         previousHandler = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
@@ -995,7 +1005,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      * Latent (its drawing gone) stored every waiting picture. v0.35.6: live view restarted as Sony's apps
      * do, and the second picture still waited 20 s, until Playback.
      */
-    static final boolean BLACKOUT = true;
+    static final boolean BLACKOUT = false;   // v0.35.7: the second picture still waited with nothing of Latent's on screen
     static final long BLACKOUT_MAX_MS = 15000;
     private boolean blackedOut;
     private long blackoutAt;
@@ -1346,6 +1356,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private void finishClose() {
         if (closed) return;
         closed = true;
+        if (SHOOT_16BIT) Display.fullColour(true);
         if (blackedOut) { blackedOut = false; host.hud(true); }
         String why = closeWhy;
         releaseCamera();

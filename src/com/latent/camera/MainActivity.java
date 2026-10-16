@@ -226,7 +226,7 @@ public class MainActivity extends Activity {
         super.onResume();
         resumed = true;
         backFromCamera = true;
-        Display.fullColour(true);
+        Display.fullColour(!(vf != null && Viewfinder.SHOOT_16BIT));   // the camera's own 16-bit plane while it's Latent's
         if (card != null && developing == null) refresh(null);
     }
 
