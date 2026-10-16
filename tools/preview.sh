@@ -9,7 +9,7 @@ mkdir -p "$O/classes" "$O/samples"
 tools/build-host.sh >/dev/null
 # sample photos in each look, as the camera would show them
 for img in STREET HOUSE PEOPLE; do
-  for lut in CUBANNEG PORTRA4W; do
+  for lut in CUBANNEG PORTRA4W CLASSNEG TRIX400 PARTY800 NATURAL; do
     s="$O/samples/$img-$lut"
     [ -e "$s.png" ] || { out/host/fltool preview "testdata/$img.JPG" "$s.ppm" --lut "assets/luts/$lut.CUB" 2>/dev/null \
       && sips -s format png "$s.ppm" --out "$s.png" >/dev/null; }

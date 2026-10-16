@@ -5,7 +5,7 @@ import java.util.List;
 
 /** Everything a screen shows, filled in by MainActivity (or by the Mac preview tool). Plain data. */
 final class UiState {
-    static final int BACK = 0, LOAD = 1, DARKROOM = 2, SHEET = 3, VIEW = 4, LAB = 5, PROBE = 6;
+    static final int BACK = 0, LOAD = 1, DARKROOM = 2, SHEET = 3, VIEW = 4, LAB = 5, PROBE = 6, PHOTO = 7, SETTINGS = 8;
 
     /** How a film stock is shown: names and its two canister colours plus a UI accent. */
     static final class Film {
@@ -18,6 +18,8 @@ final class UiState {
     float width = 640;                 // logical width: 480 x the panel's real aspect (853 on a 16:9 panel)
     int battery = -1;                  // percent, -1 unknown
     boolean loading;                   // Load film: the chosen roll is being loaded
+    boolean live;                      // the camera's live view is showing behind this screen
+    String liveNote = "";              // a short line over it
     String toast = "";                 // a short notice, shown near the top and faded out by the caller
 
     // camera back
@@ -25,6 +27,20 @@ final class UiState {
     int rollNumber, exposed, length;
     int developed = -1;                // frames developed so far when a develop was paused, else -1
     List<String> nav = new ArrayList<String>();
+    int camMode;                       // the switch at the top of the camera back: 0 Film, 1 Photo
+    boolean gear;                      // the camera back's row ends with Settings (a gear); navSel == nav.size() is it
+
+    // Photo mode: live view with a look on it
+    Object liveImage;                  // a still standing in for live view (previews only)
+    List<Film> looks = new ArrayList<Film>();
+    int lookSel;
+    boolean lookShown;                 // the look's name, large, just after it changed
+    int developing;                    // photos still developing in the background
+
+    // Settings
+    List<String[]> rows = new ArrayList<String[]>();   // {label, value}: value "on"/"off" draws a switch, "›" opens, "" is a heading
+    int rowSel;
+    String footer = "";
     int navSel;
     boolean navMore;                   // the secondary actions are showing
 

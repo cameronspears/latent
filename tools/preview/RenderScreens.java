@@ -9,7 +9,7 @@ import java.util.List;
 import javax.imageio.ImageIO;
 
 /**
- * Renders every Film Lab screen with realistic data to PNGs, through the same Ui code the camera
+ * Renders every Latent screen with realistic data to PNGs, through the same Ui code the camera
  * runs, at the panel's true shape (853x480 for the A5100's 16:9 panel). tools/preview.sh drives it.
  *
  *   RenderScreens FONTDIR SAMPLEDIR OUTDIR
@@ -31,6 +31,42 @@ public class RenderScreens {
         UiState s = state();
         s.nav = Arrays.asList("Load film", "Contact sheets", "Lab");
         render(s, fonts, out, "1-back-empty");
+
+        // ---- the redesign: Film / Photo, a short row with Settings at its end, Photo mode, Settings
+        UiState.Film natural = film("Natural", "100", "", 0xFF8C9096, 0xFFE9E5DC, 0xFFD9D2C3);
+        UiState.Film classic = film("Classic Neg", "400", "", 0xFF1F6E52, 0xFFE8E2D3, 0xFF6CC29E);
+        UiState.Film trix = film("Tri-X", "400", "", 0xFF1D1C1A, 0xFFF2C230, 0xFFF4F1EA);
+        UiState.Film party = film("Afterparty", "800", "", 0xFF4B2470, 0xFFE8458B, 0xFFF0629F);
+        List<UiState.Film> six = Arrays.asList(natural, portra, classic, cuban, trix, party);
+        s = state();
+        s.gear = true; s.nav = Arrays.asList("Load film", "Rolls");
+        render(s, fonts, out, "20-home-film-empty");
+        s = state();
+        s.gear = true; s.film = cuban; s.rollNumber = 3; s.exposed = 14; s.length = 24;
+        s.nav = Arrays.asList("Shoot", "Develop", "Rolls");
+        render(s, fonts, out, "21-home-film-midroll");
+        s.navSel = 3;
+        render(s, fonts, out, "21b-home-film-gear");
+        s = state();
+        s.mode = UiState.PHOTO; s.looks = six; s.lookSel = 2; s.liveImage = img(samples, "STREET-CLASSNEG.png"); s.developing = 2;
+        render(s, fonts, out, "22-photo");
+        s.lookSel = 4; s.liveImage = img(samples, "HOUSE-TRIX400.png"); s.lookShown = true; s.developing = 0;
+        render(s, fonts, out, "23-photo-look-change");
+        s = state();
+        s.mode = UiState.SETTINGS;
+        s.rows = new ArrayList<String[]>();
+        s.rows.add(new String[] { "Developing", "" });
+        s.rows.add(new String[] { "Use three cores", "on" });
+        s.rows.add(new String[] { "Shoot neutral while a roll is loaded", "on" });
+        s.rows.add(new String[] { "Looks", "" });
+        s.rows.add(new String[] { "Try looks on a photo", "›" });
+        s.rows.add(new String[] { "Camera", "" });
+        s.rows.add(new String[] { "Settings check", "›" });
+        s.rows.add(new String[] { "Speed test", "›" });
+        s.rows.add(new String[] { "Live view test", "›" });
+        s.rows.add(new String[] { "Version", "Latent 0.16" });
+        s.rowSel = 1;
+        render(s, fonts, out, "24-settings");
 
         s = state();
         s.film = portra; s.rollNumber = 5; s.exposed = 0; s.length = 12; s.toast = "Portra 400 loaded";

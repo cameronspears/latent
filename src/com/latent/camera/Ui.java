@@ -21,6 +21,10 @@ final class Ui {
     static final float L = 56, TOP = 50, FOOT = 444, H = 480;
 
     static void draw(Gfx g, UiState s) {
+        if (s.live) {   // live view shows through: only a quiet label over it
+            liveOverlay(g, s);
+            return;
+        }
         g.rect(0, 0, s.width, H, BG);
         switch (s.mode) {
             case UiState.BACK: back(g, s); break;
@@ -30,6 +34,8 @@ final class Ui {
             case UiState.VIEW: view(g, s); break;
             case UiState.LAB: lab(g, s); break;
             case UiState.PROBE: probe(g, s); break;
+            case UiState.PHOTO: photo(g, s); break;
+            case UiState.SETTINGS: settings(g, s); break;
             default: break;
         }
         toast(g, s);
@@ -42,6 +48,7 @@ final class Ui {
     private static void back(Gfx g, UiState s) {
         float R = right(s);
         battery(g, s.battery, R, INK2, INK3);
+        modeSwitch(g, s, 0, s.film != null ? s.film.accent : INK);
         if (s.film == null) {
             g.text("No film loaded", L, TOP, Gfx.MEDIUM, 18, INK2, Gfx.LEFT, 0);
             g.text("Load a roll", L - 3, 222, Gfx.DISPLAY, 72, INK, Gfx.LEFT, -10);
@@ -68,6 +75,107 @@ final class Ui {
         nav(g, s, f.accent);
     }
 
+    /** Film | Photo, like the X Half's two ways of shooting: a quiet capsule at the top centre. UP / DOWN switch. */
+    private static void modeSwitch(Gfx g, UiState s, int on, int accent) {
+        String[] names = { "Film", "Photo" };
+        float w0 = g.textWidth(names[0], Gfx.MEDIUM, 15, 0) + 28, w1 = g.textWidth(names[1], Gfx.MEDIUM, 15, 0) + 28;
+        float x = s.width / 2 - (w0 + w1 + 6) / 2, y = TOP - 21;
+        g.roundRect(x, y, w0 + w1 + 6, 30, 15, on == 1 ? 0x99000000 : SURFACE);
+        float sx = on == 0 ? x + 3 : x + 3 + w0;
+        g.roundRect(sx, y + 3, on == 0 ? w0 : w1, 24, 12, 0xFF2C2A27);
+        g.text(names[0], x + 3 + w0 / 2, y + 20, Gfx.MEDIUM, 15, on == 0 ? INK : INK2, Gfx.CENTER, 0);
+        g.text(names[1], x + 3 + w0 + w1 / 2, y + 20, Gfx.MEDIUM, 15, on == 1 ? INK : INK2, Gfx.CENTER, 0);
+    }
+
+    /** A small gear: Settings, at the end of the camera back's row. */
+    private static void gear(Gfx g, float cx, float cy, int color, boolean on, int accent) {
+        for (int i = 0; i < 8; i++) {
+            double a = i * Math.PI / 4;
+            g.line(cx + (float) Math.cos(a) * 7, cy + (float) Math.sin(a) * 7, cx + (float) Math.cos(a) * 10.5f, cy + (float) Math.sin(a) * 10.5f, 3, color);
+        }
+        g.strokeCircle(cx, cy, 6.5f, 2.4f, color);
+        if (on) g.roundRect(cx - 11, FOOT + 12, 22, 4, 2, accent);
+    }
+
+    // ------------------------------------------------------------------------------ photo mode
+
+    /**
+     * Photo: the camera's live view with the chosen look on it, nothing else in the way. The look's name
+     * and ISO sit top left; turning the wheel changes look, and its name shows large for a moment, the
+     * way a Fuji film-simulation dial answers. Photos develop in the background as you shoot.
+     */
+    private static void photo(Gfx g, UiState s) {
+        float R = right(s);
+        if (s.liveImage != null) {   // a 3:2 picture on the 16:9 panel: full height, black at the sides, as live view is
+            float iw = H * 1.5f;
+            g.image(s.liveImage, (s.width - iw) / 2, 0, iw, H, false);
+        }
+        // labels float on small dark capsules, so they read over any picture
+        int glass = 0x99000000;
+        UiState.Film f = s.looks.isEmpty() ? null : s.looks.get(s.lookSel);
+        if (f != null) {
+            String t = f.title + (f.iso.length() > 0 ? " " + f.iso : "");
+            g.roundRect(L - 12, TOP - 23, 26 + g.textWidth(t, Gfx.MEDIUM, 18, 0) + 26, 32, 16, glass);
+            canisterIcon(g, f, L, TOP - 15);
+            g.text(t, L + 26, TOP, Gfx.MEDIUM, 18, INK, Gfx.LEFT, 0);
+        }
+        modeSwitch(g, s, 1, f != null ? f.accent : INK);
+        if (s.battery >= 0) g.roundRect(R - 92, TOP - 23, 104, 32, 16, glass);
+        battery(g, s.battery, R, INK, INK2);
+        if (s.lookShown && f != null) {   // the look, large, for a moment after the wheel turns (a Fuji film-sim pop-up)
+            float tw = g.textWidth(f.title, Gfx.DISPLAY, 58, -10) + 80;
+            g.roundRect(s.width / 2 - tw / 2, 196, tw, 124, 24, 0xB0000000);
+            g.text(f.title, s.width / 2, 268, Gfx.DISPLAY, 58, INK, Gfx.CENTER, -10);
+            float dw = 14, dx = s.width / 2 - (s.looks.size() - 1) * dw / 2;
+            for (int i = 0; i < s.looks.size(); i++) g.circle(dx + i * dw, 296, i == s.lookSel ? 3.5f : 2.5f, i == s.lookSel ? INK : 0x80F4F1EA);
+        }
+        float hw = glyphWidth(g, "wheel") + 8 + g.textWidth("Look", Gfx.REGULAR, 17, 0) + 26 + glyphWidth(g, "updown") + 8
+                + g.textWidth("Film", Gfx.REGULAR, 17, 0);
+        g.roundRect(L - 14, FOOT - 24, hw + 28, 34, 17, glass);
+        hints(g, s, INK, new String[] { "wheel", "Look", "updown", "Film" }, null);
+        if (s.developing > 0) {
+            String d = s.developing + " developing";
+            float dw = g.textWidth(d, Gfx.MEDIUM, 16, 0) + 30;
+            g.roundRect(R - dw, FOOT - 19, dw, 28, 14, 0x99000000);
+            g.circle(R - dw + 14, FOOT - 5, 3.5f, f != null ? f.accent : INK);
+            g.text(d, R - 10, FOOT, Gfx.MEDIUM, 16, INK, Gfx.RIGHT, 0);
+        }
+    }
+
+    // ------------------------------------------------------------------------------ settings
+
+    /** Settings: one plain list, the way the Settings app does it. Headings, switches, and rows that open. */
+    private static void settings(Gfx g, UiState s) {
+        float R = right(s);
+        g.text("Settings", L, TOP, Gfx.MEDIUM, 18, INK, Gfx.LEFT, 0);
+        float y = 78;
+        for (int i = 0; i < s.rows.size(); i++) {
+            String[] r = s.rows.get(i);
+            if (r[1].length() == 0) {   // a heading
+                y += 12;
+                g.text(r[0].toUpperCase(java.util.Locale.US), L, y + 6, Gfx.MEDIUM, 12, INK3, Gfx.LEFT, 120);
+                y += 14;
+                continue;
+            }
+            boolean on = i == s.rowSel;
+            if (on) g.roundRect(L - 14, y - 2, R - L + 28, 38, 10, SURFACE);
+            g.text(r[0], L, y + 23, Gfx.REGULAR, 19, on ? INK : INK2, Gfx.LEFT, 0);
+            if (r[1].equals("on") || r[1].equals("off")) {   // a switch
+                boolean v = r[1].equals("on");
+                g.roundRect(R - 44, y + 5, 44, 24, 12, v ? 0xFF3FA66B : 0xFF3A3834);
+                g.circle(v ? R - 12 : R - 32, y + 17, 9.5f, INK);
+            } else if (r[1].equals("›")) {
+                g.line(R - 8, y + 11, R - 2, y + 17, 2, INK3);
+                g.line(R - 2, y + 17, R - 8, y + 23, 2, INK3);
+            } else {
+                g.text(r[1], R, y + 23, Gfx.REGULAR, 17, INK3, Gfx.RIGHT, 0);
+            }
+            y += 38;
+        }
+        if (s.footer.length() > 0) g.text(s.footer, L, FOOT, Gfx.REGULAR, 15, INK3, Gfx.LEFT, 0);
+        menuHint(g, "Back", INK3, R, FOOT);
+    }
+
     /** Bottom navigation: a row of words, the chosen one bright with an accent bar under it. */
     private static void nav(Gfx g, UiState s, int accent) {
         float x = L;
@@ -80,24 +188,26 @@ final class Ui {
         }
         // the row slides so the chosen item is always in view; "…" says there is more
         float end = s.navMore ? right(s) - 130 : right(s), dots = g.textWidth("…", Gfx.MEDIUM, 21, 0) + 12;
-        int n = s.nav.size(), first = 0;
+        int n = s.nav.size(), first = 0, sel = Math.min(s.navSel, n - 1);   // navSel == n: the gear, not a word
+        if (s.gear) end -= 44;
         float[] w = new float[n];
         for (int i = 0; i < n; i++) w[i] = g.textWidth(s.nav.get(i), Gfx.MEDIUM, 21, 0);
-        while (first < s.navSel) {   // drop items from the left until the chosen one fits
+        while (first < sel) {   // drop items from the left until the chosen one fits
             float span = (first > 0 ? dots : 0);
-            for (int i = first; i <= s.navSel; i++) span += w[i] + (i < s.navSel ? 36 : 0);
-            if (x + span <= end - (s.navSel < n - 1 ? dots : 0)) break;
+            for (int i = first; i <= sel; i++) span += w[i] + (i < sel ? 36 : 0);
+            if (x + span <= end - (sel < n - 1 ? dots : 0)) break;
             first++;
         }
         if (first > 0) { g.text("…", x, FOOT, Gfx.MEDIUM, 21, INK3, Gfx.LEFT, 0); x += dots; }
         for (int i = first; i < n; i++) {
             boolean on = i == s.navSel, last = i == n - 1;
-            if (x + w[i] > end - (last ? 0 : dots) && i > s.navSel) { g.text("…", x, FOOT, Gfx.MEDIUM, 21, INK3, Gfx.LEFT, 0); break; }
+            if (x + w[i] > end - (last ? 0 : dots) && i > sel) { g.text("…", x, FOOT, Gfx.MEDIUM, 21, INK3, Gfx.LEFT, 0); break; }
             g.text(s.nav.get(i), x, FOOT, Gfx.MEDIUM, 21, on ? INK : INK3, Gfx.LEFT, 0);
             if (on) g.roundRect(x, FOOT + 12, 22, 4, 2, accent);
             x += w[i] + 36;
         }
         if (s.navMore) menuHint(g, "Back", INK3, right(s), FOOT);
+        if (s.gear) gear(g, right(s) - 11, FOOT - 7, s.navSel == n ? INK : INK3, s.navSel == n, accent);
     }
 
     /** A short notice, centred under the top bar. Never on top of the controls. */
@@ -337,6 +447,20 @@ final class Ui {
             "Sony's encoder saves it as a new photo in the camera roll. Look at it in playback; delete it with the trash button if you like.",
     };
     static final String HARDWARE_FOOTER = "If the camera stops responding, turn it off or remove the battery. Log: LATENT/HWTEST.TXT.";
+
+    static final String[] LIVE_PLAN = {
+            "Opens the camera and shows its live view for a few seconds, as Recipe Lab does.",
+            "Asks the camera to hand Latent the live frames too: how many arrive, how big, and whether they hold a picture. That decides if film looks can be shown live.",
+            "Changes no setting and takes no picture. Then closes the camera again. Point it around while it runs.",
+    };
+    static final String LIVE_FOOTER = "About ten seconds. MENU stops it. Results go to LATENT/LIVEVIEW.TXT.";
+
+    private static void liveOverlay(Gfx g, UiState s) {
+        String t = s.liveNote == null || s.liveNote.length() == 0 ? "Live view" : s.liveNote;
+        float w = g.textWidth(t, Gfx.MEDIUM, 17, 0) + 36;
+        g.roundRect(s.width / 2 - w / 2, 22, w, 36, 18, 0xB0000000);
+        g.text(t, s.width / 2, 46, Gfx.MEDIUM, 17, INK, Gfx.CENTER, 0);
+    }
 
     static final String[] SPEED_PLAN = {
             "Reads how many cores the camera has, which ones Latent may use, and how busy each is while idle. Read only.",
