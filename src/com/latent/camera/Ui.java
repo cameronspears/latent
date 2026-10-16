@@ -136,7 +136,6 @@ final class Ui {
             if (s.liveImage != null && s.liveExact) g.imageExact(s.liveImage, ix, 0, iw, H);
             else if (s.liveImage != null) g.image(s.liveImage, ix, 0, iw, H, false);
             else if (!s.liveThrough) g.rect(ix, 0, iw, H, 0xFF0B0B0A);
-            if (s.flash) { g.rect(ix, 0, iw, H, 0xD0000000); }   // the shutter: a blink
         }
         if (over) photoType(g, s, f, accent, ix, iw, ir);
         if (under) photoMoving(g, s, f, ix, iw, ir);
@@ -174,12 +173,11 @@ final class Ui {
             g.text(s.vfNote, s.width / 2, 77, Gfx.MEDIUM, 15, INK, Gfx.CENTER, 0);
         }
 
-        // ---- bottom: exposure, the meter
+        // ---- bottom: exposure, the meter (still: nothing here changes with focus, so the overlay isn't redrawn
+        // on every half-press; the focus dot has its place kept and is drawn with what moves)
         float by = 448;
-        boolean live = s.afState == 2 || s.afState == 1;   // half-pressed: the numbers come up
-        int ink = live ? INK : 0xCCF4F1EA;
-        float x = ix + 22;
-        if (s.afState == 2 || s.afState == 3) { g.circle(x + 4, by - 6, 4.5f, s.afState == 2 ? GREEN : AMBER); x += 18; }
+        int ink = INK;
+        float x = ix + 22 + 18;
         if (s.evEdit) {   // DOWN (±): the exposure scale, large, the wheel moves it
             evPanel(g, s, accent);
         } else if (!s.clean) {
@@ -206,6 +204,7 @@ final class Ui {
         // ---- the level, then focus (both out of the way while the look card is up)
         if (s.levelShown && !s.lookShown) level(g, s, ix + iw / 2, H / 2);
         if (!s.lookShown) afBrackets(g, s, ix, iw);
+        if (!s.evEdit && (s.afState == 2 || s.afState == 3)) g.circle(ix + 26, 442, 4.5f, s.afState == 2 ? GREEN : AMBER);   // focus: Fuji's dot
         print(g, s, ir - 18, 448, accent);
     }
 
@@ -217,9 +216,9 @@ final class Ui {
         UiState.Film f = s.looks.isEmpty() ? null : s.looks.get(Math.min(s.lookSel, s.looks.size() - 1));
         StringBuilder k = new StringBuilder(96);
         k.append(s.width).append('|').append(f == null ? "-" : f.title + "/" + f.accent + "/" + f.body + "/" + f.band).append('|')
-                .append(s.lookLive).append(s.grid).append(s.clean).append(s.flash).append(s.endless).append('|')
+                .append(s.lookLive).append(s.grid).append(s.clean).append(s.endless).append('|')
                 .append(s.exposed).append('/').append(s.length).append('|').append(s.battery).append('|').append(s.vfNote).append('|')
-                .append(s.afState).append(s.evEdit).append(s.ev).append('|').append(s.shutter).append('|').append(s.aperture).append('|')
+                .append(s.evEdit).append(s.ev).append('|').append(s.shutter).append('|').append(s.aperture).append('|')
                 .append(s.iso).append(s.isoAuto);
         return k.toString();
     }
@@ -236,7 +235,6 @@ final class Ui {
         if (s.endless) { infinity(g, tx + 8, y - 6, INK2); tx += 22; }
         g.text(n, tx, y, Gfx.MEDIUM, 19, INK, Gfx.LEFT, 20);
         if (of.length() > 0) g.text(of, tx + nw, y, Gfx.REGULAR, 15, INK2, Gfx.LEFT, 0);
-        if (s.flash) g.roundRect(x + 10, y + 5, w - 20, 2, 1, accent);   // the frame just advanced
     }
 
     /** Battery for the viewfinder: the outline and its percent, right-aligned at R. */

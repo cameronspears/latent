@@ -148,6 +148,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     static final int LOW_PRIORITY_CORE = 0;
     private final Looker[] lookers = new Looker[LOOK_CORES.length];
     private int seq, shownSeq;
+    private long lastShownAt;
     private volatile boolean probed;
     private final int[] framesBy = new int[LOOK_CORES.length], statFramesBy = new int[LOOK_CORES.length];
     /**
@@ -280,6 +281,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         opened = true;
         if (SHOOT_16BIT) Display.fullColour(false);
         log.append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())).append(" viewfinder\r\n");
+        note("cores: " + cpuFreqs());
         previousHandler = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
             public void uncaughtException(Thread t, Throwable e) {
@@ -789,10 +791,12 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (r.made < 0) return;
         if (r.seq < shownSeq) { giveBack(r.made); return; }   // a later frame is already up
         shownSeq = r.seq;
+        lastShownAt = SystemClock.uptimeMillis();
         synchronized (shown16) { front16 = r.made; posted16 &= ~(1 << r.made); }
         frontOverlay = r.overlay;
         long now = SystemClock.uptimeMillis();
         if (r.tm == null) return;
+        if (frames == 20) probeBlit(shown16[r.made]);
         if (frames++ == 0) {
             note("first frame " + r.w + "x" + r.h + " after " + (now - framesAskedAt) + " ms; " + r.ms + " ms on " + r.by.pinned
                     + (bitmapsDirect ? "" : ", through a copy"));
@@ -807,6 +811,59 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         host.frame();
     }
 
+    /** Each core's clock as the kernel has it (now / most, in MHz) and its governor, or "?" where it can't be read. */
+    static String cpuFreqs() {
+        StringBuilder b = new StringBuilder();
+        for (int n = 0; n < 4; n++) {
+            String d = "/sys/devices/system/cpu/cpu" + n + "/cpufreq/";
+            String cur = readLine(d + "scaling_cur_freq"), max = readLine(d + "cpuinfo_max_freq"), gov = readLine(d + "scaling_governor");
+            b.append(n == 0 ? "" : ", ").append(n).append(": ").append(mhz(cur)).append('/').append(mhz(max)).append(" MHz ").append(gov);
+        }
+        return b.toString();
+    }
+
+    private static String mhz(String khz) {
+        try { return String.valueOf(Long.parseLong(khz.trim()) / 1000); } catch (Throwable e) { return "?"; }
+    }
+
+    private static String readLine(String path) {
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(path));
+            try { String l = r.readLine(); return l == null ? "?" : l.trim(); } finally { r.close(); }
+        } catch (Throwable e) {
+            return "?";
+        }
+    }
+
+    private boolean blitProbed;
+
+    /**
+     * Once a visit, on the UI thread: the picture copied into a 16-bit and a 32-bit bitmap, to tell Skia's own
+     * cost from the window's (each frame's copy took 44-59 ms in v0.41.0, the window already 16-bit).
+     */
+    void probeBlit(Bitmap pic) {
+        if (blitProbed || pic == null || pic.isRecycled()) return;
+        blitProbed = true;
+        StringBuilder b = new StringBuilder("blit: ");
+        Bitmap.Config[] cs = { Bitmap.Config.RGB_565, Bitmap.Config.ARGB_8888 };
+        for (Bitmap.Config cf : cs) {
+            Bitmap dst = null;
+            try {
+                dst = Bitmap.createBitmap(pic.getWidth(), pic.getHeight(), cf);
+                android.graphics.Canvas c = new android.graphics.Canvas(dst);
+                c.drawBitmap(pic, 0, 0, null);   // once to warm up
+                long t = SystemClock.uptimeMillis();
+                for (int i = 0; i < 4; i++) c.drawBitmap(pic, 0, 0, null);
+                b.append(cf == Bitmap.Config.RGB_565 ? "into 16-bit " : ", into 32-bit ").append((SystemClock.uptimeMillis() - t) / 4).append(" ms");
+            } catch (Throwable e) {
+                b.append(" ").append(Probe.why(e));
+            } finally {
+                if (dst != null) dst.recycle();
+            }
+        }
+        note(b.toString());
+    }
+
     /** A frame of the look is ready to show. */
     private boolean hasLook() {
         int f = front16;
@@ -816,6 +873,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     // ---- Latent's type over the picture: drawn once when it changes (not every frame), laid into each frame natively
 
     private final ExecutorService overlayer = Executors.newSingleThreadExecutor();
+    static final int OVERLAY_CORE = 0;
+    private boolean overlayPinned;
     private final Object overlayLock = new Object();
     private String overlayKey = "";
     private UiState overlayWanted;   // the latest asked for: the overlay thread takes it
@@ -849,6 +908,10 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             synchronized (overlayLock) { s = overlayWanted; overlayWanted = null; }
             final int w = liveW, h = liveH;
             if (s == null || closed || w <= 0 || h <= 0) return;   // a later one was already made
+            if (!overlayPinned) {   // off the screen's core (3, the busiest): on 0, ahead of the look thread there
+                overlayPinned = true;
+                note("overlay thread: " + (FilmCore.pinCore(OVERLAY_CORE) == 0 ? "core " + OVERLAY_CORE : "Latent's core (" + FilmCore.lastError() + ")"));
+            }
             long t = SystemClock.uptimeMillis();
             try {
                 if (overlayGfx == null) overlayGfx = new AndroidGfx(activity.getAssets());
@@ -1558,7 +1621,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             level.tick(now);
             if (evEditing && now > evEditUntil) closeEv();
             boolean moving = evEditing || now < flashUntil + 100 || now < cardUntil + 100 || now < noteUntil + 100 || (print != null && now - printAt < PRINT_MS + 200);
-            if (moving || was != level.shown) host.changed();
+            // all of it is over the picture: its area only, and not at all while frames are coming (each redraws it)
+            if ((moving || was != level.shown) && now - lastShownAt > 200) host.frame();
             if (moving || level.shown) ui.postDelayed(this, moving ? 100 : 300);   // the level hides by itself when frames stop being sure
         }
     };
@@ -1682,16 +1746,42 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         overlayer.shutdown();
         ui.removeCallbacksAndMessages(null);
         for (; stored < shots; stored++) host.shot(null, nextFilm());   // taken but not yet named: still exposures on the roll
-        synchronized (shown16) {
-            for (int i = 0; i < shown16.length; i++) if (shown16[i] != null) { shown16[i].recycle(); shown16[i] = null; }
-            front16 = -1; posted16 = 0;
-        }
+        reapBitmaps();
         if (print != null) { print.recycle(); print = null; }
         if (pendingPrint != null) { pendingPrint.recycle(); pendingPrint = null; }
         host.closed(why);
     }
 
     private void fail(String why) { closeWhy = why; closing = true; note("failed: " + why); finishClose(); }
+
+    /**
+     * The screen bitmaps freed only once every look thread and the overlay's have stopped: a look thread may
+     * be writing one in native code (core 0's at background priority took up to 1.3 s a frame), and freeing it
+     * under that write crashed Latent between the viewfinder and the darkroom (v0.41.0). If they don't stop in
+     * time, the bitmaps are left to the collector (Latent restarts to develop anyway).
+     */
+    private void reapBitmaps() {
+        new Thread(new Runnable() {
+            public void run() {
+                boolean stopped = true;
+                try {
+                    long until = SystemClock.uptimeMillis() + 3000;
+                    for (Looker k : lookers) if (k != null) stopped &= k.exec.awaitTermination(Math.max(1, until - SystemClock.uptimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS);
+                    stopped &= overlayer.awaitTermination(Math.max(1, until - SystemClock.uptimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    stopped = false;
+                }
+                synchronized (shown16) {
+                    for (int i = 0; i < shown16.length; i++) {
+                        if (stopped && shown16[i] != null) shown16[i].recycle();
+                        shown16[i] = null;
+                    }
+                    front16 = -1;
+                    posted16 = 0;
+                }
+            }
+        }, "reaper").start();
+    }
 
     /** cancel focus and capture, stop the frames and live view, then release: the order the verified apps use. */
     private void releaseCamera() {

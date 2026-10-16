@@ -904,7 +904,8 @@ public class MainActivity extends Activity {
             }
             public void closed(String why) {
                 vf = null;
-                getWindow().setFormat(android.graphics.PixelFormat.RGBA_8888);   // full colour again, the camera given back
+                // full colour again, the camera given back; not when Latent is about to start over (to develop)
+                if (!relaunchWhenClosed && !killWhenClosed) getWindow().setFormat(android.graphics.PixelFormat.RGBA_8888);
                 screen.setVisibility(View.VISIBLE);
                 if (relaunchWhenClosed) { relaunch(); return; }   // the camera is back: Latent starts again and develops
                 if (killWhenClosed) { killNow(); return; }
