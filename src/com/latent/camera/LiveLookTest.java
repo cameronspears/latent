@@ -32,9 +32,12 @@ import java.util.Locale;
  * Kept off every roll (IGNORE.TXT). Log: LATENT/LIVELOOK.TXT, written before every risky step.
  */
 final class LiveLookTest implements SurfaceHolder.Callback {
-    static final String[] STEPS = { "Open the camera", "Auto Review off", "Live frames", "Picture 1, frames running", "Picture 2, frames running",
-            "Auto Review back", "Camera closed" };
-    static final int S_OPEN = 0, S_REVIEW = 1, S_FRAMES = 2, S_SHOT1 = 3, S_SHOT2 = 4, S_RESTORE = 5, S_CLOSED = 6;
+    static final String[] STEPS = { "Open the camera", "Live frames", "Picture 1, frames running", "The camera's own log", "Picture 2, frames running",
+            "Camera closed" };
+    static final int S_OPEN = 0, S_FRAMES = 1, S_SHOT1 = 2, S_SYSLOG = 3, S_SHOT2 = 4, S_CLOSED = 5;
+    /** v0.34.0: Auto Review is 0 on this camera already, so it isn't what stopped pictures. Left alone now. */
+    static final boolean REVIEW_OFF = false;
+    static final int S_REVIEW = -1, S_RESTORE = -1;
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
     static final int FRAME_W = 320;
     static final long FIRST_FRAME_MS = 15000, FRAMES_BEFORE_MS = 2500, FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000,
@@ -76,6 +79,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
     }
 
     private void report(int i, int status, String detail) {
+        if (i < 0) { if (status != RUN) note(detail); return; }
         if (status != RUN) log.append(STEPS[i]).append(": ").append(status == OK ? "ok" : status == FAIL ? "FAILED" : "info").append(" - ").append(detail).append("\r\n");
         out.step(i, status, detail);
     }
@@ -155,7 +159,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         }
         report(S_OPEN, OK, "live view on");
         listen();
-        reviewOff();
+        if (REVIEW_OFF) reviewOff(); else startFrames();
     }
 
     public void surfaceChanged(SurfaceHolder h, int format, int w, int hh) { }
@@ -193,7 +197,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
     // ------------------------------------------------------------------------------ Auto Review, as Smart Remote does
 
     private void reviewOff() {
-        out.step(S_REVIEW, RUN, "installing Sony's review control…");
+        
         String back = restore(cameraEx, prefs);   // a time left at 0 by a test that stopped on the way
         if (back != null) note(back);
         try {
@@ -280,6 +284,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         try {
             Class<?> cs = Class.forName("com.sony.scalar.hardware.CameraSequence");
             sequence = cs.getMethod("open", Class.forName("com.sony.scalar.hardware.CameraEx")).invoke(null, cameraEx);
+            catchTickets(cs);
             Class<?> oc = Class.forName("com.sony.scalar.hardware.CameraSequence$Options");
             Object o = oc.newInstance();
             option(o, "PREVIEW_FRAME_RATE", 30000);
@@ -300,6 +305,47 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         }
         framesAskedAt = SystemClock.uptimeMillis();
         ui.post(poll);
+    }
+
+    /**
+     * The camera's HAL can hand a capture to the sequence as a RAW "ticket" (libcamera.so:
+     * "CAMERASEQ_EVENT_RAW_CAPTURE(ticket=..)"), and Sony's Java drops it when no shutter-sequence
+     * callback is set: the picture is lost and the ticket never given back ("the ticket is lost!!!").
+     * Not the capture hook (nothing is asked of the camera: no 0x0120): only the Java field is filled,
+     * so a ticket that comes anyway is seen, logged, and stored as it is (Sony's storeImage) rather than lost.
+     */
+    private void catchTickets(Class<?> cs) {
+        try {
+            final Class<?> cb = Class.forName("com.sony.scalar.hardware.CameraSequence$ShutterSequenceCallback");
+            java.lang.reflect.Field f = cs.getDeclaredField("mShutterSeqCallback");
+            f.setAccessible(true);
+            f.set(sequence, Proxy.newProxyInstance(cb.getClassLoader(), new Class<?>[] { cb }, new InvocationHandler() {
+                public Object invoke(Object p, Method m, Object[] a) {
+                    if (m.getName().equals("onShutterSequence") && a != null && a.length > 1) ticket(a[0], a[1]);
+                    return objectMethod(p, m, a);
+                }
+            }));
+            note("listening for RAW tickets (Java field only)");
+        } catch (Throwable e) {
+            note("no RAW ticket listener: " + Probe.why(e));
+        }
+    }
+
+    private int tickets;
+
+    private void ticket(Object raw, Object seq) {
+        tickets++;
+        note("RAW TICKET for picture " + shotNo + " (" + raw + "): storing it as it is");
+        flush();
+        try {
+            Class<?> rd = Class.forName("com.sony.scalar.hardware.CameraSequence$RawData");
+            seq.getClass().getMethod("storeImage", rd, boolean.class).invoke(seq, raw, true);
+            note("RAW ticket stored (storeImage, released)");
+        } catch (Throwable e) {
+            note("RAW ticket store failed: " + Probe.why(e) + "; releasing it");
+            try { raw.getClass().getMethod("release").invoke(raw); } catch (Throwable e2) { note("RAW release: " + Probe.why(e2)); }
+        }
+        flush();
     }
 
     private final Runnable poll = new Runnable() {
@@ -439,16 +485,29 @@ final class LiveLookTest implements SurfaceHolder.Callback {
     private void waitStored(final long since, final boolean framesStopped) {
         if (closed) return;
         long waited = SystemClock.uptimeMillis() - since;
+        if (waited >= 1500 && SystemClock.uptimeMillis() - lastFlushAt >= 3000) flushCatalogue();
         Probe.Row row = newestCatalogued();
         if (row != null && row.folder * 10000 + row.number > highestSeen) {
             highestSeen = row.folder * 10000 + row.number;
             stored++;
             File f = dcfFile(row.folder, row.number);
             try { Library.ignore(card, f); } catch (Exception e) { note("ignore: " + Probe.why(e)); }
-            note("picture " + shotNo + ": " + f.getName() + " in the catalogue " + waited + " ms after the shutter's answer"
+            note("picture " + shotNo + ": " + f.getName() + " in the catalogue " + waited + " ms after the shutter's answer" + (tickets > 0 ? " (" + tickets + " RAW ticket(s) so far)" : "")
                     + (storeReport != null ? "; store report " + storeReport : "; no store report") + "; " + (frames - framesAtShot) + " frames since the shutter");
             report(step(), OK, f.getName() + " stored " + waited + " ms after the shutter" + (framesStopped ? " (frames stopped by then)" : ", " + (frames - framesAtShot) + " frames since"));
             flush();
+            if (shotNo == 1) saveSystemLog();
+            if (shotNo < 2 && !framesStopped && !closeAsked) ui.postDelayed(new Runnable() { public void run() { nextShot(); } }, 2000);
+            else endPictures();
+            return;
+        }
+        if (storeReport != null && waited > 4000) {   // the camera says it stored it, the catalogue doesn't list it yet
+            stored++;
+            note("picture " + shotNo + ": the camera reports it stored (" + storeReport + "), not in the catalogue after " + waited + " ms");
+            report(step(), OK, storeReport + " stored (the camera's report; not yet in the catalogue)");
+            storeReport = null;
+            flush();
+            if (shotNo == 1) saveSystemLog();
             if (shotNo < 2 && !framesStopped && !closeAsked) ui.postDelayed(new Runnable() { public void run() { nextShot(); } }, 2000);
             else endPictures();
             return;
@@ -487,6 +546,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
      */
     private void hold(String why) {
         held = true;
+        saveSystemLog();
         note("HOLDING the camera: " + why + "; not released (that froze it before)");
         reviewBack();
         report(S_CLOSED, FAIL, why + ". The camera is kept open. Turn the camera off; if it won't go off, take the battery out.");
@@ -540,6 +600,100 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         Thread.setDefaultUncaughtExceptionHandler(previousHandler);
         flush();
         host.finished();
+    }
+
+    private volatile boolean flushing;
+    private long lastFlushAt;
+
+    /**
+     * Sony's catalogue may not list a stored picture until it is told to look (Smart Remote's
+     * MediaObserverAggregator.invokeFlushingMediaDatabase, after each picture): loadMedia, then
+     * Images.waitAndUpdateDatabase, then waitLoadMediaComplete. They wait, so on a thread of their own.
+     */
+    private void flushCatalogue() {
+        if (flushing || mediaId == null) return;
+        flushing = true;
+        lastFlushAt = SystemClock.uptimeMillis();
+        final long t = lastFlushAt;
+        new Thread(new Runnable() {
+            public void run() {
+                String r;
+                try {
+                    Class<?> store = Class.forName("com.sony.scalar.provider.AvindexStore");
+                    Object a = store.getMethod("loadMedia", String.class, int.class).invoke(null, mediaId, 1);
+                    Object b = Class.forName("com.sony.scalar.provider.AvindexStore$Images").getMethod("waitAndUpdateDatabase", android.content.ContentResolver.class, String.class)
+                            .invoke(null, activity.getContentResolver(), mediaId);
+                    Object c = store.getMethod("waitLoadMediaComplete", String.class).invoke(null, mediaId);
+                    r = "catalogue flushed in " + (SystemClock.uptimeMillis() - t) + " ms (" + a + ", " + b + ", " + c + ")";
+                } catch (Throwable e) {
+                    r = "catalogue flush: " + Probe.why(e);
+                }
+                final String line = r;
+                ui.post(new Runnable() { public void run() { flushing = false; if (flushNotes++ < 6) note(line); } });
+            }
+        }, "catalogue-flush").start();
+    }
+
+    private int flushNotes;
+    private boolean logSaved;
+
+    /**
+     * The system log as it stands (the camera service's and Sony's libraries' own lines: the SDCom
+     * messages and their answers, any RAW tickets), to LATENT/LOOKLOG.TXT. Read from /dev/log/main on
+     * a thread of its own, up to 3 s; never touches the camera.
+     */
+    private void saveSystemLog() {
+        if (logSaved) return;
+        logSaved = true;
+        out.step(S_SYSLOG, RUN, "saving…");
+        final StringBuilder text = new StringBuilder();
+        final int[] entries = { 0 };
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                java.io.FileInputStream in = null;
+                try {
+                    in = new java.io.FileInputStream("/dev/log/main");
+                    byte[] b = new byte[5 * 1024 + 20];
+                    for (int n; (n = in.read(b)) > 20; ) {
+                        int len = (b[0] & 0xff) | (b[1] & 0xff) << 8;
+                        int pid = le(b, 4), sec = le(b, 12);
+                        int end = Math.min(n, 20 + len), p = 20;
+                        int prio = b[p++];
+                        int tagEnd = p;
+                        while (tagEnd < end && b[tagEnd] != 0) tagEnd++;
+                        String tag = new String(b, p, tagEnd - p, "UTF-8");
+                        int msgEnd = tagEnd + 1;
+                        while (msgEnd < end && b[msgEnd] != 0) msgEnd++;
+                        String msg = msgEnd > tagEnd + 1 ? new String(b, tagEnd + 1, msgEnd - tagEnd - 1, "UTF-8") : "";
+                        synchronized (text) {
+                            text.append(sec).append(' ').append(pid).append(' ').append("VDIWEF".charAt(Math.max(0, Math.min(5, prio - 2))))
+                                    .append('/').append(tag).append(": ").append(msg.trim()).append("\r\n");
+                            entries[0]++;
+                        }
+                    }
+                } catch (Throwable e) {
+                    synchronized (text) { text.append("stopped: ").append(Probe.why(e)).append("\r\n"); }
+                } finally {
+                    try { if (in != null) in.close(); } catch (Throwable ignored) { }
+                }
+            }
+        }, "log-reader");
+        t.start();
+        try { t.join(3000); } catch (InterruptedException ignored) { }   // the device blocks once it has given all it holds
+        synchronized (text) {
+            try {
+                FileOutputStream o = new FileOutputStream(new File(Library.home(card), "LOOKLOG.TXT"));
+                try { o.write(text.toString().getBytes("UTF-8")); } finally { o.close(); }
+                report(S_SYSLOG, OK, entries[0] + " lines in LATENT/LOOKLOG.TXT" + (tickets > 0 ? "; " + tickets + " RAW ticket(s)" : ""));
+            } catch (Exception e) {
+                report(S_SYSLOG, FAIL, Probe.why(e));
+            }
+        }
+        flush();
+    }
+
+    private static int le(byte[] b, int i) {
+        return (b[i] & 0xff) | (b[i + 1] & 0xff) << 8 | (b[i + 2] & 0xff) << 16 | (b[i + 3] & 0xff) << 24;
     }
 
     // ------------------------------------------------------------------------------ helpers

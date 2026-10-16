@@ -469,7 +469,7 @@ public class MainActivity extends Activity {
         if (action.equals("viewfinder")) return viewfinderOn() ? "Shoot stays in Latent. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
         if (action.equals("focusFirst")) return focusFirst() ? "A full press waits for focus to lock, as AF-S does." : "A full press takes the picture at once, in focus or not.";
         if (action.equals("shootTest")) return "Latent focuses and takes one photo itself. Changes no setting.";
-        if (action.equals("lookTest")) return "Live frames with two photos taken. Auto Review is off while it runs.";
+        if (action.equals("lookTest")) return "Live frames with two photos taken, and the camera's own log. Changes no setting.";
         if (action.equals("restartTest")) return "Latent gives the camera back and starts again by itself. Takes no photo.";
         if (action.equals("develop")) return "Ends the roll here and develops the " + exposed + " shot so far.";
         if (action.equals("change")) return current != null && current.endless() ? "This roll's photos keep developing." : "Keeps the frames shot so far for developing.";
