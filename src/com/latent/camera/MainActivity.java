@@ -186,7 +186,7 @@ public class MainActivity extends Activity {
         };
         worker.execute(new Runnable() {
             public void run() {
-                RestartTest.finish(card, prefs, createdAt, listener);
+                RestartTest.finish(MainActivity.this, card, prefs, createdAt, listener);
                 ui.post(new Runnable() { public void run() { probeStage = 2; screen.invalidate(); } });
             }
         });
@@ -1046,13 +1046,15 @@ public class MainActivity extends Activity {
             public void run() {
                 // developing into the camera roll needs the catalogue and a verified memory path
                 FilmCore.setVariant(prefs.getInt("lookVariant", 0));   // the inner loop the speed test chose
-                HardwareDevelop h = new HardwareDevelop(MainActivity.this, card, new StringBuilder(), null);
+                StringBuilder hl = new StringBuilder();
+                HardwareDevelop h = new HardwareDevelop(MainActivity.this, card, hl, null);
                 try {
                     h.prepare(false);
                     hw = h;
                 } catch (Throwable e) {
                     hw = null;
-                    devLog("camera roll develop unavailable (" + Probe.why(e) + "); developing in software");
+                    devLog("camera roll develop unavailable (" + Probe.why(e) + "); developing in software. "
+                            + hl.toString().trim().replace("\r\n", "; "));
                 }
                 // the strip shows frames developed on an earlier, paused visit too
                 for (int i = 0; i < r.frames.size(); i++) if (r.developed(i) != null) loadThumb(r.developed(i));

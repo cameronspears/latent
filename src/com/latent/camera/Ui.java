@@ -722,9 +722,9 @@ final class Ui {
     static final String[] RESTART_PLAN = {
             "Copies Sony's own camera apps (Smart Remote among them) to LATENT/APPS, to be read on a computer. Only reads.",
             "Opens the camera with live view for a moment, the way the viewfinder does, and gives it back. Takes no picture.",
-            "Then Latent ends and starts again by itself, a black screen in between, and checks it can develop. Watch whether the camera's own screen shows up.",
+            "Then Latent ends and starts again by itself, a black screen in between, and checks when it can develop again (up to a minute and a half). Watch whether the camera's own screen shows up.",
     };
-    static final String RESTART_FOOTER = "About ten seconds. Log: LATENT/RESTART.TXT, the apps in LATENT/APPS.";
+    static final String RESTART_FOOTER = "Up to two minutes. Log: LATENT/RESTART.TXT, the apps in LATENT/APPS.";
     static final String SHOOT_FOOTER = "About twenty seconds. Hold it level at first. MENU stops it. Log: LATENT/SHOOTING.TXT";
     static final String LIVE_FOOTER = "About ten seconds. MENU stops it. Results go to LATENT/LIVEVIEW.TXT.";
 

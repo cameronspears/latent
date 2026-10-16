@@ -112,6 +112,14 @@ final class RestartTest implements SurfaceHolder.Callback {
                     long c = copy(src, dst);
                     index.append("  ").append(dst.getName()).append('\t').append(s).append('\t').append(c < 0 ? "unreadable" : String.valueOf(src.length())).append("\r\n");
                     if (c > 0) { files++; bytes += c; }
+                    // a system app's code is beside it, optimised (SmartRemote.odex)
+                    File odex = new File(s.replaceAll("\\.apk$", ".odex"));
+                    if (s.endsWith(".apk") && odex.isFile()) {
+                        File od = new File(to, String.format(Locale.US, "A%04d.ODX", n));
+                        long co = copy(odex, od);
+                        index.append("  ").append(od.getName()).append('\t').append(odex.getPath()).append('\t').append(co < 0 ? "unreadable" : String.valueOf(odex.length())).append("\r\n");
+                        if (co > 0) { files++; bytes += co; }
+                    }
                 }
                 String libDir = ai.nativeLibraryDir != null ? ai.nativeLibraryDir : ai.dataDir + "/lib";
                 File[] libs = new File(libDir).listFiles();
@@ -237,7 +245,14 @@ final class RestartTest implements SurfaceHolder.Callback {
         host.showLive(false);
         host.note("");
         String mem = memory();
-        report(S_BACK, OK, "released; image memory in this process: " + mem);
+        StringBuilder hl = new StringBuilder();
+        String full;
+        long t = SystemClock.uptimeMillis();
+        try { new HardwareDevelop(activity, card, hl, null).prepare(true); full = "passed"; }
+        catch (Throwable e) { full = "failed (" + Probe.why(e) + ")"; }
+        note("in this process after the release: 64 KB buffer " + mem + "; the darkroom's check " + full + " in "
+                + (SystemClock.uptimeMillis() - t) + " ms: " + hl.toString().trim().replace("\r\n", "; "));
+        report(S_BACK, OK, "released; in this process the buffer is " + mem + ", the darkroom's check " + (full.startsWith("passed") ? "passed" : "failed"));
         if (!thenRestart) { flush(); host.finished(); return; }
         out.step(S_RESTART, RUN, "restarting…");
         long at = SystemClock.uptimeMillis();
@@ -302,7 +317,7 @@ final class RestartTest implements SurfaceHolder.Callback {
     }
 
     /** In the new process: how long the restart took, and whether the memory is back. Worker thread; returns the log lines. */
-    static String finish(File card, SharedPreferences prefs, long createdAt, Probe.Listener out) {
+    static String finish(android.content.Context ctx, File card, SharedPreferences prefs, long createdAt, Probe.Listener out) {
         long at = prefs.getLong(P_AT, 0);
         StringBuilder log = new StringBuilder();
         long ms = at > 0 ? createdAt - at : -1;
@@ -311,16 +326,44 @@ final class RestartTest implements SurfaceHolder.Callback {
         log.append(STEPS[S_RESTART]).append(": ok - ").append(restart).append("\r\n");
         out.step(S_MEMORY, RUN, "checking…");
         String mem = memory();
-        boolean ok = mem.equals("available");
-        out.step(S_MEMORY, ok ? OK : FAIL, ok ? "available: the darkroom can run now" : mem);
-        log.append(STEPS[S_MEMORY]).append(": ").append(ok ? "ok" : "FAILED").append(" - ").append(mem).append("\r\n");
+        log.append("  64 KB buffer at once: ").append(mem).append("\r\n");
+        // the darkroom's own check (Sony's buffers against the private read/write, 64 KB to 2 MB), until it passes:
+        // v0.33.0 found the buffer at once, yet the darkroom's check failed ~10 s after the restart
+        boolean ok = false;
+        long since = SystemClock.uptimeMillis() - at, first = SystemClock.uptimeMillis();
+        String last = "";
+        for (long wait : new long[] { 0, 5000, 10000, 20000, 30000, 45000, 60000, 90000 }) {
+            long due = first + wait;
+            while (SystemClock.uptimeMillis() < due) { try { Thread.sleep(200); } catch (InterruptedException e) { break; } }
+            long t = SystemClock.uptimeMillis();
+            StringBuilder hl = new StringBuilder();
+            try {
+                new HardwareDevelop(ctx, card, hl, null).prepare(true);
+                ok = true;
+            } catch (Throwable e) {
+                last = Probe.why(e);
+            }
+            long after = t - at;
+            log.append("  darkroom check ").append(after / 1000).append(" s after the restart was asked (").append(SystemClock.uptimeMillis() - t).append(" ms): ")
+                    .append(ok ? "passed" : "failed, " + hl.toString().trim().replace("\r\n", "; ")).append("\r\n");
+            out.step(S_MEMORY, ok ? OK : RUN, ok ? "the darkroom can run, " + after / 1000 + " s after the camera went back" : "not yet (" + after / 1000 + " s)…");
+            append(card, log);
+            log.setLength(0);
+            if (ok) break;
+        }
+        if (!ok) out.step(S_MEMORY, FAIL, "still taken after 90 s: " + last);
+        log.append(STEPS[S_MEMORY]).append(": ").append(ok ? "ok" : "FAILED").append(" (first ask ").append(since).append(" ms after the restart was asked)\r\n");
         prefs.edit().remove(P_AT).remove(P_STEPS).commit();
+        append(card, log);
+        return log.toString();
+    }
+
+    private static void append(File card, StringBuilder log) {
         try {
             FileOutputStream o = new FileOutputStream(new File(Library.home(card), "RESTART.TXT"), true);
             try { o.write(log.toString().getBytes("UTF-8")); } finally { o.close(); }
         } catch (Exception ignored) {
             // the screen says the same
         }
-        return log.toString();
     }
 }
