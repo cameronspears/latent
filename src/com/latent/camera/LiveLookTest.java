@@ -23,11 +23,11 @@ import java.util.Locale;
  * Latent's worker at the viewfinder's pace, Latent's own focus and shutter, and Latent off the
  * processor while each picture is written (Viewfinder.STORE_QUIET_MS).
  *
- * The answer comes from the card itself, not from Sony's catalogue: v0.35.0's test was fooled by
- * catalogue entries a frozen session had left without files, and telling the catalogue to look while
- * a picture is being written lost that picture. So: two pictures, 12 s for the camera to write them,
- * the camera given back, Latent restarted (Relaunch), and the new process counts the new files on the
- * card. Both there: Film look on live view comes on.
+ * The answer comes from the card itself, not only from Sony's catalogue: v0.35.0's test was fooled by
+ * catalogue entries a frozen session had left without files. So: two pictures, Sony's catalogue told to
+ * look 2.5 s after the last one (the camera writes a picture out then), the camera given back once both
+ * are listed, Latent restarted (Relaunch), and the new process counts the new files on the card. Both
+ * there: Film look on live view comes on.
  *
  * Kept off every roll (IGNORE.TXT). Log: LATENT/LIVELOOK.TXT, written before every risky step.
  */
@@ -37,7 +37,7 @@ final class LiveLookTest implements SurfaceHolder.Callback {
     static final int S_OPEN = 0, S_FRAMES = 1, S_SHOT1 = 2, S_SHOT2 = 3, S_BACK = 4, S_RESTART = 5, S_CARD = 6;
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
     static final long FIRST_FRAME_MS = 15000, FRAMES_BEFORE_MS = 2500, FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000,
-            BETWEEN_MS = 8000, WRITE_MS = 12000;
+            BETWEEN_MS = 8000;
     /** Prefs across the restart: when it was asked for, the card's highest photo before, pictures taken, the steps so far. */
     static final String P_AT = "lookTestAt", P_BEFORE = "lookTestBefore", P_SHOTS = "lookTestShots", P_STEPS = "lookTestSteps";
 
@@ -383,14 +383,59 @@ final class LiveLookTest implements SurfaceHolder.Callback {
         if (closed) return;
         if (shotNo < 2) ui.postDelayed(new Runnable() { public void run() { nextShot(); } }, BETWEEN_MS);
         else {
-            out.step(S_BACK, RUN, "giving the camera " + WRITE_MS / 1000 + " s to write…");
-            ui.postDelayed(new Runnable() { public void run() { handBack(); } }, WRITE_MS);
+            out.step(S_BACK, RUN, "waiting for the pictures to be saved…");
+            waitListed();
         }
     }
 
+    /**
+     * The camera keeps a new picture in its memory until told to look (Sony's catalogue, as Smart Remote
+     * does it: "flushing the file"); told too soon it's lost (v0.35.0), never told it stays there and giving
+     * the camera back freezes it (v0.35.1). So: 2.5 s after the last shutter, then every 1.5 s, until the
+     * catalogue lists every picture taken; then the camera goes back. Not listed in 30 s: it's kept.
+     */
+    private void waitListed() {
+        if (closed || held) return;
+        long since = SystemClock.uptimeMillis() - lastShutterAt;
+        if (since < Viewfinder.FLUSH_AFTER_MS) { ui.postDelayed(new Runnable() { public void run() { waitListed(); } }, Viewfinder.FLUSH_AFTER_MS - since); return; }
+        if (since > Viewfinder.SAVE_WAIT_MS) { hold(taken - listed + " picture(s) not saved after " + Viewfinder.SAVE_WAIT_MS / 1000 + " s"); return; }
+        new Thread(new Runnable() {
+            public void run() {
+                long t = SystemClock.uptimeMillis();
+                String r = "ok";
+                int n = 0;
+                try {
+                    Class<?> store = Class.forName("com.sony.scalar.provider.AvindexStore");
+                    store.getMethod("loadMedia", String.class, int.class).invoke(null, mediaId, 1);
+                    Class.forName("com.sony.scalar.provider.AvindexStore$Images").getMethod("waitAndUpdateDatabase", android.content.ContentResolver.class, String.class)
+                            .invoke(null, activity.getContentResolver(), mediaId);
+                    store.getMethod("waitLoadMediaComplete", String.class).invoke(null, mediaId);
+                    Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
+                    android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
+                    for (Probe.Row row : Probe.query(activity.getContentResolver(), uri)) if (row.folder * 10000 + row.number > highestBefore) n++;
+                } catch (Throwable e) {
+                    r = Probe.why(e);
+                }
+                final int found = n;
+                final String res = r + ", " + (SystemClock.uptimeMillis() - t) + " ms";
+                ui.post(new Runnable() {
+                    public void run() {
+                        listed = found;
+                        note("told the catalogue to look (" + res + "): " + found + " of " + taken + " listed, " + (SystemClock.uptimeMillis() - lastShutterAt) + " ms after the last shutter");
+                        flush();
+                        if (found >= taken) handBack();
+                        else ui.postDelayed(new Runnable() { public void run() { waitListed(); } }, Viewfinder.FLUSH_EVERY_MS);
+                    }
+                });
+            }
+        }, "catalogue-look").start();
+    }
+
+    private int listed;
+
     /** Every picture has had its time: frames off, the camera back, then Latent restarts to count the files. */
     private void handBack() {
-        if (closed) return;
+        if (closed || held) return;
         stopFrames();
         note("giving the camera back, " + (SystemClock.uptimeMillis() - lastShutterAt) / 1000 + " s after the last picture");
         flush();
@@ -471,12 +516,12 @@ final class LiveLookTest implements SurfaceHolder.Callback {
     /** MENU or leaving Latent: the camera goes back, unless a picture may be on its way (then: when it's had its time). */
     void close() {
         if (closed || held) return;
-        if (shooting || (lastShutterAt > 0 && SystemClock.uptimeMillis() - lastShutterAt < WRITE_MS)) {
-            note("close asked with a picture being written: the camera goes back once it's had its time");
+        if (shooting || listed < taken) {   // a picture still in the camera's memory: it goes back once they're saved
+            note("close asked with a picture not yet saved: the camera goes back once they are");
             flush();
             ui.removeCallbacksAndMessages(null);
-            ui.postDelayed(new Runnable() { public void run() { if (!closed) { stopFrames(); releaseCamera(); finish(false); } } },
-                    Math.max(500, WRITE_MS - (SystemClock.uptimeMillis() - lastShutterAt)));
+            stopFrames();
+            if (!shooting) waitListed();
             return;
         }
         stopFrames();

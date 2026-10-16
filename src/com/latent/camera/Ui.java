@@ -742,7 +742,7 @@ final class Ui {
     };
     static final String[] LOOK_PLAN = {
             "Opens the camera and runs the film look on its live frames exactly as the viewfinder does, pausing while each photo is written.",
-            "Takes two photos, gives the camera 12 seconds to write them, gives it back, and restarts Latent. Kept off your rolls.",
+            "Takes two photos, waits until the camera has saved them, gives it back, and restarts Latent. Kept off your rolls.",
             "Then counts the new photos on the card itself. If both are there, Film look on live view comes on.",
     };
     static final String LOOK_FOOTER = "About 45 seconds. Log: LATENT/LIVELOOK.TXT.";

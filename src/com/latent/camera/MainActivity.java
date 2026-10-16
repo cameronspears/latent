@@ -387,7 +387,7 @@ public class MainActivity extends Activity {
      */
     private void backKey(int k) {
         if (k != K_ENTER || !ready || current == null) return;
-        if (Viewfinder.opened && current.endless() && vfWaiting > 0) restartToDevelop(vfWaiting + " picture(s) to develop");
+        if (Viewfinder.opened && current.endless() && (vfWaiting > 0 || (vf != null && vf.shots > 0))) restartToDevelop("photos to develop");
         else if (wantsDeveloping(current)) startDevelop(current);
         else goShoot();
     }
@@ -857,6 +857,14 @@ public class MainActivity extends Activity {
             public void changed() { screen.invalidate(); }
             public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
             public void shot(File photo, String film) { vfShot(photo, film); }
+            public void stuck(String what) {
+                devLog("viewfinder: " + what);
+                restarting = false;
+                relaunchWhenClosed = false;
+                status = what;   // stays up: nothing else can happen until the camera is switched off
+                ui.removeCallbacks(clearToast);
+                screen.invalidate();
+            }
             public void closed(String why) {
                 vf = null;
                 if (relaunchWhenClosed) { relaunch(); return; }   // the camera is back: Latent starts again and develops
@@ -947,7 +955,8 @@ public class MainActivity extends Activity {
     private void hideViewfinder() {
         if (vf == null) return;
         ui.removeCallbacks(closeWhenFinished);
-        if (vfWaiting > 0) { restartToDevelop(vfWaiting + " picture(s) to develop"); return; }
+        int taken = Math.max(vfWaiting, vf.shots);   // listed or not yet: the hand-back waits for them
+        if (taken > 0) { restartToDevelop(taken + " picture(s) to develop"); return; }
         vf.hide();
         if (mode == PHOTO) mode = BACK;
         screen.invalidate();
@@ -1159,7 +1168,7 @@ public class MainActivity extends Activity {
         }
         if (r.frames.isEmpty()) for (File f : r.exposures(photos)) r.frames.add(f.getPath());
         if (r.frames.isEmpty()) { toast("No exposures on this roll yet. Go shoot."); return; }
-        if (!quiet) r.state = Roll.DEVELOPING;   // an endless roll stays loaded while its photos develop
+        if (!quiet && !r.endless()) r.state = Roll.DEVELOPING;   // an endless roll stays loaded while its photos develop
         try { r.save(); } catch (Exception e) { toast("Could not write the roll: " + e.getMessage()); return; }
         r.cleanTemp();
         developing = r;
@@ -1462,6 +1471,19 @@ public class MainActivity extends Activity {
             return;
         }
         long secs = (System.currentTimeMillis() - devStarted) / 1000;
+        if (r.endless()) {   // the photos just shot are in the camera roll: back to the camera back, ready to shoot
+            final int n = r.developedCount() - devDoneAtStart;
+            final String m = devFailed == 0 ? n + (n == 1 ? " photo" : " photos") + " developed" : devFailed + " photo(s) could not be developed";
+            endDarkroom();
+            refresh(new Runnable() {
+                public void run() {
+                    if (shootAfterFrame) { shootAfterFrame = false; goShoot(); return; }
+                    mode = BACK;
+                    toast(m);
+                }
+            });
+            return;
+        }
         final String msg = devFailed == 0 ? r.label() + " developed in " + secs / 60 + " min " + secs % 60 + " s"
                 : devFailed + " frame(s) could not be developed";
         endDarkroom();
@@ -1520,8 +1542,9 @@ public class MainActivity extends Activity {
             ui.postDelayed(developWhenIdle, Math.max(250, IDLE_BEFORE_DEVELOP_MS - idle));
             return;
         }
+        boolean show = developNow;   // started again to develop: the darkroom, so you can watch
         developNow = false;
-        startDevelop(endlessWaiting.get(0), true);
+        startDevelop(endlessWaiting.get(0), !show);
     }
 
     static final long IDLE_BEFORE_DEVELOP_MS = 4000;

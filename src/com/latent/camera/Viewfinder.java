@@ -60,6 +60,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         void shot(File photo, String film);
         /** The camera is given back; why is null when asked to close, else what went wrong. */
         void closed(String why);
+        /** A picture won't save, so the camera can't be given back safely: what to tell you. */
+        void stuck(String what);
     }
 
     /**
@@ -819,6 +821,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      */
     public void shoot() {
         if (closed) return;
+        if (flushingNow) { ui.postDelayed(new Runnable() { public void run() { shoot(); } }, 40); return; }   // the catalogue is looking: a moment
         keepPrint();
         shutterAt = SystemClock.uptimeMillis();
         note("Latent's shutter");
@@ -866,6 +869,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         }
         if (status == 0) {
             shots++;
+            lastAnswerAt = now;
             shotFilms.add(filmId != null ? filmId : "");
             quietUntil = now + STORE_QUIET_MS;
             flashUntil = now + FLASH_MS;
@@ -905,7 +909,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     /** A picture is being taken or stored (or may be): the camera mustn't be given back yet. */
     private boolean storing() {
-        return release.shooting || stored < shots || SystemClock.uptimeMillis() < watchUntil && stored < shots + (pendingPrint != null ? 1 : 0);
+        return release.shooting || stored < shots;   // until Sony's catalogue lists every picture (it's written then)
     }
 
     /**
@@ -917,11 +921,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private void findStored() {
         if (catalogueBusy || closed) return;
         long now = SystemClock.uptimeMillis();
-        if (now >= watchUntil) {   // the wait is over
-            if (stored < shots) {   // taken but never seen: counted anyway, found by number next time
-                note((shots - stored) + " picture(s) not seen in the catalogue");
-                for (; stored < shots; stored++) host.shot(null, nextFilm());
-            }
+        if (now >= watchUntil && stored >= shots) {   // every picture listed, nothing more to wait for
             if (pendingPrint != null) { pendingPrint.recycle(); pendingPrint = null; }   // a full press that took nothing
             flushLog();
             return;
@@ -929,13 +929,20 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (!baselineKnown || mediaId == null) { ui.postDelayed(findAgain, 300); return; }
         catalogueBusy = true;
         final int after = highestKnown;
+        // the camera keeps a new picture in its memory until told to look (Smart Remote: "flushing the file");
+        // told too soon (v0.35.0, 0.3 s) it's lost, never told (v0.35.1) it stays there and giving the camera
+        // back freezes it. v0.34.1 told it ~2 s after the shutter and both were written. Not during a picture.
+        final boolean flushNow = stored < shots && !release.shooting && lastAnswerAt > 0 && now - lastAnswerAt >= FLUSH_AFTER_MS
+                && now - lastFlushAt >= FLUSH_EVERY_MS;
+        if (flushNow) { lastFlushAt = now; flushingNow = true; }
         catalogue.execute(new Runnable() {
             public void run() {
                 final java.util.ArrayList<Probe.Row> found = new java.util.ArrayList<Probe.Row>();
                 String problem = null;
+                long ft = SystemClock.uptimeMillis();
+                if (flushNow) { try { flushCatalogue(); } finally { flushingNow = false; } }
+                final long flushMs = flushNow ? SystemClock.uptimeMillis() - ft : -1;
                 try {
-                    // never flushCatalogue() here: v0.35.0 flushed 0.3 s after the shutter, the picture was
-                    // listed at once and never written, and giving the camera back then froze it
                     Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
                     android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
                     // any new entry: a picture just taken is catalogued before it is marked as having its JPEG
@@ -952,6 +959,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                     public void run() {
                         catalogueBusy = false;
                         if (why != null) note("catalogue: " + why);
+                        if (flushMs >= 0 && flushNotes++ < 20) note("told the catalogue to look (" + flushMs + " ms, " + (SystemClock.uptimeMillis() - lastAnswerAt) + " ms after the last shutter)");
                         for (Probe.Row r : found) {
                             int n = r.folder * 10000 + r.number;
                             if (n <= highestKnown) continue;
@@ -976,6 +984,24 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     }
 
     private final Runnable findAgain = new Runnable() { public void run() { findStored(); } };
+
+    static final long FLUSH_AFTER_MS = 2500, FLUSH_EVERY_MS = 1500;
+    private long lastAnswerAt, lastFlushAt;
+    private volatile boolean flushingNow;
+    private int flushNotes, flushFails;
+
+    /** Sony's catalogue told to look: loadMedia, Images.waitAndUpdateDatabase, waitLoadMediaComplete (Smart Remote's order). Catalogue thread. */
+    private void flushCatalogue() {
+        try {
+            Class<?> store = Class.forName("com.sony.scalar.provider.AvindexStore");
+            store.getMethod("loadMedia", String.class, int.class).invoke(null, mediaId, 1);
+            Class.forName("com.sony.scalar.provider.AvindexStore$Images").getMethod("waitAndUpdateDatabase", android.content.ContentResolver.class, String.class)
+                    .invoke(null, activity.getContentResolver(), mediaId);
+            store.getMethod("waitLoadMediaComplete", String.class).invoke(null, mediaId);
+        } catch (Throwable e) {
+            if (flushFails++ < 3) note("catalogue flush: " + Probe.why(e));
+        }
+    }
 
     /** The film of the oldest picture not yet counted (taken in this order). */
     private String nextFilm() { return shotFilms.isEmpty() ? filmId : shotFilms.removeFirst(); }
@@ -1077,8 +1103,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     // ------------------------------------------------------------------------------ closing
 
-    private boolean closing;
+    private boolean closing, held;
     private long closingAt;
+    static final long SAVE_WAIT_MS = 30000;
     private String closeWhy;
 
     /**
@@ -1101,10 +1128,21 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     private final Runnable closeStep = new Runnable() {
         public void run() {
-            if (closed) return;
-            // with the frames running, longer: v0.31 froze the camera releasing it with pictures in doubt
-            if (storing() && SystemClock.uptimeMillis() - closingAt < (liveLook ? 20000 : 10000) && cameraEx != null) { ui.postDelayed(this, 200); return; }
-            ui.removeCallbacks(poll);
+            if (closed || held) return;
+            ui.removeCallbacks(poll);   // no frames while closing: the camera's processor is for the pictures
+            if (storing() && cameraEx != null) {
+                // never given back with a picture still in the camera's memory: every time that froze it
+                if (SystemClock.uptimeMillis() - closingAt < SAVE_WAIT_MS) {
+                    if (!catalogueBusy) findStored();   // keeps telling the catalogue to look
+                    ui.postDelayed(this, 200);
+                    return;
+                }
+                held = true;
+                note("HOLDING the camera: " + (shots - stored) + " picture(s) not listed after " + SAVE_WAIT_MS / 1000 + " s; not given back (that froze it every time)");
+                flushLog();
+                host.stuck("A photo isn't saving. Turn the camera off (battery out if it won't).");
+                return;
+            }
             stopSequence();
             if (cameraEx != null && direct) {
                 stopDirect(new Runnable() { public void run() { finishClose(); } });
