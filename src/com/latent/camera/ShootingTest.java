@@ -12,7 +12,10 @@ import android.os.SystemClock;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 
+import android.content.Intent;
+
 import java.io.File;
+import java.util.concurrent.CountDownLatch;
 import java.io.FileOutputStream;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -32,9 +35,11 @@ import java.lang.reflect.Proxy;
  */
 final class ShootingTest implements SurfaceHolder.Callback {
     static final String[] STEPS = { "Open the camera", "Live view", "Focus options", "Level sensor", "Focus", "Take a picture",
-            "Live frames", "A look on a frame", "Develop the shot", "Camera closed" };
-    static final int S_OPEN = 0, S_LIVE = 1, S_OPTIONS = 2, S_LEVEL = 3, S_FOCUS = 4, S_SHOT = 5, S_FRAMES = 6, S_LOOK = 7, S_DEVELOP = 8,
+            "Darkroom while shooting", "Memory after release", "Develop the shot", "Camera closed" };
+    static final int S_OPEN = 0, S_LIVE = 1, S_OPTIONS = 2, S_LEVEL = 3, S_FOCUS = 4, S_SHOT = 5, S_DARK = 6, S_MEMORY = 7, S_DEVELOP = 8,
             S_CLOSED = 9;
+    /** Live frames and the look on one: known from v0.21-0.23 (up to 19 a second; 143 ms at 320 px), not on screen this run. */
+    static final int S_FRAMES = -1, S_LOOK = -1;
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
     static final int FOCUS_TRIES = 4;
     static final long FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, SAVE_TIMEOUT_MS = 15000, FRAMES_MS = 3000;
@@ -73,7 +78,10 @@ final class ShootingTest implements SurfaceHolder.Callback {
         this.context = context; this.card = card; this.surface = surface; this.stock = stock; this.out = out; this.host = host;
     }
 
+    private void step(int i, int status, String detail) { if (i >= 0) out.step(i, status, detail); }
+
     private void report(int i, int status, String detail) {
+        if (i < 0) { if (status != RUN) note("(" + detail + ")"); return; }
         if (status != RUN) log.append(STEPS[i]).append(": ").append(status == OK ? "ok" : status == FAIL ? "FAILED" : "info")
                 .append(" - ").append(detail).append("\r\n");
         out.step(i, status, detail);
@@ -96,7 +104,8 @@ final class ShootingTest implements SurfaceHolder.Callback {
             }
         });
         highestBefore = Roll.highest(Library.photos(card));
-        out.step(S_OPEN, RUN, "opening…");
+        new File(Library.home(card), "DARKPROC.TXT").delete();   // the darkroom process's answers, this run's only
+        step(S_OPEN, RUN, "opening…");
         long t = SystemClock.uptimeMillis();
         try {
             Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
@@ -127,7 +136,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             return;
         }
         report(S_OPEN, OK, "opened in " + (SystemClock.uptimeMillis() - t) + " ms");
-        out.step(S_LIVE, RUN, "starting…");
+        step(S_LIVE, RUN, "starting…");
         host.showLive(true);
         SurfaceHolder h = surface.getHolder();
         h.addCallback(this);
@@ -192,7 +201,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
 
     /** What the camera offers for focusing: Android's focus modes and Sony's own (AF mode, areas, faces, tracking). */
     private void focusOptions() {
-        out.step(S_OPTIONS, RUN, "reading…");
+        step(S_OPTIONS, RUN, "reading…");
         try {
             Camera.Parameters p = camera.getParameters();
             note("focus mode " + p.getFocusMode() + ", supported " + p.getSupportedFocusModes());
@@ -242,7 +251,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
      * (with the magnetic one on too, as Sony's level does), and asks whether it has a digital level.
      */
     private void level() {
-        out.step(S_LEVEL, RUN, "listening…");
+        step(S_LEVEL, RUN, "listening…");
         try {
             Class<?> sp = Class.forName("com.sony.scalar.sysutil.ScalarProperties");
             for (String prop : new String[] { "PROP_DEVICE_DIGITAL_LEVEL", "PROP_UI_DIGITAL_LEVEL_TYPE" }) {
@@ -318,7 +327,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         tries++;
         focusing = true;
         focusStart = SystemClock.uptimeMillis();
-        out.step(S_FOCUS, RUN, tries == 1 ? "focusing…" : "focusing, try " + tries + "…");
+        step(S_FOCUS, RUN, tries == 1 ? "focusing…" : "focusing, try " + tries + "…");
         final int attempt = tries;
         try {
             camera.autoFocus(new Camera.AutoFocusCallback() {
@@ -359,7 +368,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
 
     private void shoot() {
         if (closed) return;
-        out.step(S_SHOT, RUN, "shooting…");
+        step(S_SHOT, RUN, "shooting…");
         shooting = true;
         set("setStoreImageCompleteListener", "com.sony.scalar.hardware.CameraEx$StoreImageCompleteListener", new InvocationHandler() {
             public Object invoke(Object p, Method m, Object[] a) {
@@ -415,7 +424,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         set("setShutterListener", null, null);
         try { camera.cancelAutoFocus(); } catch (Throwable ignored) { }
         if (status != 0) { report(S_SHOT, FAIL, status == 1 ? "cancelled by the camera" : "the camera reported an error"); afterPicture(); return; }
-        out.step(S_SHOT, RUN, "saving…");
+        step(S_SHOT, RUN, "saving…");
         waitForFile(ms, SystemClock.uptimeMillis());
     }
 
@@ -458,7 +467,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             afterPicture();
             return;
         }
-        if (waited > 0 && waited % 3000 < 300) out.step(S_SHOT, RUN, "saving… " + waited / 1000 + " s");
+        if (waited > 0 && waited % 3000 < 300) step(S_SHOT, RUN, "saving… " + waited / 1000 + " s");
         ui.postDelayed(new Runnable() { public void run() { waitForFile(shutterMs, since); } }, 300);
     }
 
@@ -491,44 +500,110 @@ final class ShootingTest implements SurfaceHolder.Callback {
         }
     }
 
-    /** Live frames and the look timing are known (v0.21-0.23); this run develops right after the release instead. */
+    /** Live frames and the look timing are known (v0.21-0.23); this run tries the darkroom in its own process instead. */
     static final boolean FRAMES = false;
 
     private void afterPicture() {
         if (closed) return;
         if (FRAMES) { frames(); return; }
-        report(S_FRAMES, INFO, "skipped this run (up to 19 a second before)");
-        report(S_LOOK, INFO, "skipped this run (143 ms at 320 px before)");
-        closeCamera();
-        out.step(S_DEVELOP, RUN, "developing…");
+        step(S_DARK, RUN, "asking the darkroom process…");
+        final File answers = new File(Library.home(card), "DARKPROC.TXT");
         new Thread(new Runnable() {
             public void run() {
-                waitForImageMemory();
-                final String[] dev = developShot();
+                // 1. with the camera still open (as while shooting): does a process that never opened it get image memory?
+                final String[] open = ask(answers, new Intent(context, DarkroomService.class).putExtra(DarkroomService.WHAT, "check"), 30000);
+                final CountDownLatch released = new CountDownLatch(1);
+                ui.post(new Runnable() {
+                    public void run() {
+                        report(S_DARK, Integer.parseInt(open[0]), open[1]);
+                        closeCamera();
+                        step(S_MEMORY, RUN, "asking…");
+                        released.countDown();
+                    }
+                });
+                try { released.await(); } catch (InterruptedException e) { return; }
+                // 2. released Sony's way (the Android camera first): does Latent's own process get image memory back now?
+                final String here = memoryHere();
+                ui.post(new Runnable() {
+                    public void run() {
+                        report(S_MEMORY, here.startsWith("a buffer") ? OK : FAIL, here);
+                        step(S_DEVELOP, RUN, "developing in the darkroom process…");
+                    }
+                });
+                // 3. develop the shot in the darkroom process, as Photo mode would between shots
+                final String[] dev = shot == null || stock == null ? new String[] { String.valueOf(INFO), shot == null ? "no shot to develop" : "no film looks" }
+                        : ask(answers, new Intent(context, DarkroomService.class).putExtra(DarkroomService.WHAT, "develop")
+                                .putExtra(DarkroomService.SHOT, shot.getPath()).putExtra(DarkroomService.LUT, stock.lut.getPath())
+                                .putExtra(DarkroomService.PARAMS, lookParams()), 120000);
                 ui.post(new Runnable() { public void run() { report(S_DEVELOP, Integer.parseInt(dev[0]), dev[1]); finish(); } });
             }
-        }, "develop-shot").start();
+        }, "darkroom-ask").start();
     }
 
-    /** With the camera given back: does a photo the test didn't see land now? (Background thread.) */
-    private void watchAfterRelease() {
-        if (photoSeen || shutterStart == 0) return;
-        final long released = SystemClock.uptimeMillis();
-        for (int i = 0; i < 40; i++) {
-            if (Roll.highest(Library.photos(card)) > highestBefore) {
-                note("photo landed " + (SystemClock.uptimeMillis() - released) + " ms after the camera was released");
-                return;
-            }
-            try { Thread.sleep(250); } catch (InterruptedException e) { return; }
+    /** One small buffer from Sony's image processor in this process; what came back. Background thread. */
+    private String memoryHere() {
+        Object proc = null, buf = null;
+        long t = SystemClock.uptimeMillis();
+        try {
+            Class<?> dsp = Class.forName("com.sony.scalar.hardware.DSP");
+            proc = dsp.getMethod("createProcessor", String.class).invoke(null, "sony-di-dsp");
+            buf = HardwareDevelop.call(proc, "createBuffer", 65536);
+            return (buf != null ? "a buffer" : "none") + " in " + (SystemClock.uptimeMillis() - t) + " ms";
+        } catch (Throwable e) {
+            return Probe.why(e);
+        } finally {
+            try { if (buf != null) HardwareDevelop.call(buf, "release"); } catch (Throwable ignored) { }
+            try { if (proc != null) HardwareDevelop.call(proc, "release"); } catch (Throwable ignored) { }
         }
-        note("no photo within 10 s of the release either");
+    }
+
+    private int asked;
+
+    /** Starts the darkroom process with this request and waits for its answer line. {status, detail}. Background thread. */
+    private String[] ask(File answers, Intent request, long timeoutMs) {
+        String tag = "t" + (++asked) + "-" + SystemClock.uptimeMillis();
+        long t0 = SystemClock.uptimeMillis();
+        try {
+            if (context.startService(request.putExtra(DarkroomService.TAG, tag)) == null) return new String[] { String.valueOf(FAIL), "the darkroom process wouldn't start" };
+        } catch (Throwable e) {
+            return new String[] { String.valueOf(FAIL), "the darkroom process wouldn't start: " + Probe.why(e) };
+        }
+        while (SystemClock.uptimeMillis() - t0 < timeoutMs) {
+            try { Thread.sleep(250); } catch (InterruptedException e) { break; }
+            try {
+                java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(answers));
+                try {
+                    for (String line; (line = r.readLine()) != null; ) {
+                        if (!line.startsWith(tag + "|")) continue;
+                        String[] f = line.split("\\|", 3);
+                        note("darkroom process answered in " + (SystemClock.uptimeMillis() - t0) + " ms: " + line);
+                        return new String[] { f[1], f.length > 2 ? f[2] : "" };
+                    }
+                } finally { r.close(); }
+            } catch (java.io.IOException e) {
+                // not written yet
+            }
+        }
+        return new String[] { String.valueOf(FAIL), "no answer from the darkroom process in " + timeoutMs / 1000 + " s" };
+    }
+
+    private int[] lookParams() {
+        int[] p = new int[FilmCore.COUNT];
+        p[FilmCore.HIGHLIGHT] = stock.highlight;
+        p[FilmCore.SHADOW] = stock.shadow;
+        p[FilmCore.GRAIN] = stock.grain;
+        p[FilmCore.GRAIN_SIZE] = stock.grainSize;
+        p[FilmCore.QUALITY] = 95;
+        p[FilmCore.SEED] = shot == null ? 1 : shot.getName().hashCode();
+        p[FilmCore.THREADS] = 1;
+        return p;
     }
 
     // ------------------------------------------------------------------------------ live frames
 
     /** Live view as small JPEG frames (CameraSequence's preview sequence), polled for a few seconds. */
     private void frames() {
-        out.step(S_FRAMES, RUN, "asking for frames…");
+        step(S_FRAMES, RUN, "asking for frames…");
         try {
             Class<?> cs = Class.forName("com.sony.scalar.hardware.CameraSequence");
             Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
@@ -604,11 +679,10 @@ final class ShootingTest implements SurfaceHolder.Callback {
 
     /** How long a film look takes on one live frame: decides how smooth a live look could be. */
     private void lookOnFrame(final byte[] jpeg) {
-        out.step(S_LOOK, RUN, "timing…");
+        step(S_LOOK, RUN, "timing…");
         closeCamera();   // the look runs with the camera given back already
         new Thread(new Runnable() {
             public void run() {
-                watchAfterRelease();
                 String result;
                 int status;
                 try {
@@ -648,70 +722,9 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 }
                 final String r = result;
                 final int s = status;
-                ui.post(new Runnable() { public void run() { report(S_LOOK, s, r); out.step(S_DEVELOP, RUN, "developing…"); } });
-                final String[] dev = developShot();
-                ui.post(new Runnable() { public void run() { report(S_DEVELOP, Integer.parseInt(dev[0]), dev[1]); finish(); } });
+                ui.post(new Runnable() { public void run() { report(S_LOOK, s, r); finish(); } });
             }
         }, "look-timing").start();
-    }
-
-    /**
-     * v0.23.1: after the camera was released, Sony's image processor gave no buffer at all. Is that
-     * for a while, or for as long as Latent runs? Asks for a small buffer now and then, up to 20 s.
-     * Background thread.
-     */
-    private void waitForImageMemory() {
-        long released = SystemClock.uptimeMillis();
-        for (long at : new long[] { 0, 1000, 3000, 6000, 10000, 20000 }) {
-            long wait = released + at - SystemClock.uptimeMillis();
-            if (wait > 0) try { Thread.sleep(wait); } catch (InterruptedException e) { return; }
-            Object proc = null, buf = null;
-            try {
-                Class<?> dsp = Class.forName("com.sony.scalar.hardware.DSP");
-                proc = dsp.getMethod("createProcessor", String.class).invoke(null, "sony-di-dsp");
-                buf = HardwareDevelop.call(proc, "createBuffer", 65536);   // as the darkroom asks
-                note("image memory " + at / 1000 + " s after the release: " + (buf != null ? "a buffer" : "none"));
-                if (buf != null) return;
-            } catch (Throwable e) {
-                note("image memory " + at / 1000 + " s after the release: " + Probe.why(e));
-            } finally {
-                try { if (buf != null) buf.getClass().getMethod("release").invoke(buf); } catch (Throwable ignored) { }
-                try { if (proc != null) proc.getClass().getMethod("release").invoke(proc); } catch (Throwable ignored) { }
-            }
-        }
-    }
-
-    /**
-     * The shot through Latent's darkroom, as Photo mode would: found in Sony's catalogue by its number,
-     * decoded by the camera, the look applied, saved as a new photo. The print is kept off every roll
-     * too. Returns {status, detail}. Background thread, camera already released.
-     */
-    private String[] developShot() {
-        if (shot == null) return new String[] { String.valueOf(INFO), "no shot to develop" };
-        if (stock == null) return new String[] { String.valueOf(INFO), "no film looks on the card" };
-        StringBuilder dl = new StringBuilder();
-        try {
-            HardwareDevelop h = new HardwareDevelop(context, card, dl, null);
-            h.prepare(false);
-            int[] p = new int[FilmCore.COUNT];
-            p[FilmCore.HIGHLIGHT] = stock.highlight;
-            p[FilmCore.SHADOW] = stock.shadow;
-            p[FilmCore.GRAIN] = stock.grain;
-            p[FilmCore.GRAIN_SIZE] = stock.grainSize;
-            p[FilmCore.QUALITY] = 95;
-            p[FilmCore.SEED] = shot.getName().hashCode();
-            p[FilmCore.THREADS] = 1;
-            long t = SystemClock.uptimeMillis();
-            HardwareDevelop.Print print = h.develop(shot, stock.lut.getPath(), p, null);
-            long ms = SystemClock.uptimeMillis() - t;
-            try { Library.ignore(card, print.file); } catch (Exception e) { note("ignore: " + Probe.why(e)); }
-            note("develop log:\r\n" + dl);
-            return new String[] { String.valueOf(print.catalogued ? OK : INFO), stock.title + ": " + print.file.getName() + " in " + ms / 1000.0 + " s"
-                    + (print.catalogued ? "" : " (not catalogued)") };
-        } catch (Throwable e) {
-            note("develop log:\r\n" + dl);
-            return new String[] { String.valueOf(FAIL), Probe.why(e) };
-        }
     }
 
     // ------------------------------------------------------------------------------ closing
@@ -744,6 +757,8 @@ final class ShootingTest implements SurfaceHolder.Callback {
         set("setStoreImageCompleteListener", null, null);
         set("setCaptureStatusListener", null, null);
         try { if (camera != null && previewing) camera.stopPreview(); } catch (Throwable e) { note("stopPreview: " + Probe.why(e)); }
+        // Sony's own apps release the Android camera before CameraEx (their ExecutorCreator.terminate)
+        try { if (camera != null) camera.release(); } catch (Throwable e) { note("camera release: " + Probe.why(e)); }
         try { cameraEx.getClass().getMethod("release").invoke(cameraEx); } catch (Throwable e) { note("release: " + Probe.why(e)); }
         try { surface.getHolder().removeCallback(this); } catch (Throwable ignored) { }
         cameraEx = null;

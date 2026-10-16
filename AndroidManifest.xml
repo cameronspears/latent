@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.latent.camera" android:versionCode="42" android:versionName="0.23.2">
+    package="com.latent.camera" android:versionCode="43" android:versionName="0.24.0">
     <uses-sdk android:minSdkVersion="10" android:targetSdkVersion="10" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -17,5 +17,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- the darkroom in its own process: once Latent's process has opened the camera, Sony gives it no image memory -->
+        <service android:name=".DarkroomService" android:process=":darkroom" android:exported="false" />
     </application>
 </manifest>
