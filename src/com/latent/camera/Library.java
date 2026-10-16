@@ -81,7 +81,7 @@ final class Library {
 
     /** The looks bundled in the APK, copied to the card on first run so they can be edited or swapped. */
     /** The looks shipped inside the app (assets/luts). */
-    static final String[] BUNDLED = { "CUBANNEG.CUB", "PORTRA4W.CUB" };
+    static final String[] BUNDLED = { "NATURAL.CUB", "PORTRA4W.CUB", "CLASSNEG.CUB", "CUBANNEG.CUB", "TRIX400.CUB", "PARTY800.CUB" };
 
     static void installBundledLuts(AssetManager assets, File card) throws IOException {
         File dir = lutDir(card);

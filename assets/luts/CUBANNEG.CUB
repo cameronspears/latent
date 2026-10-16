@@ -1,4 +1,4 @@
-# Film Lab look. Input: Sony Standard creative style JPEG (sRGB).
+# Latent look. Input: Sony Standard creative style JPEG (sRGB), shot neutral.
 TITLE "Classic Cuban Neg"
 LUT_3D_SIZE 33
 DOMAIN_MIN 0.0 0.0 0.0

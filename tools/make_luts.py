@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Film Lab's 3D LUTs (.CUB = .cube, renamed for the camera's 8.3 file system).
+"""Generate Latent's 3D LUTs (.CUB = .cube, renamed for the camera's 8.3 file system).
 
 The looks are built from a small parametric film model, applied to camera JPEGs shot with Sony's
 Standard creative style (contrast/saturation 0, auto WB):
@@ -101,6 +101,21 @@ def apply_look(rgb, p):
     lin = np.where(lin < k, lin, k + (1 - k) * np.tanh((lin - k) / (1 - k)))
     rgb = to_srgb(lin)
 
+    if 'mono' in p:
+        # black and white: a filter-like channel mix (in linear light, as on film), one curve, a tone
+        wr, wg, wb_ = p['mono']
+        lin = to_lin(rgb)
+        g = to_srgb(np.clip(lin[..., 0] * wr + lin[..., 1] * wg + lin[..., 2] * wb_, 0, 1))
+        g = film_curve(g, p['contrast'], p['pivot'], p['toe'], p['shoulder'])
+        y = g
+        ws = (1 - smoothstep(0.0, 0.5, y)) ** 1.5
+        wh = smoothstep(0.5, 1.0, y) ** 1.5
+        cb = ws * p['shadow_tint'][0] + wh * p['highlight_tint'][0]
+        cr = ws * p['shadow_tint'][1] + wh * p['highlight_tint'][1]
+        rgb = from_ycc(y, cb, cr)
+        rgb = p['black'] + rgb * (p['white'] - p['black'])
+        return np.clip(rgb, 0, 1)
+
     # 2. film curve per channel (per-channel curves give film's saturation-with-contrast)
     rgb = film_curve(rgb, p['contrast'], p['pivot'], p['toe'], p['shoulder'])
 
@@ -181,12 +196,86 @@ LOOKS = {
         highlight_tint=(-0.025, 0.018),  # creamy warm highlights
         black=0.03, white=0.99,
     ),
+    # Fuji Classic Negative itself (Superia's palette): hard tone, restrained colour, reds deep and a
+    # touch orange, greens pulled toward teal and quieted, cyan-teal skies, teal-cool shadows, warm
+    # slightly magenta highlights, and a faint fade in the deepest blacks. Cooler and harder than
+    # Cuban Neg, which is this film pushed warm.
+    'CLASSNEG': dict(
+        title='Classic Negative',
+        wb=[1.0, 1.0, 0.97],
+        contrast=1.34, pivot=0.40, toe=0.022, shoulder=0.08,
+        saturation=0.96,
+        chroma_knee=0.9,
+        hues=[
+            ('red', 6, 1.12, 45),        # deep, slightly orange reds
+            ('orange', 3, 1.0, 40),
+            ('skin', 4, 0.84, 40),
+            ('yellow', -12, 0.80, 50),   # mustard-green yellows
+            ('green', 28, 0.62, 70),     # teal, muted greens
+            ('cyan', 6, 1.05, 50),
+            ('blue', -16, 0.90, 60),     # cyan-teal skies
+            ('magenta', -10, 0.80, 50),
+        ],
+        shadow_tint=(0.018, -0.022),     # teal shadows
+        highlight_tint=(-0.012, 0.016),  # warm, a little magenta
+        black=0.028, white=0.975,
+    ),
+    # Kodak Tri-X 400 pushed: a yellow-filter mix (darker skies, glowing skin), a steep curve with
+    # inky blacks and bright paper whites, the faintest warm paper tone. Heavy grain does the rest.
+    'TRIX400': dict(
+        title='Tri-X 400',
+        wb=[1.0, 1.0, 1.0],
+        mono=(0.46, 0.50, 0.04),         # orange filter: skies darken, skin glows, foliage holds
+        contrast=1.55, pivot=0.42, toe=0.0, shoulder=0.05,
+        shadow_tint=(-0.004, 0.002), highlight_tint=(-0.008, 0.006),
+        black=0.012, white=0.985,
+    ),
+    # A night out with the flash on (Superia 800 / Gold-style party snaps): punchy contrast, inky
+    # backgrounds, warm glowing skin, saturated reds and magentas, a cool green cast in the shadows
+    # from the ambient light, slightly hot highlights. Big grain.
+    'PARTY800': dict(
+        title='Afterparty 800',
+        wb=[1.05, 1.0, 0.95],
+        contrast=1.36, pivot=0.38, toe=0.0, shoulder=0.05,
+        saturation=1.10,
+        chroma_knee=1.0,
+        hues=[
+            ('red', -2, 1.08, 45),
+            ('orange', 2, 1.0, 40),
+            ('skin', -3, 0.80, 45),      # warm and glowing, but skin, not orange
+            ('yellow', -4, 0.95, 50),
+            ('green', 12, 0.88, 60),
+            ('cyan', 0, 1.0, 50),
+            ('blue', 4, 0.90, 60),       # blues a touch violet, not neon
+            ('magenta', 4, 1.12, 50),
+        ],
+        shadow_tint=(0.006, -0.024),     # green-cyan ambient in the shadows
+        highlight_tint=(-0.018, 0.012),  # flash-warm highlights
+        black=0.0, white=1.0,
+    ),
+    # Natural colour in the Hasselblad spirit: faithful hues, true whites, a little extra depth in
+    # colour and a long, smooth highlight roll-off. The quiet one.
+    'NATURAL': dict(
+        title='Natural',
+        wb=[1.0, 1.0, 0.99],
+        contrast=1.06, pivot=0.45, toe=0.006, shoulder=0.12,
+        saturation=1.06,
+        chroma_knee=0.5,
+        hues=[
+            ('skin', -1, 0.97, 40),
+            ('green', -3, 0.97, 60),
+            ('blue', -2, 1.04, 60),
+        ],
+        shadow_tint=(0.0, 0.0),
+        highlight_tint=(-0.004, 0.002),
+        black=0.008, white=0.995,
+    ),
 }
 
 
 def write_cube(path, title, lut):
     with open(path, 'w', newline='\n') as f:
-        f.write('# Film Lab look. Input: Sony Standard creative style JPEG (sRGB).\n')
+        f.write('# Latent look. Input: Sony Standard creative style JPEG (sRGB), shot neutral.\n')
         f.write('TITLE "%s"\n' % title)
         f.write('LUT_3D_SIZE %d\n' % N)
         f.write('DOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n')

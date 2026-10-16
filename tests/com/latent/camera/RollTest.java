@@ -28,8 +28,8 @@ public class RollTest {
         for (int i = 1; i <= 3; i++) touch(new File(dcim, "DSC0100" + i + ".JPG"), t + i * 10000);   // before the roll
 
         List<Stock> stocks = Stock.all(card);
-        check(stocks.size() == 3 && stocks.get(0).id.equals("CUBANNEG") && stocks.get(1).id.equals("PORTRA4W")
-                && stocks.get(2).name.equals("MYLOOK"), "stocks: built-ins first, then custom");
+        check(stocks.size() == 3 && stocks.get(0).id.equals("PORTRA4W") && stocks.get(1).id.equals("CUBANNEG")
+                && stocks.get(2).name.equals("MYLOOK"), "stocks: built-ins in their order, then custom");
 
         List<File> photos = Library.photos(card);
         Roll r = Roll.create(card, "CUBANNEG", 12, photos.get(0).lastModified());
