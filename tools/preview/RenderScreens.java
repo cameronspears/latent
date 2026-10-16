@@ -236,6 +236,14 @@ public class RenderScreens {
                 "cpu0 4% cpu1 0% cpu2 1% cpu3 38%", "1.9x (1395 -> 731 ms), same picture; main cpu 3, helper cpu 1; asked 0xf, got 0xf",
                 "per pair, one core (two cores not used yet)" };
         render(s, fonts, out, "17-speed-results");
+        s.probeStage = 0; s.probeTitle = "Develop test"; s.probeSteps = DevelopTest.STEPS;
+        s.probePlan = Ui.DEVTEST_PLAN; s.probeFooter = Ui.DEVTEST_FOOTER;
+        render(s, fonts, out, "17b-develop-intro");
+        s.probeStage = 2;
+        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
+        s.probeDetail = new String[] { "6000x4000, canvas 6080 -> 6000", "verified up to 4096 KB per transfer", "read 24 MB/s, write 42 MB/s at 4 MB",
+                "4380 ms", "4120 ms, -260 ms", "4510 ms, +130 ms", "every develop identical, source untouched", "4 MB blocks, 260 ms faster a photo" };
+        render(s, fonts, out, "17c-develop-results");
 
         s = state();
         s.mode = UiState.LAB; s.labImage = img(samples, "PEOPLE-PORTRA4W.png"); s.labCaption = "DSC04547.JPG";

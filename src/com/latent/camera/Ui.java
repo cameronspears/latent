@@ -771,6 +771,13 @@ final class Ui {
     };
     static final String SPEED_FOOTER = "About a minute. Nothing on the card changes; results go to LATENT/SPEED.TXT.";
 
+    static final String[] DEVTEST_PLAN = {
+            "Decodes your newest photo in hardware and makes an output image, exactly as the darkroom does. Times reading and writing the camera's image memory.",
+            "Develops it nine times: today's 2 MB transfers, 4 MB and 1 MB, taking turns. Every picture byte of each develop is checked against today's.",
+            "Saves nothing: no new photo, the original only read. If a way is faster and identical, the darkroom uses it from now on.",
+    };
+    static final String DEVTEST_FOOTER = "About 90 s. If the camera hangs, remove the battery. Log: LATENT/DEVTEST.TXT.";
+
     static final String[] SETTINGS_PLAN = {
             "Reads your white balance, its fine-tune grid, and your Creative Style, the settings the camera keeps between uses.",
             "Shows them as the camera's menus do, so you can check them against MENU > White Balance and MENU > Creative Style.",

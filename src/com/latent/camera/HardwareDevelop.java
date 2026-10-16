@@ -70,8 +70,16 @@ final class HardwareDevelop {
 
     /** A Sony call never answered: what it holds may still be in use, so leave the hardware alone. */
     private static volatile boolean hung;
-    /** Largest transfer verified on this camera (0 = not yet). */
+    /** The transfer size the darkroom develops with, once verified on this camera (0 = not yet). */
     private static int block;
+    /** The darkroom's transfer size until the Develop test has chosen one (DevelopTest.P_BLOCK). */
+    static final int DARKROOM_BLOCK = 2 * 1024 * 1024;
+    /** Largest transfer verified on this camera so far, of those up to checkedUpTo (the Develop test checks up to 4 MB). */
+    private static int verified, checkedUpTo;
+
+    static int verified() { return verified; }
+    /** The transfer size develop() uses. */
+    static int block() { return block; }
     /** Save at the encoder's best quality, unless it has refused that once. */
     private static volatile boolean extraFine = true;
 
@@ -106,17 +114,25 @@ final class HardwareDevelop {
      * Once per darkroom visit: the card's catalogue, and (once per app run, or again when asked) the
      * largest transfer size at which the private read/write agree with Sony's public buffer API.
      */
-    void prepare(boolean verifyAgain) throws Exception {
+    void prepare(boolean verifyAgain) throws Exception { prepare(verifyAgain, DARKROOM_BLOCK); }
+
+    /**
+     * The same, with transfers verified up to upTo bytes; the darkroom then develops with the largest
+     * verified size up to upTo (the Develop test checks up to 4 MB and times each size itself).
+     */
+    void prepare(boolean verifyAgain, int upTo) throws Exception {
         openCatalogue();
-        if (block != 0 && !verifyAgain) return;
+        if (verified != 0 && checkedUpTo >= upTo && !verifyAgain) { block = Math.min(verified, upTo); return; }
         block = 0;
+        verified = 0;
         step(S_MEMORY, RUN, "checking…");
         Class<?> dsp = Class.forName("com.sony.scalar.hardware.DSP");
         Object proc = dsp.getMethod("createProcessor", String.class).invoke(null, "sony-di-dsp");
         int good = 0;
         StringBuilder speeds = new StringBuilder();
         try {
-            for (int size : new int[] { 65536, 262144, 1048576, 2097152 }) {
+            for (int size : new int[] { 65536, 262144, 1048576, 2097152, 4194304 }) {
+                if (size > upTo) break;
                 String r = verifyBlock(proc, size);
                 if (r == null) break;   // this size could not be verified: keep the last good one
                 good = size;
@@ -126,9 +142,11 @@ final class HardwareDevelop {
             call(proc, "release");
         }
         if (good == 0) throw fail(S_MEMORY, "private read/write could not be verified; nothing else was touched");
-        block = good;
+        verified = good;
+        checkedUpTo = upTo;
+        block = Math.min(good, upTo);
         log.append("transfer speeds (read/write ms): ").append(speeds).append("\r\n");
-        step(S_MEMORY, OK, "verified up to " + block / 1024 + " KB per transfer (" + speeds + ")");
+        step(S_MEMORY, OK, "verified up to " + verified / 1024 + " KB per transfer (" + speeds + ")");
     }
 
     /** The card's catalogue (all that filing negatives needs). */
@@ -154,61 +172,12 @@ final class HardwareDevelop {
         java.util.Arrays.fill(ms, 0);
         java.util.Arrays.fill(look, 0);
         long t0 = System.currentTimeMillis(), t;
-        Object src = null, half = null, full = null, proc = null;
+        Held o = new Held();
         boolean stuck = false;
         SONY.lock();
         try {
-            // the photo and its catalogue entry
-            final Probe.Row entry = Probe.find(Probe.query(cr, uri), original);
-            if (entry == null || entry.data == null) throw fail(S_PHOTO, original.getName() + " is not in the camera's catalogue");
-            int wanted = orientation(original);
-            step(S_PHOTO, OK, original.getName() + " (orientation " + wanted + ")");
-
-            // hardware decode, asking for the photo's metadata too (that keeps its EXIF in the new photo)
-            step(S_DECODE, RUN, "decoding…");
-            final Class<?> opts = Class.forName("com.sony.scalar.graphics.OptimizedImageFactory$Options");
-            final Class<?> factory = Class.forName("com.sony.scalar.graphics.OptimizedImageFactory");
-            t = System.currentTimeMillis();
-            src = guarded(new Call() {
-                public Object run() throws Exception {
-                    Object o = opts.newInstance();
-                    opts.getField("imageType").setInt(o, opts.getField("MAIN").getInt(null));
-                    for (String f : new String[] { "bBasicInfo", "bCamInfo", "bExtCamInfo", "bGpsInfo" }) opts.getField(f).setBoolean(o, true);
-                    return factory.getMethod("decodeImage", String.class, opts).invoke(null, entry.data, o);
-                }
-            }, 30000);
-            if (src == null) throw fail(S_DECODE, "the decoder returned nothing");
-            int w = (Integer) call(src, "getWidth"), h = (Integer) call(src, "getHeight");
-            ms[T_DECODE] = System.currentTimeMillis() - t;
-            step(S_DECODE, OK, w + "x" + h + " in " + ms[T_DECODE] + " ms");
-            pct(progress, 3);
-
-            // a separate output image from Sony's scaler (via half size, so it is never the source)
-            step(S_IMAGE, RUN, "making the output image…");
-            t = System.currentTimeMillis();
-            half = scale(src, (w / 2) & ~1, (h / 2) & ~1);
-            if (half == null) throw fail(S_IMAGE, "the scaler made no half-size image");
-            full = scale(half, w, h);
-            call(half, "release");
-            half = null;
-            if (full == null) throw fail(S_IMAGE, "the scaler made no full-size image");
-            Class<?> dsp = Class.forName("com.sony.scalar.hardware.DSP");
-            Class<?> memory = Class.forName("com.sony.scalar.hardware.DeviceMemory");
-            proc = dsp.getMethod("createProcessor", String.class).invoke(null, "sony-di-dsp");
-            Method prop = dsp.getMethod("getPropertyAsInt", memory, String.class), sprop = dsp.getMethod("getProperty", memory, String.class);
             int[] sg = new int[8], dg = new int[8];
-            for (int i = 0; i < 8; i++) { sg[i] = (Integer) prop.invoke(proc, src, SonyMemory.KEYS[i]); dg[i] = (Integer) prop.invoke(proc, full, SonyMemory.KEYS[i]); }
-            long sa = Long.parseLong((String) sprop.invoke(proc, src, "memory-address")) & 0x3fffffffL;
-            long da = Long.parseLong((String) sprop.invoke(proc, full, "memory-address")) & 0x3fffffffL;
-            call(proc, "release");
-            proc = null;
-            boolean separate = sa + sg[7] <= da || da + dg[7] <= sa;
-            log.append("geometry src ").append(java.util.Arrays.toString(sg)).append(" dst ").append(java.util.Arrays.toString(dg)).append("\r\n");
-            if (!separate) throw fail(S_IMAGE, "output image overlaps the source in memory; refused");
-            if (dg[0] != w || dg[1] != h) throw fail(S_IMAGE, "output image has the wrong size");
-            ms[T_IMAGE] = System.currentTimeMillis() - t;
-            step(S_IMAGE, OK, dg[0] + "x" + dg[1] + ", separate from the source, " + ms[T_IMAGE] + " ms");
-            pct(progress, 6);
+            int wanted = openImages(original, o, sg, dg, progress);
             SONY.unlock();   // the look is ours: filing may use Sony meanwhile
 
             // develop: the look, block by block, from the source into the output image
@@ -220,7 +189,7 @@ final class HardwareDevelop {
             int rc;
             CpuGate.busy(true);   // background filing waits for this
             try {
-                rc = SonyMemory.develop(SonyMemory.handle(src), sg, SonyMemory.handle(full), dg, block, lut, params, scaled);
+                rc = SonyMemory.develop(SonyMemory.handle(o.src), sg, SonyMemory.handle(o.full), dg, block, lut, params, scaled);
             } finally {
                 CpuGate.busy(false);
             }
@@ -230,24 +199,24 @@ final class HardwareDevelop {
             step(S_DEVELOP, OK, ms[T_DEVELOP] + " ms: read " + look[FilmCore.T_READ] + ", look " + look[FilmCore.T_LOOK]
                     + ", write " + look[FilmCore.T_WRITE] + " (" + block / 1024 + " KB blocks)");
             SONY.lock();
-            call(src, "release");
-            src = null;
+            call(o.src, "release");
+            o.src = null;
 
             // Sony's encoder saves and catalogues it
             step(S_SAVE, RUN, "saving…");
             Set<String> before = new HashSet<String>();
             for (File f : Library.photos(card)) before.add(f.getPath());
             t = System.currentTimeMillis();
-            int code = export(full, mediaId, extraFine ? "EXTRAFINE" : "FINE");
+            int code = export(o.full, mediaId, extraFine ? "EXTRAFINE" : "FINE");
             if (code == -2 && extraFine) {   // this camera won't take Extra Fine here: Fine from now on
                 extraFine = false;
                 log.append("Extra Fine refused (invalid parameters); saving as Fine\r\n");
-                code = export(full, mediaId, "FINE");
+                code = export(o.full, mediaId, "FINE");
             }
             ms[T_SAVE] = System.currentTimeMillis() - t;
             if (code != 0) throw fail(S_SAVE, "Sony's encoder answered " + code + (code == -1 ? " (failed)" : code == -2 ? " (invalid parameters)" : ""));
-            call(full, "release");
-            full = null;
+            call(o.full, "release");
+            o.full = null;
             step(S_SAVE, OK, "Sony's encoder saved it (" + (extraFine ? "Extra Fine" : "Fine") + ") in " + ms[T_SAVE] + " ms");
             pct(progress, 94);
 
@@ -281,10 +250,100 @@ final class HardwareDevelop {
             throw e;
         } finally {
             if (!stuck) {   // a stuck call may still be using them: leave them for the camera to reclaim
-                for (Object o : new Object[] { half, src, proc, full }) if (o != null) try { call(o, "release"); } catch (Throwable ignored) { }
+                for (Object x : new Object[] { o.half, o.src, o.proc, o.full }) if (x != null) try { call(x, "release"); } catch (Throwable ignored) { }
             }
             if (SONY.isHeldByCurrentThread()) SONY.unlock();
         }
+    }
+
+    /** What the Develop test does with the two images: Sony handles and layouts of the source and the output. */
+    interface Bench { void run(int src, int[] sg, int full, int[] dg) throws Exception; }
+
+    /**
+     * For the Develop test: 'original' decoded and given an output image exactly as develop() does, then
+     * bench runs on them. Nothing is saved; both are released after (unless a Sony call never answered).
+     */
+    void bench(File original, Bench bench) throws Exception {
+        if (hung) throw new IllegalStateException("a camera call is still busy");
+        if (verified == 0 || uri == null) throw new IllegalStateException("not prepared");
+        Held o = new Held();
+        boolean stuck = false;
+        SONY.lock();
+        try {
+            int[] sg = new int[8], dg = new int[8];
+            openImages(original, o, sg, dg, null);
+            bench.run(SonyMemory.handle(o.src), sg, SonyMemory.handle(o.full), dg);
+        } catch (Stuck e) {
+            stuck = true;
+            hung = true;
+            step(current, FAIL, "no answer from the camera in time. If it doesn't recover, turn it off (or remove the battery).");
+            throw e;
+        } finally {
+            if (!stuck) for (Object x : new Object[] { o.half, o.src, o.proc, o.full }) if (x != null) try { call(x, "release"); } catch (Throwable ignored) { }
+            if (SONY.isHeldByCurrentThread()) SONY.unlock();
+        }
+    }
+
+    /** What a develop holds of Sony's: released when it ends, unless a call never answered. */
+    private static final class Held { Object src, half, full, proc; }
+
+    /**
+     * The first half of a develop, under SONY: the photo's catalogue entry, its hardware decode (o.src)
+     * and a separate output image from Sony's scaler (o.full), their layouts into sg and dg. Returns the
+     * photo's EXIF orientation. What it holds is in o, for the caller to release.
+     */
+    private int openImages(File original, final Held o, int[] sg, int[] dg, FilmCore.Progress progress) throws Exception {
+        long t;
+        final Probe.Row entry = Probe.find(Probe.query(cr, uri), original);
+        if (entry == null || entry.data == null) throw fail(S_PHOTO, original.getName() + " is not in the camera's catalogue");
+        int wanted = orientation(original);
+        step(S_PHOTO, OK, original.getName() + " (orientation " + wanted + ")");
+
+        // hardware decode, asking for the photo's metadata too (that keeps its EXIF in the new photo)
+        step(S_DECODE, RUN, "decoding…");
+        final Class<?> opts = Class.forName("com.sony.scalar.graphics.OptimizedImageFactory$Options");
+        final Class<?> factory = Class.forName("com.sony.scalar.graphics.OptimizedImageFactory");
+        t = System.currentTimeMillis();
+        o.src = guarded(new Call() {
+            public Object run() throws Exception {
+                Object opt = opts.newInstance();
+                opts.getField("imageType").setInt(opt, opts.getField("MAIN").getInt(null));
+                for (String f : new String[] { "bBasicInfo", "bCamInfo", "bExtCamInfo", "bGpsInfo" }) opts.getField(f).setBoolean(opt, true);
+                return factory.getMethod("decodeImage", String.class, opts).invoke(null, entry.data, opt);
+            }
+        }, 30000);
+        if (o.src == null) throw fail(S_DECODE, "the decoder returned nothing");
+        int w = (Integer) call(o.src, "getWidth"), h = (Integer) call(o.src, "getHeight");
+        ms[T_DECODE] = System.currentTimeMillis() - t;
+        step(S_DECODE, OK, w + "x" + h + " in " + ms[T_DECODE] + " ms");
+        pct(progress, 3);
+
+        // a separate output image from Sony's scaler (via half size, so it is never the source)
+        step(S_IMAGE, RUN, "making the output image…");
+        t = System.currentTimeMillis();
+        o.half = scale(o.src, (w / 2) & ~1, (h / 2) & ~1);
+        if (o.half == null) throw fail(S_IMAGE, "the scaler made no half-size image");
+        o.full = scale(o.half, w, h);
+        call(o.half, "release");
+        o.half = null;
+        if (o.full == null) throw fail(S_IMAGE, "the scaler made no full-size image");
+        Class<?> dsp = Class.forName("com.sony.scalar.hardware.DSP");
+        Class<?> memory = Class.forName("com.sony.scalar.hardware.DeviceMemory");
+        o.proc = dsp.getMethod("createProcessor", String.class).invoke(null, "sony-di-dsp");
+        Method prop = dsp.getMethod("getPropertyAsInt", memory, String.class), sprop = dsp.getMethod("getProperty", memory, String.class);
+        for (int i = 0; i < 8; i++) { sg[i] = (Integer) prop.invoke(o.proc, o.src, SonyMemory.KEYS[i]); dg[i] = (Integer) prop.invoke(o.proc, o.full, SonyMemory.KEYS[i]); }
+        long sa = Long.parseLong((String) sprop.invoke(o.proc, o.src, "memory-address")) & 0x3fffffffL;
+        long da = Long.parseLong((String) sprop.invoke(o.proc, o.full, "memory-address")) & 0x3fffffffL;
+        call(o.proc, "release");
+        o.proc = null;
+        boolean separate = sa + sg[7] <= da || da + dg[7] <= sa;
+        log.append("geometry src ").append(java.util.Arrays.toString(sg)).append(" dst ").append(java.util.Arrays.toString(dg)).append("\r\n");
+        if (!separate) throw fail(S_IMAGE, "output image overlaps the source in memory; refused");
+        if (dg[0] != w || dg[1] != h) throw fail(S_IMAGE, "output image has the wrong size");
+        ms[T_IMAGE] = System.currentTimeMillis() - t;
+        step(S_IMAGE, OK, dg[0] + "x" + dg[1] + ", separate from the source, " + ms[T_IMAGE] + " ms");
+        pct(progress, 6);
+        return wanted;
     }
 
     private Failed fail(int s, String why) {
