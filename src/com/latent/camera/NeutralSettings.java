@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -11,7 +11,7 @@ import java.util.Properties;
 /**
  * While a roll is loaded the camera shoots neutral, so the film look starts from plain colour: white
  * balance Auto with no fine-tune, Creative Style Standard 0 / 0 / 0, DRO off. Your own values are
- * kept in FILMLAB/NEUTRAL.TXT and go back once the roll is developed (or no roll is loaded).
+ * kept in LATENT/NEUTRAL.TXT and go back once the roll is developed (or no roll is loaded).
  *
  * Careful by design:
  *  - Nothing is written unless every setting could be read first.

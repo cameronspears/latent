@@ -14,10 +14,10 @@ v0.12 is the first version that uses it for whole rolls and files the originals 
 ## Install (about 2 minutes)
 
 1. Charge the battery and set **Setup → USB Connection → Mass Storage**. Connect the camera.
-2. In Terminal, from the folder that holds `pmca-console-v0.18-osx`, run:
+2. In Terminal, from this project's folder (the installer is kept in `tools/pmca`), run:
 
    ```bash
-   sudo ./pmca-console-v0.18-osx install -f ../../filmlab/FilmLab.apk
+   sudo tools/pmca/pmca-console-v0.18-osx install -f Latent.apk
    ```
 
    Wait for `Task completed successfully` and don't unplug before then.
@@ -41,20 +41,20 @@ To remove it later: **MENU → Application → Application Management → Manage
 
 **Speed test** (under More) times the film look's interchangeable inner loops on this camera's own
 chip, on your newest photo decoded into memory, checks each against a full-precision reference, and
-keeps the fastest one that is as accurate as today's. Results go to `FILMLAB/SPEED.TXT`.
+keeps the fastest one that is as accurate as today's. Results go to `LATENT/SPEED.TXT`.
 
 **Settings check** (under More) reads your white balance, its fine-tune grid and your Creative Style,
 and shows them as the camera's menus do. It only reads, and every raw value goes to
-`FILMLAB/SETTINGS.TXT`. While a roll is loaded, Latent sets the camera to neutral (white balance fine-tune 0 / 0, Standard
+`LATENT/SETTINGS.TXT`. While a roll is loaded, Latent sets the camera to neutral (white balance fine-tune 0 / 0, Standard
 0 / 0 / 0, DRO off) and puts your own settings back once the roll is developed. Your values are kept
-in `FILMLAB/NEUTRAL.TXT` until then. Latent can only write those few settings, within their menu ranges.
+in `LATENT/NEUTRAL.TXT` until then. Latent can only write those few settings, within their menu ranges.
 
 ### Where developed frames go
 
 Each frame is developed **into the camera roll**. It shows in the camera's own playback, in Wi-Fi
 transfer and in Imaging Edge, as a new photo with the next DSC number and the original's date,
 exposure and orientation. The original becomes the roll's **negative**: it moves to
-`FILMLAB/ROLLnnn/NEG/` on the card, so the camera roll holds only the developed frame. Nothing is
+`LATENT/ROLLnnn/NEG/` on the card, so the camera roll holds only the developed frame. Nothing is
 ever overwritten or lost:
 
 - An original leaves the camera roll only when three things are true: its developed photo is in the
@@ -66,10 +66,10 @@ ever overwritten or lost:
 - The original is removed with Sony's own delete, the same one playback uses, so the camera's photo
   database stays right.
 - If any step doesn't check out, the original simply stays in the camera roll, and the reason goes
-  to `FILMLAB/DEVELOP.TXT`.
+  to `LATENT/DEVELOP.TXT`.
 
 If the camera-roll develop isn't available or fails, that frame and the rest of the visit develop
-in software instead. Software-developed frames are saved as `FILMLAB/ROLLnnn/01_04547.JPG` (frame
+in software instead. Software-developed frames are saved as `LATENT/ROLLnnn/01_04547.JPG` (frame
 number, then the original's number). The camera's playback can't show those, and the original
 stays in the camera roll.
 
@@ -88,7 +88,7 @@ The icon is the camera back's frame counter: shot frames in white, the frame in 
 
 Any `.cube` 3D LUT works (sizes 2–65). Rename it to 8 characters or fewer with a `.CUB` extension,
 for example `KODAK.CUB`, because the camera's card system only accepts short names. Then copy it
-into `FILMLAB/LUTS/` on the card.
+into `LATENT/LUTS/` on the card.
 
 The two bundled looks come from `tools/make_luts.py`, a small film model with white balance,
 curve, per-hue shifts and split toning. Change the numbers there and rebuild:
@@ -121,7 +121,7 @@ tools/setup-toolchain.sh
 ```
 
 `setup-toolchain.sh` downloads Android NDK r16b plus SDK build-tools 30.0.3 and android-28 into
-`~/.filmlab-toolchain` (about 2.5 GB). `build.sh` produces `FilmLab.apk`. Requirements:
+`~/.latent-toolchain` (about 2.5 GB). `build.sh` produces `Latent.apk`. Requirements:
 
 - a JDK 11 or newer (`build.sh` picks JDK 11, because `d8` 30.0.3 fails on JDK 21 class files)
 - Rosetta on Apple Silicon
@@ -188,13 +188,13 @@ as it can:
   If the camera doesn't offer this API, set **Setup → Power Saving Start Time** to its longest
   value yourself.
 
-Every developed frame appends a line to **`FILMLAB/TIMING.TXT`**. A camera-roll develop records
+Every developed frame appends a line to **`LATENT/TIMING.TXT`**. A camera-roll develop records
 decode, output image, develop, save, find, orientation and negative copy times. A software develop
 records read, look and write times plus CPU details. The A5100 lets apps use only one of its four
 cores and has no NEON, so speed comes from doing less per pixel.
 
-**`FILMLAB/DEVELOP.TXT`** records the darkroom's decisions: when it fell back to software, and why
-an original stayed in the camera roll. **`FILMLAB/HWTEST.TXT`** is the log of the last Hardware
+**`LATENT/DEVELOP.TXT`** records the darkroom's decisions: when it fell back to software, and why
+an original stayed in the camera roll. **`LATENT/HWTEST.TXT`** is the log of the last Hardware
 test.
 
 ## Known limits / not yet verified on the camera

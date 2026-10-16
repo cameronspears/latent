@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
@@ -61,7 +61,7 @@ final class Probe {
         try { return c == null ? null : c.getMethod(name, args); } catch (Throwable t) { return null; }
     }
 
-    /** Runs every step; returns the log, also written to FILMLAB/PROBE.TXT. */
+    /** Runs every step; returns the log, also written to LATENT/PROBE.TXT. */
     String run() {
         log.append("Latent camera roll test\r\n");
 

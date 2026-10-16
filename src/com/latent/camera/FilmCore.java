@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 /** The native image core (jni/filmcore.c). Not thread-safe: call from one worker thread only. */
 final class FilmCore {
@@ -9,7 +9,7 @@ final class FilmCore {
 
     interface Progress { void onProgress(int percent); }
 
-    static { System.loadLibrary("filmlab"); }
+    static { System.loadLibrary("latent"); }
 
     private FilmCore() {}
 

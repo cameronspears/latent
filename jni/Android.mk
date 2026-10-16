@@ -1,7 +1,7 @@
 LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
-LOCAL_MODULE := filmlab
+LOCAL_MODULE := latent
 
 JPEG_DIR := ../vendor/libjpeg-turbo-2.1.5.1
 # Same list as tools/libjpeg-sources.sh

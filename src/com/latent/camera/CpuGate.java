@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 /**
  * Latent may only use one of the camera's cores, so background work (filing negatives) waits while

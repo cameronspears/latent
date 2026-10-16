@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -6,7 +6,7 @@ import java.io.FileOutputStream;
 /**
  * Reads the camera's stored white balance and Creative Style, and shows them as the menus would.
  * Changes nothing: the native side can only ask for a setting's size, attributes and value.
- * Log: FILMLAB/SETTINGS.TXT, with every raw value, to compare against the camera's menus.
+ * Log: LATENT/SETTINGS.TXT, with every raw value, to compare against the camera's menus.
  */
 final class SettingsCheck {
     static final String[] STEPS = { "Settings access", "White balance", "WB fine-tune", "Creative Style", "Style tweaks",

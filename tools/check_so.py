@@ -3,7 +3,7 @@
 32-bit ARM ELF, a SysV .hash section (2.3 cannot read GNU hash), no text relocations,
 and only imports that libc / libm / libdl on the camera provide.
 
-    python3 tools/check_so.py libfilmlab.so
+    python3 tools/check_so.py liblatent.so
 """
 import struct
 import sys

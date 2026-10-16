@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -8,12 +8,22 @@ import java.util.List;
 public class RollTest {
     public static void main(String[] a) throws Exception {
         File card = new File(a[0]);
+        {   // a card from before the rename: its FILMLAB folder becomes LATENT, contents and all
+            File old = new File(card, "FILMLAB/ROLL001");
+            old.mkdirs();
+            touch(new File(old, "ROLL.TXT"), 0);
+            File home = Library.home(card);
+            check(home.getName().equals("LATENT") && new File(home, "ROLL001/ROLL.TXT").exists() && !new File(card, "FILMLAB").exists(),
+                    "an old FILMLAB folder is renamed to LATENT with everything in it");
+            new File(home, "ROLL001/ROLL.TXT").delete();
+            new File(home, "ROLL001").delete();
+        }
         File dcim = new File(card, "DCIM/100MSDCF");
         dcim.mkdirs();
-        new File(card, "FILMLAB/LUTS").mkdirs();
-        touch(new File(card, "FILMLAB/LUTS/CUBANNEG.CUB"), 0);
-        touch(new File(card, "FILMLAB/LUTS/PORTRA4W.CUB"), 0);
-        touch(new File(card, "FILMLAB/LUTS/MYLOOK.CUB"), 0);
+        new File(card, "LATENT/LUTS").mkdirs();
+        touch(new File(card, "LATENT/LUTS/CUBANNEG.CUB"), 0);
+        touch(new File(card, "LATENT/LUTS/PORTRA4W.CUB"), 0);
+        touch(new File(card, "LATENT/LUTS/MYLOOK.CUB"), 0);
         long t = 1700000000000L;
         for (int i = 1; i <= 3; i++) touch(new File(dcim, "DSC0100" + i + ".JPG"), t + i * 10000);   // before the roll
 
@@ -93,7 +103,7 @@ public class RollTest {
         check(all2.contains(print) && !ex.contains(print) && ex.size() == all2.size() - 1, "prints are not exposures");
         check(b1.exposures(ex).size() == 1, "loaded roll still has only its own photo");
         // photo numbers, not file times: the camera reports times hours apart from one power-on to the next
-        check(Roll.number(new File(dcim, "DSC04592.JPG")) == 1004592 && Roll.number(new File(card, "FILMLAB/ROLL001/01_01004.JPG")) == -1,
+        check(Roll.number(new File(dcim, "DSC04592.JPG")) == 1004592 && Roll.number(new File(card, "LATENT/ROLL001/01_01004.JPG")) == -1,
                 "photo numbers from folder and file");
         List<File> before = Library.photos(card);
         Roll n1 = Roll.create(card, "PORTRA4W", 12, before.get(0).lastModified() + 10L * 3600 * 1000, Roll.highest(before));   // a clock 10 h off

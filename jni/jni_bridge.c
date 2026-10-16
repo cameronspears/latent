@@ -1,4 +1,4 @@
-/* JNI glue between com.filmlab.camera.FilmCore and filmcore.c. Calls are serialised by the Java
+/* JNI glue between com.latent.camera.FilmCore and filmcore.c. Calls are serialised by the Java
  * side (one worker thread), so the shared error buffer is safe. */
 #include <jni.h>
 #include <string.h>
@@ -24,7 +24,7 @@ static int read_params(JNIEnv *env, jintArray arr, int *out) {
     return 0;
 }
 
-JNIEXPORT jint JNICALL Java_com_filmlab_camera_FilmCore_process(JNIEnv *env, jclass cls, jstring jin,
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_process(JNIEnv *env, jclass cls, jstring jin,
         jstring jout, jstring jlut, jstring jpreview, jintArray jparams, jobject listener) {
     int params[FL_PARAM_COUNT];
     const char *in, *out, *lut = NULL, *preview = NULL;
@@ -53,7 +53,7 @@ JNIEXPORT jint JNICALL Java_com_filmlab_camera_FilmCore_process(JNIEnv *env, jcl
     return rc;
 }
 
-JNIEXPORT jint JNICALL Java_com_filmlab_camera_FilmCore_makePreview(JNIEnv *env, jclass cls, jstring jin, jstring jout) {
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_makePreview(JNIEnv *env, jclass cls, jstring jin, jstring jout) {
     const char *in, *out;
     int rc;
     (void)cls;
@@ -66,7 +66,7 @@ JNIEXPORT jint JNICALL Java_com_filmlab_camera_FilmCore_makePreview(JNIEnv *env,
     return rc;
 }
 
-JNIEXPORT jint JNICALL Java_com_filmlab_camera_FilmCore_preview(JNIEnv *env, jclass cls, jstring jin,
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_preview(JNIEnv *env, jclass cls, jstring jin,
         jstring jlut, jintArray jparams, jint mode, jintArray jpixels, jint w, jint h, jintArray jwh) {
     int params[FL_PARAM_COUNT], wh[2] = { 0, 0 };
     const char *in, *lut = NULL;
@@ -90,12 +90,12 @@ JNIEXPORT jint JNICALL Java_com_filmlab_camera_FilmCore_preview(JNIEnv *env, jcl
     return rc;
 }
 
-JNIEXPORT jstring JNICALL Java_com_filmlab_camera_FilmCore_lastError(JNIEnv *env, jclass cls) {
+JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_lastError(JNIEnv *env, jclass cls) {
     (void)cls;
     return (*env)->NewStringUTF(env, g_err);
 }
 
-JNIEXPORT void JNICALL Java_com_filmlab_camera_FilmCore_timing(JNIEnv *env, jclass cls, jintArray jout) {
+JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_timing(JNIEnv *env, jclass cls, jintArray jout) {
     int t[FL_TIME_COUNT];
     (void)cls;
     if (!jout || (*env)->GetArrayLength(env, jout) < FL_TIME_COUNT) return;
@@ -103,7 +103,7 @@ JNIEXPORT void JNICALL Java_com_filmlab_camera_FilmCore_timing(JNIEnv *env, jcla
     (*env)->SetIntArrayRegion(env, jout, 0, FL_TIME_COUNT, (const jint *)t);
 }
 
-JNIEXPORT jstring JNICALL Java_com_filmlab_camera_FilmCore_bench(JNIEnv *env, jclass cls, jstring jin, jstring jlut,
+JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_bench(JNIEnv *env, jclass cls, jstring jin, jstring jlut,
         jintArray jparams, jint scale) {
     static char report[2048];
     int params[FL_PARAM_COUNT], rc;
@@ -119,19 +119,19 @@ JNIEXPORT jstring JNICALL Java_com_filmlab_camera_FilmCore_bench(JNIEnv *env, jc
     return (*env)->NewStringUTF(env, report);
 }
 
-JNIEXPORT void JNICALL Java_com_filmlab_camera_FilmCore_setVariant(JNIEnv *env, jclass cls, jint v) {
+JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_setVariant(JNIEnv *env, jclass cls, jint v) {
     (void)env; (void)cls;
     fl_set_variant(v);
 }
 
-JNIEXPORT jstring JNICALL Java_com_filmlab_camera_FilmCore_cores(JNIEnv *env, jclass cls) {
+JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_cores(JNIEnv *env, jclass cls) {
     static char report[1024];
     (void)cls;
     fl_cores(report, sizeof report);
     return (*env)->NewStringUTF(env, report);
 }
 
-JNIEXPORT jstring JNICALL Java_com_filmlab_camera_FilmCore_benchCores(JNIEnv *env, jclass cls, jstring jin, jstring jlut,
+JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_benchCores(JNIEnv *env, jclass cls, jstring jin, jstring jlut,
         jintArray jparams, jint scale) {
     static char report[1024];
     int params[FL_PARAM_COUNT], rc;
@@ -147,7 +147,7 @@ JNIEXPORT jstring JNICALL Java_com_filmlab_camera_FilmCore_benchCores(JNIEnv *en
     return (*env)->NewStringUTF(env, report);
 }
 
-JNIEXPORT jstring JNICALL Java_com_filmlab_camera_FilmCore_helperNote(JNIEnv *env, jclass cls) {
+JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_helperNote(JNIEnv *env, jclass cls) {
     char note[128];
     (void)cls;
     fl_last_threads(note, sizeof note);

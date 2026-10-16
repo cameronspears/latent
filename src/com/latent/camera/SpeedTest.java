@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import android.content.SharedPreferences;
 
@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
  * memory: today's inner loop against the alternatives (keeping the fastest that is as accurate),
  * and whether a second core helps. For the cores it only reads what the camera reports, and lets one
  * helper thread of Latent's ask to run on the other cores; developing still uses one core.
- * Nothing on the card changes except the log, FILMLAB/SPEED.TXT.
+ * Nothing on the card changes except the log, LATENT/SPEED.TXT.
  */
 final class SpeedTest {
     static final String[] STEPS = { "Test picture", "Today's loop", "Other loops", "Cores", "Load while idle", "Two cores",

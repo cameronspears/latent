@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import android.app.Activity;
 import android.content.Context;
@@ -41,7 +41,7 @@ import java.util.concurrent.ThreadFactory;
  *   Load film     pick a stock and a roll length
  *   Darkroom      develops every frame of the roll, screen dimmed; pausable and resumable
  *   Contact sheet developed rolls as film strips; open a frame full screen
- *   Lab           tweak one photo by hand (look, tone, grain) and save a copy to FILMLAB/OUT
+ *   Lab           tweak one photo by hand (look, tone, grain) and save a copy to LATENT/OUT
  *
  * Originals in DCIM are never changed. Controls: UP/DOWN, LEFT/RIGHT or the wheel, centre, MENU.
  */
@@ -57,7 +57,7 @@ public class MainActivity extends Activity {
 
     // one worker with a roomy native stack: Dalvik's default thread stack is small for libjpeg
     private final ExecutorService worker = Executors.newSingleThreadExecutor(new ThreadFactory() {
-        public Thread newThread(Runnable r) { return new Thread(null, r, "filmlab", 1024 * 1024); }
+        public Thread newThread(Runnable r) { return new Thread(null, r, "latent", 1024 * 1024); }
     });
     // files negatives alongside the darkroom: copies while a frame develops, originals out once settled
     private final ExecutorService filer = Executors.newSingleThreadExecutor(new ThreadFactory() {
@@ -210,7 +210,7 @@ public class MainActivity extends Activity {
                             + " is open on the card, so that's the roll in the camera" + (saved ? "" : " (the note couldn't be saved)"));
                 }
                 final String neutralMsg = reconcileNeutral(inCamera != null);
-                if (cardReadNote == null) cardReadNote = "card read: first touch " + (r0 - r00) + " ms" + (cardThere ? "" : " (no FILMLAB)") + ", looks " + (r1 - r0) + " ms, rolls " + (r2 - r1) + " ms, photos "
+                if (cardReadNote == null) cardReadNote = "card read: first touch " + (r0 - r00) + " ms" + (cardThere ? "" : " (no LATENT)") + ", looks " + (r1 - r0) + " ms, rolls " + (r2 - r1) + " ms, photos "
                         + (r3 - r2) + " ms (" + all.size() + "), the rest " + (SystemClock.uptimeMillis() - r3) + " ms";
                 final String msg = problem;
                 ui.post(new Runnable() {
@@ -282,7 +282,7 @@ public class MainActivity extends Activity {
         else if (k == K_ENTER && ready) {
             String item = items.get(backSel);
             if (item.equals("Load film") || item.equals("Unload roll")) {
-                if (stocks.isEmpty()) toast("No looks in FILMLAB/LUTS");
+                if (stocks.isEmpty()) toast("No looks in LATENT/LUTS");
                 else { stockSel = Math.min(stockSel, stocks.size() - 1); mode = LOAD; navMore = false; renderSamples(); }
             } else if (item.equals("Shoot")) {
                 goShoot();
@@ -1218,7 +1218,7 @@ public class MainActivity extends Activity {
     private static String signed(int v) { return v > 0 ? "+" + v : String.valueOf(v); }
     private static String secs(int ms) { return String.valueOf((ms + 500) / 1000); }
 
-    /** Appends one line per developed frame to /FILMLAB/TIMING.TXT. Worker thread. */
+    /** Appends one line per developed frame to /LATENT/TIMING.TXT. Worker thread. */
     private void logTiming(File src, String look, int[] p, int[] t) {
         String line = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())
                 + " v" + versionName() + " abi=" + Build.CPU_ABI + " " + src.getName() + " look=" + look
@@ -1243,7 +1243,7 @@ public class MainActivity extends Activity {
                 + extra + " total=" + total + " (" + print.orientation + ")");
     }
 
-    /** What the darkroom decided and why, in FILMLAB/DEVELOP.TXT. */
+    /** What the darkroom decided and why, in LATENT/DEVELOP.TXT. */
     private void devLog(String what) {
         appendLog("DEVELOP.TXT", new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()) + " v" + versionName() + " " + what);
     }

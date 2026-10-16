@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Downloads the toolchain build.sh needs into $FILMLAB_TOOLCHAIN (default ~/.filmlab-toolchain):
+# Downloads the toolchain build.sh needs into $LATENT_TOOLCHAIN (default ~/.latent-toolchain):
 #   android-ndk-r16b   the last NDK that builds for armeabi (what the camera's Android 2.3 runs)
 #   sdk/               build-tools 30.0.3 + platforms/android-28 (android.jar, api-versions.xml)
 # About 2.5 GB unpacked. Needs a JDK (11 is used by build.sh) and, on Apple Silicon, Rosetta.
 set -euo pipefail
-TC="${FILMLAB_TOOLCHAIN:-$HOME/.filmlab-toolchain}"
+TC="${LATENT_TOOLCHAIN:-$HOME/.latent-toolchain}"
 case "$TC" in *" "*) echo "the toolchain path must not contain spaces: $TC" >&2; exit 1;; esac
 mkdir -p "$TC/dl"
 cd "$TC"

@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;

@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import java.lang.reflect.Field;
 
@@ -6,7 +6,7 @@ import java.lang.reflect.Field;
 final class SonyMemory {
     private SonyMemory() {}
 
-    static { System.loadLibrary("filmlab"); }
+    static { System.loadLibrary("latent"); }
 
     /** Geometry indexes, as read through Sony's public DSP.getPropertyAsInt. */
     static final String[] KEYS = { "image-target-width", "image-target-height", "image-canvas-width", "image-canvas-height",

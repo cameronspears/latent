@@ -115,15 +115,15 @@ static int ask(int function, int nargs, int a0, int a1, int a2) {
     return r;
 }
 
-JNIEXPORT jboolean JNICALL Java_com_filmlab_camera_CameraSettings_available(JNIEnv *env, jclass cls) {
+JNIEXPORT jboolean JNICALL Java_com_latent_camera_CameraSettings_available(JNIEnv *env, jclass cls) {
     return load() == 0 ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jint JNICALL Java_com_filmlab_camera_CameraSettings_attr(JNIEnv *env, jclass cls, jint id) {
+JNIEXPORT jint JNICALL Java_com_latent_camera_CameraSettings_attr(JNIEnv *env, jclass cls, jint id) {
     return ask(REQ_ATTR, 1, id, 0, 0);
 }
 
-JNIEXPORT jbyteArray JNICALL Java_com_filmlab_camera_CameraSettings_read(JNIEnv *env, jclass cls, jint id) {
+JNIEXPORT jbyteArray JNICALL Java_com_latent_camera_CameraSettings_read(JNIEnv *env, jclass cls, jint id) {
     unsigned char *buf;
     jbyteArray out;
     int size = ask(REQ_SIZE, 1, id, 0, 0), r;
@@ -150,7 +150,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_filmlab_camera_CameraSettings_read(JNIEnv 
  * Writes one setting's single byte. Refused (negative) unless the setting is in WRITABLE, the value is
  * in its range, the setting is one byte and not read-only. Returns 0 when the service took it.
  */
-JNIEXPORT jint JNICALL Java_com_filmlab_camera_CameraSettings_write(JNIEnv *env, jclass cls, jint id, jint value) {
+JNIEXPORT jint JNICALL Java_com_latent_camera_CameraSettings_write(JNIEnv *env, jclass cls, jint id, jint value) {
     unsigned char *buf;
     int size, attr, r;
     if (!writable(id, value)) {
@@ -180,10 +180,10 @@ JNIEXPORT jint JNICALL Java_com_filmlab_camera_CameraSettings_write(JNIEnv *env,
 }
 
 /* Asks the service to store everything written (the camera keeps it after power-off). */
-JNIEXPORT void JNICALL Java_com_filmlab_camera_CameraSettings_sync(JNIEnv *env, jclass cls) {
+JNIEXPORT void JNICALL Java_com_latent_camera_CameraSettings_sync(JNIEnv *env, jclass cls) {
     ask(REQ_SYNC, 0, 0, 0, 0);
 }
 
-JNIEXPORT jstring JNICALL Java_com_filmlab_camera_CameraSettings_lastError(JNIEnv *env, jclass cls) {
+JNIEXPORT jstring JNICALL Java_com_latent_camera_CameraSettings_lastError(JNIEnv *env, jclass cls) {
     return (*env)->NewStringUTF(env, g_err);
 }

@@ -1,11 +1,11 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * A film stock: a look (LUT file in FILMLAB/LUTS) plus the tone and grain it is developed with,
+ * A film stock: a look (LUT file in LATENT/LUTS) plus the tone and grain it is developed with,
  * and the colours its canister is drawn in. The built-in stocks are tuned presets; any other .CUB
  * file on the card shows up as a plain grey "custom" canister with neutral settings.
  */
@@ -38,7 +38,7 @@ final class Stock {
         for (File f : luts) {
             String id = Library.lutName(f);
             if (f == cuban || f == portra) continue;
-            out.add(new Stock(id, id, "", "Your own look, from FILMLAB/LUTS.", f, 0, 0, 4, 1, 0xFF555049, 0xFFD8D2C4, 0xFFF4F1EA));
+            out.add(new Stock(id, id, "", "Your own look, from LATENT/LUTS.", f, 0, 0, 4, 1, 0xFF555049, 0xFFD8D2C4, 0xFFF4F1EA));
         }
         return out;
     }

@@ -1,5 +1,5 @@
 /* jconfigint.h for libjpeg-turbo 2.1.5.1, hand-written for Film Lab (camera armeabi and Mac host). */
-#define BUILD  "filmlab"
+#define BUILD  "latent"
 #undef inline
 #define INLINE  __inline__ __attribute__((always_inline))
 /* Android 2.3's dynamic linker has no thread-local storage; only TurboJPEG (not built) uses it. */

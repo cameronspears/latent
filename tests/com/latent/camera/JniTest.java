@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 /** Host test: drives the real JNI bridge (built as a macOS library) exactly as the app does. */
 public class JniTest {

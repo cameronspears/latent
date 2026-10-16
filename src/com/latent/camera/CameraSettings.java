@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 /**
  * The camera's stored settings (jni/settings_bridge.c): the values its menus change and that stay
@@ -9,7 +9,7 @@ package com.filmlab.camera;
 final class CameraSettings {
     private CameraSettings() {}
 
-    static { System.loadLibrary("filmlab"); }   // may be the first native call of a run
+    static { System.loadLibrary("latent"); }   // may be the first native call of a run
 
     static final int WB_MODE = 0x01070019, WB_KELVIN = 0x01070018,
             WB_AB = 0x01070017, WB_GM = 0x01070016,                 // the white balance menu's fine-tune grid

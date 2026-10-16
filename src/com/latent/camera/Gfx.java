@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 /**
  * The few drawing operations the UI needs, so the same screen code runs on the camera (Android

@@ -97,12 +97,12 @@ static int transfer(JNIEnv *env, jint handle, jbyteArray arr, jint size, jint of
     return rc == size ? size : -1;
 }
 
-JNIEXPORT jint JNICALL Java_com_filmlab_camera_SonyMemory_read(JNIEnv *env, jclass cls, jint handle, jbyteArray dst, jint size, jint offset) {
+JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_read(JNIEnv *env, jclass cls, jint handle, jbyteArray dst, jint size, jint offset) {
     (void)cls;
     return transfer(env, handle, dst, size, offset, 0);
 }
 
-JNIEXPORT jint JNICALL Java_com_filmlab_camera_SonyMemory_write(JNIEnv *env, jclass cls, jint handle, jbyteArray src, jint size, jint offset) {
+JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_write(JNIEnv *env, jclass cls, jint handle, jbyteArray src, jint size, jint offset) {
     (void)cls;
     return transfer(env, handle, src, size, offset, 1);
 }
@@ -286,12 +286,12 @@ int sb_develop(void *src, const int *sg, void *dst, const int *dg, int block, co
 
 const char *sb_last_error(void) { return s_err; }
 
-JNIEXPORT jboolean JNICALL Java_com_filmlab_camera_SonyMemory_lastDirect(JNIEnv *env, jclass cls) {
+JNIEXPORT jboolean JNICALL Java_com_latent_camera_SonyMemory_lastDirect(JNIEnv *env, jclass cls) {
     (void)env; (void)cls;
     return s_last_direct ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jint JNICALL Java_com_filmlab_camera_SonyMemory_develop(JNIEnv *env, jclass cls, jint src, jintArray jsg,
+JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_develop(JNIEnv *env, jclass cls, jint src, jintArray jsg,
         jint dst, jintArray jdg, jint block, jstring jlut, jintArray jparams, jobject listener) {
     struct progress_ctx pc;
     int sg[G_COUNT], dg[G_COUNT], params[FL_PARAM_COUNT], rc;
@@ -320,7 +320,7 @@ JNIEXPORT jint JNICALL Java_com_filmlab_camera_SonyMemory_develop(JNIEnv *env, j
     return rc;
 }
 
-JNIEXPORT jstring JNICALL Java_com_filmlab_camera_SonyMemory_lastError(JNIEnv *env, jclass cls) {
+JNIEXPORT jstring JNICALL Java_com_latent_camera_SonyMemory_lastError(JNIEnv *env, jclass cls) {
     (void)cls;
     return (*env)->NewStringUTF(env, s_err);
 }

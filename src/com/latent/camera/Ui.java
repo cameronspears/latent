@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 /**
  * Film Lab's screens, drawn through Gfx so the camera and the Mac preview share one implementation.
@@ -327,7 +327,7 @@ final class Ui {
             "Decodes your newest photo in hardware, as playback does, and times it.",
             "Copies that photo to a test file, asks the camera to re-scan, checks it appears, then removes the copy with Sony's own delete.",
     };
-    static final String PROBE_FOOTER = "Your photos are never changed. About a minute; results go to FILMLAB/PROBE.TXT.";
+    static final String PROBE_FOOTER = "Your photos are never changed. About a minute; results go to LATENT/PROBE.TXT.";
 
     static final String[] HARDWARE_PLAN = {
             "Decodes your newest photo in hardware. The original file is only ever read.",
@@ -336,21 +336,21 @@ final class Ui {
             "Develops your photo into it with the loaded film stock (Cuban Neg if none), moving pixels in large verified blocks.",
             "Sony's encoder saves it as a new photo in the camera roll. Look at it in playback; delete it with the trash button if you like.",
     };
-    static final String HARDWARE_FOOTER = "If the camera stops responding, turn it off or remove the battery. Log: FILMLAB/HWTEST.TXT.";
+    static final String HARDWARE_FOOTER = "If the camera stops responding, turn it off or remove the battery. Log: LATENT/HWTEST.TXT.";
 
     static final String[] SPEED_PLAN = {
             "Reads how many cores the camera has, which ones Latent may use, and how busy each is while idle. Read only.",
             "Times the film look on your newest photo, decoded at half size into memory, four ways, each checked against a full-precision reference.",
             "Lets one helper thread of Latent's ask to run on the other cores and times the look split across two. If that is faster and the picture identical, developing also uses cores 1 and 2 (switch: More > 3 cores).",
     };
-    static final String SPEED_FOOTER = "About a minute. Nothing on the card changes; results go to FILMLAB/SPEED.TXT.";
+    static final String SPEED_FOOTER = "About a minute. Nothing on the card changes; results go to LATENT/SPEED.TXT.";
 
     static final String[] SETTINGS_PLAN = {
             "Reads your white balance, its fine-tune grid, and your Creative Style, the settings the camera keeps between uses.",
             "Shows them as the camera's menus do, so you can check them against MENU > White Balance and MENU > Creative Style.",
             "Checks whether Latent would be allowed to change them later. Nothing is changed now: this check can only read.",
     };
-    static final String SETTINGS_FOOTER = "Takes a few seconds. Every raw value goes to FILMLAB/SETTINGS.TXT.";
+    static final String SETTINGS_FOOTER = "Takes a few seconds. Every raw value goes to LATENT/SETTINGS.TXT.";
 
     private static void probe(Gfx g, UiState s) {
         float R = right(s);

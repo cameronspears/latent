@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import android.content.ContentResolver;
 import android.content.Context;

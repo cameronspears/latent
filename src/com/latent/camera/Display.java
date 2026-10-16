@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 /**
  * Colour depth of the camera's screen. Sony gives apps a 16-bit RGBA4444 frame buffer by default

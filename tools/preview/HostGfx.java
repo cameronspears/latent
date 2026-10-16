@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import java.awt.AlphaComposite;
 import java.awt.BasicStroke;

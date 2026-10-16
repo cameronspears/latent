@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import android.content.res.AssetManager;
 
@@ -15,15 +15,26 @@ import java.util.Locale;
 
 /**
  * Files on the memory card. Sony's card file system takes DOS 8.3 names only (upper case, eight
- * characters, three-letter extension), so every name here is 8.3: FILMLAB, LUTS, OUT, *.CUB.
+ * characters, three-letter extension), so every name here is 8.3: LATENT, LUTS, OUT, *.CUB.
  *
- *   /FILMLAB/LUTS/*.CUB   looks (.cube files renamed)
- *   /FILMLAB/OUT/*.JPG    processed copies, named after the source: DSC04491.JPG -> FLA04491.JPG
+ *   /LATENT/LUTS/*.CUB   looks (.cube files renamed)
+ *   /LATENT/OUT/*.JPG    processed copies, named after the source: DSC04491.JPG -> FLA04491.JPG
  */
 final class Library {
     private Library() {}
 
-    static File home(File card) { return new File(card, "FILMLAB"); }
+    /**
+     * Latent's folder on the card. Before the app was renamed it was FILMLAB: that folder (rolls,
+     * negatives, the note of your camera settings) is renamed the first time it's seen.
+     */
+    static File home(File card) {
+        File home = new File(card, "LATENT");
+        if (!home.exists()) {
+            File old = new File(card, "FILMLAB");
+            if (old.isDirectory() && !old.renameTo(home)) return old;   // couldn't rename: keep using it as it is
+        }
+        return home;
+    }
     static File lutDir(File card) { return new File(home(card), "LUTS"); }
     static File outDir(File card) { return new File(home(card), "OUT"); }
 

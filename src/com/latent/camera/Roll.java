@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -15,7 +15,7 @@ import java.util.Set;
 
 /**
  * A roll of film: a stock, a length, and every photo taken after it was loaded (up to that
- * length). Lives in FILMLAB/ROLLnnn/ with its developed frames (01_04547.JPG ...) and ROLL.TXT.
+ * length). Lives in LATENT/ROLLnnn/ with its developed frames (01_04547.JPG ...) and ROLL.TXT.
  *
  * Exposures are found by the camera's own photo numbers (100MSDCF/DSC04592 is 1004592): a roll
  * remembers the highest number on the card when it was loaded, and every higher-numbered photo is an

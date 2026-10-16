@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -10,7 +10,7 @@ import java.util.Arrays;
 public class NegativeTest {
     public static void main(String[] a) throws Exception {
         File photo = new File(a[0]), dir = new File(a[1]);
-        File original = new File(dir, "DCIM/100MSDCF/DSC04574.JPG"), neg = new File(dir, "FILMLAB/ROLL001/NEG/DSC04574.JPG");
+        File original = new File(dir, "DCIM/100MSDCF/DSC04574.JPG"), neg = new File(dir, "LATENT/ROLL001/NEG/DSC04574.JPG");
         original.getParentFile().mkdirs();
         copy(photo, original);
         long crc = HardwareDevelop.copyNegative(original, neg);

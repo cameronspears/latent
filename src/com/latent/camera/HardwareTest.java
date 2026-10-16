@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import android.content.Context;
 import android.media.ExifInterface;
@@ -8,7 +8,7 @@ import java.io.FileOutputStream;
 import java.util.List;
 
 /**
- * The hardware develop, run once on the newest photo with a full log (FILMLAB/HWTEST.TXT). It is
+ * The hardware develop, run once on the newest photo with a full log (LATENT/HWTEST.TXT). It is
  * exactly the darkroom's develop (HardwareDevelop), minus the negatives: the original stays where it
  * is, and the new photo is an extra copy you can delete in playback.
  */

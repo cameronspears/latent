@@ -1,4 +1,4 @@
-package com.filmlab.camera;
+package com.latent.camera;
 
 import java.io.File;
 
@@ -6,7 +6,7 @@ import java.io.File;
 public class SettingsTest {
     public static void main(String[] a) throws Exception {
         File card = new File(a[0]);
-        new File(card, "FILMLAB").mkdirs();
+        new File(card, "LATENT").mkdirs();
         check(CameraSettings.available(), "settings service found");
         check(v(CameraSettings.WB_AB) == 2 && v(CameraSettings.WB_GM) == 2 && v(CameraSettings.CONTRAST) == 1 && v(CameraSettings.DRO) == 1,
                 "reads the camera's A2 / M2, contrast +1, DRO Auto");
