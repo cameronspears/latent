@@ -100,7 +100,7 @@ public class RenderScreens {
         s.footer = "Ends the roll here and develops the 9 shot so far.";
         s.rowSel = 1;
         render(s, fonts, out, "6-menu");
-        s.rowSel = 5; s.footer = "Shoot shows the film on live view. Photos develop the next time Latent opens.";
+        s.rowSel = 5; s.footer = "Shoot stays in Latent. Photos develop the next time Latent opens.";
         render(s, fonts, out, "6c-menu-viewfinder");
         s.rowSel = 16; s.footer = "Latent 0.31.0";
         render(s, fonts, out, "6b-menu-scrolled");
@@ -147,6 +147,12 @@ public class RenderScreens {
         s = vf(six, 4, img(samples, "HOUSE-TRIX400.png"));
         s.lookShown = true; s.cardNote = "Loaded for the whole roll";
         render(s, fonts, out, "8m-vf-card-locked");
+        // v0.32.0 on the camera: its own live view with Latent's drawing over it, prints waiting for the darkroom
+        s = vf(six, 2, null);
+        s.liveThrough = true; s.lookLive = false; s.exposed = 11; s.developing = 2; s.afState = 2;
+        renderOver(s, fonts, out, "8o-vf-camera-live-view", img(samples, "STREET-NATURAL.png"));
+        s.afState = 1; s.afTry = 2; s.afLamp = true; s.vfNote = "";
+        renderOver(s, fonts, out, "8p-vf-camera-live-view-trying", img(samples, "PEOPLE-NATURAL.png"));
         s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
         s.afState = 1; s.afTry = 3; s.afLamp = true; s.shutter = "1/30"; s.aperture = "F3.5"; s.iso = "6400"; s.isoAuto = true;
         render(s, fonts, out, "8n-vf-trying-again");

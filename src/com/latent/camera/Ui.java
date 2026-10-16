@@ -268,7 +268,11 @@ final class Ui {
     private static void print(Gfx g, UiState s, float R, float y, int accent) {
         if (s.printImage == null && s.developing <= 0) return;
         float w = 66, h = 44, x = R - w, top = y - h + 6;
-        if (s.printImage != null) {
+        if (s.printImage == null) {   // nothing to show yet: a print still latent, waiting for the darkroom
+            g.roundRect(x - 3, top - 3, w + 6, h + 6, 4, 0xFFEDE8DE);
+            g.rect(x, top, w, h, 0xFF231D17);
+            g.rect(x, top + h - 2, w, 2, (accent & 0x00FFFFFF) | 0xCC000000);
+        } else {
             g.roundRect(x - 3, top - 3, w + 6, h + 6, 4, 0xFFEDE8DE);   // a white border, like a print
             g.image(s.printImage, x, top, w, h, false);
             float left = 1 - Math.max(0, Math.min(1, s.printProgress));

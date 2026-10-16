@@ -433,7 +433,7 @@ public class MainActivity extends Activity {
     private String settingsFooter(String action) {
         if (action.equals("cores")) return prefs.getBoolean("multicoreOk", false) ? "Develops on cores 1 and 2 as well. Core 0 is left to the camera." : "Run the Speed test first: it checks the other cores.";
         if (action.equals("neutral")) return "Every look starts from the same picture. Your settings come back after.";
-        if (action.equals("viewfinder")) return viewfinderOn() ? "Shoot shows the film on live view. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
+        if (action.equals("viewfinder")) return viewfinderOn() ? "Shoot stays in Latent. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
         if (action.equals("focusFirst")) return focusFirst() ? "A full press waits for focus to lock, as AF-S does." : "A full press takes the picture at once, in focus or not.";
         if (action.equals("shootTest")) return "Latent focuses and takes one photo itself. Changes no setting.";
         if (action.equals("develop")) return "Ends the roll here and develops the " + exposed + " shot so far.";
@@ -719,7 +719,7 @@ public class MainActivity extends Activity {
                 screen.invalidate();
             }
             public void changed() { screen.invalidate(); }
-            public void live() { }   // a half-press still held from the camera back: the next one focuses (the button is the camera's)
+            public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
             public void shot(File photo) { vfShot(photo); }
             public void closed(String why) {
                 vf = null;

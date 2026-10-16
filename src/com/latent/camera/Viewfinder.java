@@ -64,6 +64,22 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      */
     static volatile boolean opened;
 
+    /**
+     * The film look on live view (and the level, which reads the same frames) needs the camera's live
+     * JPEG frames (CameraSequence's preview sequence). On the A5100, once that has been started in a
+     * camera session the camera never stores another picture, whoever presses the shutter: v0.31.0
+     * (frames running), v0.31.1 (frames stopped first), v0.31.2 (the camera's own shutter) all lost
+     * their pictures, and the camera froze when released or reopened with them pending. Off: the
+     * camera's own live view shows, with Latent's drawing over it.
+     */
+    static final boolean LIVE_LOOK = false;
+    /**
+     * Direct shutter (the button is the camera's own). Off: Latent focuses and takes the pictures
+     * itself, exactly as the Shooting test has every time without a fault (focus, burstableTakePicture,
+     * stored and catalogued about 0.2 s later).
+     */
+    static final boolean DIRECT_SHUTTER = false;
+
     static final int FRAME_W = 320, FRAME_H = 240;
     /** Frame widths to ask the camera for, in turn, if frames don't come. */
     static final int[] WIDTHS = { 320, 640 };
@@ -71,7 +87,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     static final long PRINT_MS = 4000, FLASH_MS = 140, CARD_MS = 1600, NOTE_MS = 2600;
     /** Display modes: up and down cycle them. */
     static final int D_STANDARD = 0, D_GRID = 1, D_CLEAN = 2;
-    static final String[] DISPLAY_NAMES = { "Standard", "Grid and histogram", "Clean" };
+    static final String[] DISPLAY_NAMES = { "Standard", LIVE_LOOK ? "Grid and histogram" : "Grid", "Clean" };
 
     private final Activity activity;
     private final File card;
@@ -141,7 +157,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     Viewfinder(Activity activity, File card, SurfaceView surface, ExecutorService worker, Stock stock, boolean focusFirst,
                int highestPhoto, Host host) {
         this.activity = activity; this.card = card; this.surface = surface; this.worker = worker; this.host = host;
-        this.release = new Release(this, focusFirst);
+        this.release = new Release(this, focusFirst, !DIRECT_SHUTTER);
         this.highestKnown = highestPhoto;
         setFilm(stock);
     }
@@ -228,11 +244,14 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         listen();
         // the shutter button is the camera's own, as in Sony's apps and sony-remote-reboot: started
         // before the live frames, it is what lets the camera store pictures with the frames running
-        startDirect();
-        note(direct ? "direct shutter on" : "no direct shutter: Latent takes the pictures");
-        if (!direct) release.app = true;
+        if (DIRECT_SHUTTER) {
+            startDirect();
+            note(direct ? "direct shutter on" : "no direct shutter: Latent takes the pictures");
+            if (!direct) release.app = true;
+        }
         readSettings();
-        startFrames();
+        if (LIVE_LOOK) startFrames();
+        else note("the camera's own live view (no live frames: they stop pictures being stored)");
         ui.post(tick);
         host.live();
         host.changed();
@@ -539,6 +558,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     /** Centre: the film look on live view, or the camera's own picture (smooth, at full speed). */
     void toggleLook() {
+        if (!LIVE_LOOK) { showCard(); return; }   // no look on live view: centre shows the film
         if (lookFailed) { say("Film look unavailable on live view"); return; }
         lookOn = !lookOn;
         say(lookOn ? "Film look on" : "Film look off  \u00b7  the camera's own view");
@@ -642,6 +662,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     public void handBack() {
         cancelFocus();
+        if (!DIRECT_SHUTTER) return;
         if (closed || closing || camera == null) return;
         if (directStopping) { afterStop = new Runnable() { public void run() { if (!closed && !closing) startDirect(); } }; return; }
         if (!direct) startDirect();

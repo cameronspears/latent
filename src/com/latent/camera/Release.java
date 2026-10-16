@@ -15,6 +15,10 @@ package com.latent.camera;
  * once focus has locked. Letting go hands the button back to the camera. This is the sequence
  * sony-remote-reboot uses for a phone's half-press and shutter.
  *
+ * With 'always' (v0.32.0 on: no direct shutter, the Shooting test's proven way) the button is
+ * Latent's from the start: a half-press is Latent's focus, retried while held, and a full press
+ * Latent's picture.
+ *
  * Plain logic with no camera in it, tested on a Mac (tests/ViewfinderTest). One thread (the UI's).
  */
 final class Release {
@@ -42,6 +46,8 @@ final class Release {
     }
 
     private final Camera camera;
+    /** The button is always Latent's (no direct shutter): Latent focuses and takes every picture. */
+    final boolean always;
     boolean focusFirst;
     int state = READY;
     int tries;                 // focus tries since the half-press (the camera's own is the first)
@@ -53,7 +59,12 @@ final class Release {
     boolean locked;            // the roll is full: the button is Latent's for good, and takes nothing
     private int gen;           // retries scheduled before a newer press don't run
 
-    Release(Camera camera, boolean focusFirst) { this.camera = camera; this.focusFirst = focusFirst; }
+    Release(Camera camera, boolean focusFirst, boolean always) {
+        this.camera = camera;
+        this.focusFirst = focusFirst;
+        this.always = always;
+        this.app = always;
+    }
 
     void halfDown() {
         if (half) return;
@@ -69,7 +80,7 @@ final class Release {
         waiting = false;
         gen++;
         if (shooting) return;   // the picture finishes; shot() hands the button back
-        if (app && !locked) { camera.handBack(); app = false; }
+        if (app && !locked && !always) { camera.handBack(); app = false; }
         else if (app) camera.cancelFocus();
         state = READY;
         tries = 0;
@@ -128,9 +139,11 @@ final class Release {
         if (!shooting) return;
         shooting = false;
         waiting = false;
-        if (!locked) { camera.handBack(); app = false; }
+        if (!locked && !always) { camera.handBack(); app = false; }
+        else camera.cancelFocus();
         state = READY;
         tries = 0;
+        if (always && half && !locked) appFocus();   // still held: focus again for the next one
     }
 
     /** The roll is full: no more pictures. The button stays Latent's, and a full press takes nothing. */
