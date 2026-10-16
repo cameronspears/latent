@@ -43,9 +43,36 @@ public class JniTest {
         String two = FilmCore.benchCores(in, lut, bp, 4);
         check(two != null && two.contains("pictures identical") && two.contains("widen:"), "two-thread run matches one core: " + (two == null ? FilmCore.lastError() : two.replace("\n", " | ")));
         check(FilmCore.benchCores(in + ".missing", lut, bp, 4) == null, "two-thread run reports a missing photo");
+        // the viewfinder: a live frame (here the screen preview, a small JPEG like the camera's) decoded from memory
+        byte[] jpeg = read(outDir + "/PRV04491.JPG");
+        int[] lp = new int[FilmCore.L_COUNT], live = new int[320 * 240];
+        rc = FilmCore.live(jpeg, jpeg.length, lut, p, live, 320, 240, lp);
+        int sum = 0;
+        for (int i = 0; i < FilmCore.L_HIST_BINS; i++) sum += lp[FilmCore.L_HIST + i];
+        check(rc == 0 && lp[FilmCore.L_W] == 320 && lp[FilmCore.L_H] <= 240 && lp[FilmCore.L_H] >= 200, "live frame fitted to " + lp[FilmCore.L_W] + "x" + lp[FilmCore.L_H] + " " + FilmCore.lastError());
+        check(sum == lp[FilmCore.L_W] * lp[FilmCore.L_H] && (live[0] >>> 24) == 0xFF, "its histogram counts every pixel; pixels opaque");
+        check(lp[FilmCore.L_CONFIDENCE] >= 0 && lp[FilmCore.L_CONFIDENCE] <= 100, "level read: " + lp[FilmCore.L_ANGLE] / 100.0 + " degrees, confidence " + lp[FilmCore.L_CONFIDENCE]);
+        rc = FilmCore.live(jpeg, jpeg.length / 3, lut, p, live, 320, 240, lp);
+        check(true, "a cut-off frame doesn't crash (rc " + rc + ")");
+        byte[] junk = new byte[2048];
+        check(FilmCore.live(junk, junk.length, lut, p, live, 320, 240, lp) != 0, "not a JPEG: refused (" + FilmCore.lastError() + ")");
+        check(FilmCore.live(jpeg, jpeg.length, lut, p, new int[100], 320, 240, lp) != 0 && FilmCore.lastError().contains("buffers"), "small buffer rejected");
+        check(FilmCore.live(jpeg, jpeg.length + 1, lut, p, live, 320, 240, lp) != 0, "a length past the array rejected");
         FilmCore.setVariant(1);
         FilmCore.setVariant(0);
         System.out.println("JNI OK");
+    }
+
+    static byte[] read(String path) {
+        try {
+            java.io.File f = new java.io.File(path);
+            byte[] b = new byte[(int) f.length()];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            try { int n = 0; while (n < b.length) n += in.read(b, n, b.length - n); } finally { in.close(); }
+            return b;
+        } catch (java.io.IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     static void check(boolean ok, String what) {

@@ -60,6 +60,7 @@ final class LiveViewTest implements SurfaceHolder.Callback {
         log.append("Latent live view test\r\n");
         long t0 = System.currentTimeMillis();
         out.step(0, RUN, "opening…");
+        Viewfinder.opened = true;   // Sony's image memory is the camera's now, until Latent closes
         try {
             Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
             Method open = cx.getMethod("open", int.class, Class.forName("com.sony.scalar.hardware.CameraEx$OpenOptions"));

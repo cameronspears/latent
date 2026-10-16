@@ -50,6 +50,19 @@ void fl_last_timing(int *out);
 int fl_preview(const char *in_path, const char *lut_path, const int *params, int mode,
                unsigned int *argb, int max_w, int max_h, int *out_wh, char *err, int errlen);
 
+/* The viewfinder: one live frame (a small JPEG from the camera) decoded in memory, fitted inside
+ * max_w x max_h, with the look (no grain) into argb. info[FL_LIVE_INFO]: 0, 1 the size produced;
+ * 2..4 the level (fl_level, on the picture before the look); 5..68 a 64-bin brightness histogram. */
+#define FL_LIVE_INFO 69
+int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
+            unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen);
+
+/* How far from level the picture is, from its straight edges (the camera has no tilt sensor).
+ * out[0]: the angle of the dominant horizontal / vertical edges in 1/100 degree, positive when they
+ * rise to the right (the camera is turned clockwise); out[1]: confidence 0..100 (the share of edge
+ * weight agreeing within a degree); out[2]: how many 8x8 blocks agree. 0 on success. */
+int fl_level(const unsigned char *rgb, int w, int h, int *out);
+
 /* Row access for fl_develop_uyvy: fill (write == 0) or store (write == 1) row y as packed UYVY,
  * w * 2 bytes. Returns 0 on success. */
 typedef int (*fl_row_io)(void *ctx, int y, unsigned char *uyvy, int write);

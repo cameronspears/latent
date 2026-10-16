@@ -27,6 +27,8 @@ final class UiState {
     int rollNumber, exposed, length;
     int developed = -1;                // frames developed so far when a develop was paused, else -1
     boolean endless;                   // a roll with no end: it develops as you shoot
+    boolean developLater;              // the camera was opened in Latent: nothing develops until Latent opens again
+    int waiting;                       // photos shot in Latent's viewfinder this time, still to develop
 
     // Photo mode: live view with a look on it
     Object liveImage;                  // a still standing in for live view (previews only)
@@ -51,6 +53,12 @@ final class UiState {
     boolean grid, lookLive, flash;     // thirds; the look is on live view; the shutter just blinked
     Object printImage;                 // the last shot, developing
     float printProgress;               // 0 latent .. 1 developed
+    boolean liveThrough;               // the camera's own live view shows in the picture (no look on it)
+    boolean clean;                     // the clean display: the picture, focus and the counter only
+    boolean levelShown, levelOk;       // the level (read from the picture), and whether it's level
+    float levelAngle;                  // degrees, positive when the scene's lines rise to the right
+    String vfNote = "";                // a short word under the counter ("Grid and histogram", "Roll finished")
+    String cardNote = "";              // under the film's name on its card, in place of the tagline
 
     // Settings
     List<String[]> rows = new ArrayList<String[]>();   // {label, value}: value "on"/"off" draws a switch, "›" opens, "" is a heading

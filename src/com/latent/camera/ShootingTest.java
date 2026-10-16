@@ -165,6 +165,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
             });
         }
         highestBefore = Roll.highest(Library.photos(card));
+        Viewfinder.opened = true;   // Sony's image memory is the camera's now, until Latent closes
         step(S_OPEN, RUN, "opening…");
         // before the camera opens, as an app would at start-up: the map, and how it is fitted in
         if (CAPTURE_HOOK) {

@@ -68,6 +68,14 @@ public class RenderScreens {
         s = state();
         s.film = portra; s.rollNumber = 4; s.exposed = 12; s.length = 12; s.battery = 17;
         render(s, fonts, out, "5-home-finished-lowbattery");
+        // after Latent's viewfinder: the camera holds the image memory until Latent closes
+        s = state();
+        s.film = portra; s.rollNumber = 4; s.exposed = 12; s.length = 12; s.developLater = true; s.waiting = 3;
+        render(s, fonts, out, "5b-home-finished-develop-later");
+        s = state();
+        s.film = trix; s.rollNumber = 13; s.exposed = 29; s.endless = true; s.developLater = true; s.waiting = 6;
+        for (int i = 0; i < 6; i++) s.thumbs.add(img(samples, names[i % 3] + "-TRIX400.png"));
+        render(s, fonts, out, "4c-home-endless-develop-later");
 
         s = state();
         s.mode = UiState.SETTINGS;
@@ -76,6 +84,9 @@ public class RenderScreens {
         s.rows.add(new String[] { "Develop now", "\u203a" });
         s.rows.add(new String[] { "Change film", "\u203a" });
         s.rows.add(new String[] { "Rolls", "\u203a" });
+        s.rows.add(new String[] { "Shooting", "" });
+        s.rows.add(new String[] { "Latent's viewfinder", "on" });
+        s.rows.add(new String[] { "Focus first", "on" });
         s.rows.add(new String[] { "Developing", "" });
         s.rows.add(new String[] { "Use three cores", "on" });
         s.rows.add(new String[] { "Shoot neutral while a roll is loaded", "on" });
@@ -89,7 +100,9 @@ public class RenderScreens {
         s.footer = "Ends the roll here and develops the 9 shot so far.";
         s.rowSel = 1;
         render(s, fonts, out, "6-menu");
-        s.rowSel = 13; s.footer = "Latent 0.19.0";
+        s.rowSel = 5; s.footer = "Shoot shows the film on live view. Photos develop the next time Latent opens.";
+        render(s, fonts, out, "6c-menu-viewfinder");
+        s.rowSel = 16; s.footer = "Latent 0.31.0";
         render(s, fonts, out, "6b-menu-scrolled");
 
         // ---- the viewfinder (in-app shooting): every focus state, a look change, a shot developing
@@ -115,6 +128,28 @@ public class RenderScreens {
         s = vf(six, 5, img(samples, "PEOPLE-PARTY800.png"));
         s.endless = true; s.exposed = 37; s.flash = true; s.printImage = img(samples, "STREET-PARTY800.png"); s.printProgress = 0.1f; s.developing = 1;
         render(s, fonts, out, "8g-vf-endless-shot");
+        // the level, read from the picture: off level, then level
+        s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
+        s.levelShown = true; s.levelAngle = 2.6f;
+        render(s, fonts, out, "8h-vf-level-tilted");
+        s.levelAngle = 0.2f; s.levelOk = true; s.afState = 2; s.shutter = "1/250"; s.aperture = "F8";
+        render(s, fonts, out, "8i-vf-level-locked");
+        s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
+        s.clean = true; s.vfNote = "Clean";
+        render(s, fonts, out, "8j-vf-clean");
+        // centre: the camera's own live view (drawn here under the screen, as the camera's video plane is)
+        s = vf(six, 2, null);
+        s.liveThrough = true; s.lookLive = false; s.vfNote = "Film look off  \u00b7  the camera's own view"; s.levelShown = true; s.levelAngle = -1.4f;
+        renderOver(s, fonts, out, "8k-vf-camera-view", img(samples, "HOUSE-NATURAL.png"));
+        s = vf(six, 0, img(samples, "PEOPLE-NATURAL.png"));
+        s.exposed = 12; s.length = 12; s.vfNote = "Roll finished"; s.printImage = img(samples, "PEOPLE-NATURAL.png"); s.printProgress = 0.6f; s.developing = 3;
+        render(s, fonts, out, "8l-vf-roll-finished");
+        s = vf(six, 4, img(samples, "HOUSE-TRIX400.png"));
+        s.lookShown = true; s.cardNote = "Loaded for the whole roll";
+        render(s, fonts, out, "8m-vf-card-locked");
+        s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
+        s.afState = 1; s.afTry = 3; s.afLamp = true; s.shutter = "1/30"; s.aperture = "F3.5"; s.iso = "6400"; s.isoAuto = true;
+        render(s, fonts, out, "8n-vf-trying-again");
 
         s = state();
         s.mode = UiState.DARKROOM; s.film = cuban; s.devFrame = 4; s.devTotal = 12; s.devDone = 4;
@@ -208,9 +243,16 @@ public class RenderScreens {
         return f.exists() ? ImageIO.read(f) : null;
     }
 
-    static void render(UiState s, File fonts, File out, String name) throws Exception {
+    static void render(UiState s, File fonts, File out, String name) throws Exception { renderOver(s, fonts, out, name, null); }
+
+    /** With 'video' drawn first where the camera's live view would be (3:2, full height, centred). */
+    static void renderOver(UiState s, File fonts, File out, String name, Object video) throws Exception {
         BufferedImage img = new BufferedImage(Math.round(s.width), 480, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = img.createGraphics();
+        if (video != null) {
+            BufferedImage v = (BufferedImage) video;
+            g.drawImage(v, Math.round((s.width - 720) / 2), 0, 720, 480, null);
+        }
         Ui.draw(new HostGfx(g, fonts), s);
         g.dispose();
         ImageIO.write(img, "png", new File(out, name + ".png"));

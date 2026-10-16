@@ -25,7 +25,13 @@ final class Ui {
             liveOverlay(g, s);
             return;
         }
-        g.rect(0, 0, s.width, H, BG);
+        if (s.mode == UiState.PHOTO && s.liveThrough) {   // the camera's own live view shows in the picture: black bars only
+            float iw = H * 1.5f, ix = (s.width - iw) / 2;
+            g.rect(0, 0, ix, H, BG);
+            g.rect(ix + iw, 0, s.width - ix - iw, H, BG);
+        } else {
+            g.rect(0, 0, s.width, H, BG);
+        }
         switch (s.mode) {
             case UiState.BACK: back(g, s); break;
             case UiState.LOAD: load(g, s); break;
@@ -71,18 +77,20 @@ final class Ui {
                 if (t != null) g.image(t, x, 322, tw, th, false);
                 else g.rect(x, 322, tw, th, SURFACE);
             }
-            note = s.developing > 0 ? "" : shown == 0 ? "No end to this roll. Photos develop each time you come back." : "";
-            if (s.thumbs.isEmpty() && note.length() > 0) g.text(note, L, 356, Gfx.REGULAR, 19, INK2, Gfx.LEFT, 0);
+            note = s.developLater && s.waiting > 0 ? s.waiting + (s.waiting == 1 ? " photo develops" : " photos develop") + " the next time you open Latent."
+                    : s.developing > 0 ? "" : shown == 0 ? "No end to this roll. Photos develop each time you come back." : "";
+            if (note.length() > 0) g.text(note, L, s.thumbs.isEmpty() ? 356 : 410, Gfx.REGULAR, 19, INK2, Gfx.LEFT, 0);
         } else {
             ticks(g, s.length, shown, -1, L, R, 338, INK, LINE, f.accent);
-            note = s.developed >= 0 ? s.developed + " of " + shown + " developed. Press to carry on."
-                    : shown >= s.length ? "Roll finished. Press to develop."
+            note = s.developed >= 0 ? s.developed + " of " + shown + " developed. " + (s.developLater ? "It carries on the next time you open Latent." : "Press to carry on.")
+                    : shown >= s.length ? (s.developLater ? "Roll finished. It develops the next time you open Latent." : "Roll finished. Press to develop.")
                     : shown == 0 ? "Fresh roll. Half-press the shutter to shoot."
                     : (s.length - shown) + (s.length - shown == 1 ? " exposure left" : " exposures left");
             g.text(note, L, 384, Gfx.REGULAR, 19, INK2, Gfx.LEFT, 0);
         }
-        String action = s.developed >= 0 || (!s.endless && shown >= s.length) ? "Develop" : "Shoot";
-        hints(g, s, INK2, new String[] { "centre", action }, new String[] { "menu", "Menu" });
+        boolean develop = s.developed >= 0 || (!s.endless && shown >= s.length);
+        hints(g, s, INK2, develop && s.developLater ? new String[0] : new String[] { "centre", develop ? "Develop" : "Shoot" },
+                new String[] { "menu", "Menu" });
         if (s.developing > 0) developingPill(g, s, R - g.textWidth("Menu", Gfx.REGULAR, 17, 0) - glyphWidth(g, "menu") - 30, f.accent);
     }
 
@@ -121,7 +129,7 @@ final class Ui {
         UiState.Film f = s.looks.isEmpty() ? null : s.looks.get(Math.min(s.lookSel, s.looks.size() - 1));
         int accent = f != null ? f.accent : INK;
         if (s.liveImage != null) g.image(s.liveImage, ix, 0, iw, H, false);
-        else g.rect(ix, 0, iw, H, 0xFF0B0B0A);
+        else if (!s.liveThrough) g.rect(ix, 0, iw, H, 0xFF0B0B0A);
         if (s.flash) { g.rect(ix, 0, iw, H, 0xD0000000); }   // the shutter: a blink
 
         // soft fades top and bottom, so the type reads over any picture
@@ -147,14 +155,22 @@ final class Ui {
         frameWindow(g, s, s.width / 2, 36, accent);
         if (s.battery >= 0) battery2(g, s.battery, ir - 18, 36);
         if (s.hist != null) histogram(g, s.hist, ir - 18 - 112, 54, 112, 40);
+        if (s.vfNote.length() > 0) {   // a word under the counter, for a moment
+            float tw = g.textWidth(s.vfNote, Gfx.MEDIUM, 15, 0) + 30;
+            g.roundRect(s.width / 2 - tw / 2, 58, tw, 28, 14, 0xB0000000);
+            g.text(s.vfNote, s.width / 2, 77, Gfx.MEDIUM, 15, INK, Gfx.CENTER, 0);
+        }
 
         // ---- the side bars: focus mode on the left, photos left on the card on the right
-        sideLabel(g, ix / 2, 214, s.afMode, "FOCUS");
-        sideLabel(g, ix / 2, 268, s.afArea, "AREA");
-        sideLabel(g, ir + ix / 2, 214, s.shotsLeft >= 0 ? String.valueOf(s.shotsLeft) : "", "LEFT");
+        if (!s.clean) {
+            sideLabel(g, ix / 2, 214, s.afMode, "FOCUS");
+            sideLabel(g, ix / 2, 268, s.afArea, "AREA");
+            sideLabel(g, ir + ix / 2, 214, s.shotsLeft >= 0 ? String.valueOf(s.shotsLeft) : "", "LEFT");
+        }
         if (s.afLamp) lamp(g, ir + ix / 2, 268, s.afState == 1 ? INK : INK2);
 
-        // ---- focus (out of the way while the look card is up)
+        // ---- the level, then focus (both out of the way while the look card is up)
+        if (s.levelShown && !s.lookShown) level(g, s, ix + iw / 2, H / 2);
         if (!s.lookShown) afBrackets(g, s, ix, iw);
 
         // ---- bottom: exposure, the meter, the print
@@ -163,10 +179,12 @@ final class Ui {
         int ink = live ? INK : 0xCCF4F1EA;
         float x = ix + 22;
         if (s.afState == 2 || s.afState == 3) { g.circle(x + 4, by - 6, 4.5f, s.afState == 2 ? GREEN : AMBER); x += 18; }
-        x = expo(g, x, by, s.shutter, "", ink);
-        x = expo(g, x + 22, by, s.aperture, "", ink);
-        x = expo(g, x + 22, by, s.iso, s.isoAuto ? "ISO A" : "ISO", ink);
-        meter(g, s.width / 2 + 40, by - 6, 150, s.ev, ink, accent);
+        if (!s.clean) {
+            x = expo(g, x, by, s.shutter, "", ink);
+            x = expo(g, x + 22, by, s.aperture, "", ink);
+            x = expo(g, x + 22, by, s.iso, s.isoAuto ? "ISO A" : "ISO", ink);
+            meter(g, s.width / 2 + 40, by - 6, 150, s.ev, ink, accent);
+        }
         print(g, s, ir - 18, by, accent);
 
         // ---- the look, large, for a moment after the wheel turns (a Fuji film simulation answering its dial)
@@ -297,6 +315,25 @@ final class Ui {
         }
     }
 
+    /**
+     * The level, read from the picture: a line along the scene's horizon, broken where the focus
+     * brackets sit, between two fixed marks that are the frame's own level. Turn the camera until the
+     * line meets the marks; then it turns green, as a camera's own level does.
+     */
+    private static void level(Gfx g, UiState s, float cx, float cy) {
+        float a = Math.max(-12, Math.min(12, s.levelAngle)) * (float) Math.PI / 180, c = (float) Math.cos(a), sn = (float) Math.sin(a);
+        int col = s.levelOk ? GREEN : 0xE6F4F1EA;
+        float stroke = s.levelOk ? 2.2f : 1.6f, in = 96, out = 214;
+        for (int side = -1; side <= 1; side += 2) {
+            float x1 = cx + side * in * c, y1 = cy - side * in * sn, x2 = cx + side * out * c, y2 = cy - side * out * sn;
+            g.line(x1 + 0.8f, y1 + 0.8f, x2 + 0.8f, y2 + 0.8f, stroke + 1.6f, 0x55000000);
+            g.line(x1, y1, x2, y2, stroke, col);
+            float m0 = cx + side * 226, m1 = cx + side * 246;   // the frame's level: fixed marks beyond the line's ends
+            g.line(m0 + 0.8f, cy + 0.8f, m1 + 0.8f, cy + 0.8f, 3.6f, 0x55000000);
+            g.line(m0, cy, m1, cy, 2f, s.levelOk ? GREEN : 0xB3F4F1EA);
+        }
+    }
+
     /** Four corner marks around a rectangle, over a soft shadow so they read on any picture. */
     private static void corners(Gfx g, float x, float y, float w, float h, float len, float stroke, int c) {
         if ((c >>> 24) > 0x60) corners1(g, x + 0.8f, y + 0.8f, w, h, len, stroke + 1.6f, 0x55000000);
@@ -326,7 +363,8 @@ final class Ui {
 
     /** The film simulation card: the film's name large, every film's canister in a row, this one raised. */
     private static void lookCard(Gfx g, UiState s, UiState.Film f) {
-        String sub = (f.iso.length() > 0 ? "ISO " + f.iso : "") + (f.tagline.length() > 0 ? (f.iso.length() > 0 ? "  \u00b7  " : "") + f.tagline : "");
+        String tag = s.cardNote.length() > 0 ? s.cardNote : f.tagline;
+        String sub = (f.iso.length() > 0 ? "ISO " + f.iso : "") + (tag.length() > 0 ? (f.iso.length() > 0 ? "  \u00b7  " : "") + tag : "");
         float tw = Math.max(Math.max(g.textWidth(f.title, Gfx.DISPLAY, 56, -10), g.textWidth(sub, Gfx.REGULAR, 15, 0)), s.looks.size() * 34f) + 70;
         float x = s.width / 2 - tw / 2, y = 150;
         g.roundRect(x, y, tw, 168, 26, 0xC4000000);

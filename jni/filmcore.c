@@ -1243,6 +1243,169 @@ int fl_preview(const char *in_path, const char *lut_path, const int *params, int
 }
 
 /* ------------------------------------------------------------------------------------------ */
+/* the viewfinder: live frames                                                                  */
+
+/* Block size and limits of the horizon search (see fl_level). */
+#define LV_BLOCK 8
+#define LV_RANGE 12           /* degrees either side of level that count as a level cue      */
+#define LV_BINS (LV_RANGE * 8 + 1)   /* 0.25 degree bins                                      */
+
+int fl_level(const unsigned char *rgb, int w, int h, int *out) {
+    int bw = (w - 2) / LV_BLOCK, bh = (h - 2) / LV_BLOCK, nb = bw * bh, i, x, y, bx, by, n = 0, near = 0, peak = 0;
+    unsigned char *luma, *blur;
+    float *ang, *wt, hist[LV_BINS], smooth[LV_BINS], total = 0, mass = 0, sum = 0, mean_e = 0, floor_e;
+    int *je;
+    out[0] = out[1] = out[2] = 0;
+    if (bw < 4 || bh < 4) return -1;
+    luma = (unsigned char *)malloc((size_t)w * h);
+    blur = (unsigned char *)malloc((size_t)w * h);
+    ang = (float *)malloc(sizeof(float) * nb);
+    wt = (float *)malloc(sizeof(float) * nb);
+    je = (int *)malloc(sizeof(int) * nb * 3);
+    if (!luma || !blur || !ang || !wt || !je) { free(luma); free(blur); free(ang); free(wt); free(je); return -1; }
+    /* brightness, softened a little ([1 2 1] each way): Scharr's derivative on a softened picture
+     * reads an edge's angle to within 1% (Sobel on sharp edges read 10% low) */
+    for (i = 0; i < w * h; i++) blur[i] = (unsigned char)((rgb[i * 3] * 77 + rgb[i * 3 + 1] * 150 + rgb[i * 3 + 2] * 29) >> 8);
+    for (y = 0; y < h; y++) {
+        unsigned char *r = blur + y * w;
+        int prev = r[0];
+        for (x = 0; x < w; x++) {
+            int cur = r[x], next = x + 1 < w ? r[x + 1] : cur;
+            luma[y * w + x] = (unsigned char)((prev + 2 * cur + next + 2) >> 2);
+            prev = cur;
+        }
+    }
+    for (x = 0; x < w; x++) {
+        int prev = luma[x];
+        for (y = 0; y < h; y++) {
+            int cur = luma[y * w + x], next = y + 1 < h ? luma[(y + 1) * w + x] : cur;
+            blur[y * w + x] = (unsigned char)((prev + 2 * cur + next + 2) >> 2);
+            prev = cur;
+        }
+    }
+    /* per block, the structure tensor of the gradient (y pointing up): Jxx, Jyy, Jxy. Integer per
+     * pixel (a gradient is at most 4080, so a block's sums stay inside 31 bits) */
+    for (by = 0; by < bh; by++) for (bx = 0; bx < bw; bx++) {
+        int sxx = 0, syy = 0, sxy = 0;
+        for (y = 1 + by * LV_BLOCK; y < 1 + (by + 1) * LV_BLOCK; y++) {
+            const unsigned char *a = blur + (y - 1) * w, *b = blur + y * w, *c = blur + (y + 1) * w;
+            for (x = 1 + bx * LV_BLOCK; x < 1 + (bx + 1) * LV_BLOCK; x++) {
+                int gx = 3 * (a[x + 1] - a[x - 1]) + 10 * (b[x + 1] - b[x - 1]) + 3 * (c[x + 1] - c[x - 1]);
+                int gy = 3 * (a[x - 1] - c[x - 1]) + 10 * (a[x] - c[x]) + 3 * (a[x + 1] - c[x + 1]);   /* up is positive */
+                sxx += gx * gx >> 8; syy += gy * gy >> 8; sxy += gx * gy >> 8;
+            }
+        }
+        i = by * bw + bx;
+        je[i * 3] = sxx; je[i * 3 + 1] = syy; je[i * 3 + 2] = sxy;
+        mean_e += (float)sxx + syy;
+    }
+    mean_e /= nb;
+    /* a block counts when it holds one clear straight edge: stronger than the frame's average
+     * texture and than sensor noise, and all one direction (coherence) */
+    floor_e = (float)(LV_BLOCK * LV_BLOCK) * 160 * 160 / 256;   /* an edge of about 10 levels */
+    if (floor_e < mean_e) floor_e = mean_e;
+    memset(hist, 0, sizeof hist);
+    for (i = 0; i < nb; i++) {
+        float xx = (float)je[i * 3], yy = (float)je[i * 3 + 1], xy = (float)je[i * 3 + 2], e = xx + yy, coh, a, d, pos, f;
+        int k;
+        if (e < floor_e) continue;
+        coh = (float)sqrt((double)((xx - yy) * (xx - yy) + 4 * xy * xy)) / e;
+        if (coh < 0.7f) continue;
+        /* the gradient's direction, then the edge's (at right angles), in degrees, -90..90 */
+        a = (float)(0.5 * atan2(2.0 * xy, (double)(xx - yy)) * 180.0 / M_PI) + 90;
+        if (a > 90) a -= 180;
+        d = a > 45 ? a - 90 : a < -45 ? a + 90 : a;   /* a vertical edge says as much as a horizontal one */
+        if (d < -LV_RANGE || d > LV_RANGE) continue;
+        f = coh * coh * (float)sqrt((double)e) * (a > 45 || a < -45 ? 0.8f : 1.0f);
+        ang[n] = d; wt[n] = f; n++;
+        pos = (d + LV_RANGE) * 4;
+        k = (int)pos;
+        if (k >= LV_BINS - 1) { hist[LV_BINS - 1] += f; }
+        else { hist[k] += f * (1 - (pos - k)); hist[k + 1] += f * (pos - k); }
+        total += f;
+    }
+    if (n > 0) {
+        for (i = 0; i < LV_BINS; i++) {   /* a little blur: one degree wide */
+            int k;
+            smooth[i] = 0;
+            for (k = -2; k <= 2; k++) if (i + k >= 0 && i + k < LV_BINS) smooth[i] += hist[i + k] * (3 - (k < 0 ? -k : k));
+            if (smooth[i] > smooth[peak]) peak = i;
+        }
+        /* the answer: the weighted mean of the edges within a degree of the peak */
+        for (i = 0; i < n; i++) {
+            float d = ang[i] - (peak / 4.0f - LV_RANGE);
+            if (d >= -1 && d <= 1) { sum += ang[i] * wt[i]; mass += wt[i]; near++; }
+        }
+        if (mass > 0) {
+            out[0] = (int)(sum / mass * 100 + (sum >= 0 ? 0.5f : -0.5f));
+            out[1] = (int)(mass / total * 100 + 0.5f);
+            out[2] = near;
+        }
+    }
+    free(luma); free(blur); free(ang); free(wt); free(je);
+    return 0;
+}
+
+int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
+            unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen) {
+    struct jpeg_decompress_struct d;
+    struct fl_jerr je;
+    fl_look L;
+    fl_thumb P;
+    unsigned char *volatile row = NULL, *volatile rgb = NULL;
+    int ow, oh, i;
+
+    memset(&P, 0, sizeof P);
+    memset(info, 0, sizeof(int) * FL_LIVE_INFO);
+    if (look_init(&L, lut_path, params, err, errlen) != 0) return -1;
+    fl_jerr_init(&je);
+    d.err = &je.pub;
+    if (setjmp(je.jump)) {
+        set_err(err, errlen, "%s", je.msg);
+        jpeg_destroy_decompress(&d); free(row); free(rgb); thumb_free(&P); look_free(&L);
+        return -1;
+    }
+    jpeg_create_decompress(&d);
+    jpeg_mem_src(&d, (unsigned char *)jpeg, len);
+    jpeg_read_header(&d, TRUE);
+    d.out_color_space = JCS_RGB;
+    d.dct_method = JDCT_IFAST;
+    d.do_fancy_upsampling = FALSE;
+    d.scale_num = 1;
+    d.scale_denom = 8;
+    while (d.scale_denom > 1 && (int)(d.image_width / d.scale_denom) < max_w && (int)(d.image_height / d.scale_denom) < max_h)
+        d.scale_denom /= 2;
+    jpeg_start_decompress(&d);
+    if (thumb_init(&P, (int)d.output_width, (int)d.output_height, max_w, max_h, 0) != 0) longjmp(je.jump, 1);
+    row = (unsigned char *)malloc(d.output_width * 3);
+    if (!row) longjmp(je.jump, 1);
+    while (d.output_scanline < d.output_height) {
+        int y = (int)d.output_scanline;
+        JSAMPROW r = row;
+        jpeg_read_scanlines(&d, &r, 1);
+        thumb_row(&P, row, y);
+    }
+    jpeg_finish_decompress(&d);
+    jpeg_destroy_decompress(&d);
+    ow = P.W;
+    oh = P.H;
+    rgb = (unsigned char *)malloc((size_t)ow * oh * 3);
+    if (!rgb) { thumb_free(&P); look_free(&L); free(row); set_err(err, errlen, "out of memory"); return -1; }
+    thumb_rgb(&P, rgb);
+    /* the level and the histogram read the picture as it comes from the camera, before the look */
+    fl_level(rgb, ow, oh, info + 2);
+    for (i = 0; i < ow * oh; i++) info[5 + ((rgb[i * 3] * 77 + rgb[i * 3 + 1] * 150 + rgb[i * 3 + 2] * 29) >> 10)]++;
+    look_row(&L, &(fl_grain){ 0 }, rgb, ow * oh, 0);
+    for (i = 0; i < ow * oh; i++) argb[i] = to_argb(rgb + i * 3);
+    info[0] = ow;
+    info[1] = oh;
+    free(row); free(rgb);
+    thumb_free(&P);
+    look_free(&L);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------ */
 /* developing in the camera's own pixel format                                                  */
 /*
  * The camera's hardware decoder and encoder work on packed UYVY (Cb Y0 Cr Y1, full-range BT.601,

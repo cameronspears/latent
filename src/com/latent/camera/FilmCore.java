@@ -25,6 +25,16 @@ final class FilmCore {
     /** Fill pixels (ARGB) with a preview; size[0], size[1] receive the produced size. 0 = ok. */
     static native int preview(String inPath, String lutPath, int[] params, int mode, int[] pixels, int w, int h, int[] size);
 
+    /** live()'s info: the size produced, the level (1/100 degree, confidence 0..100, blocks agreeing), a 64-bin histogram. */
+    static final int L_W = 0, L_H = 1, L_ANGLE = 2, L_CONFIDENCE = 3, L_SUPPORT = 4, L_HIST = 5, L_HIST_BINS = 64, L_COUNT = 69;
+
+    /**
+     * The viewfinder: one live frame (the camera's small JPEG, jpeg[0..len)) decoded in memory, fitted
+     * inside w x h, with the look but no grain, into pixels (ARGB); info[L_COUNT] gets its size, the level
+     * read from its straight edges, and its brightness histogram. 0 = ok.
+     */
+    static native int live(byte[] jpeg, int len, String lutPath, int[] params, int[] pixels, int w, int h, int[] info);
+
     /** Phase timings of the last successful process() call, into out[T_COUNT]. */
     static native void timing(int[] out);
 

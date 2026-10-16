@@ -3,13 +3,81 @@
  *
  *   fltool process IN.JPG OUT.JPG [--lut F.cub] [--hl N] [--sh N] [--grain N] [--size N] [--q N] [--seed N]
  *   fltool preview IN.JPG OUT.ppm [--crop] [... same options]
+ *   fltool live IN.JPG OUT.ppm [--lut F.cub]       the viewfinder's frame path (from memory, 320x240)
+ *   fltool level IN.JPG DEGREES [WIDTH]            the level on IN turned DEGREES anticlockwise, at WIDTH (320)
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 
+#include <math.h>
 #include "filmcore.h"
+#include "jpeglib.h"
+
+/* IN decoded at about 1/4 size, RGB (malloc'd); *w, *h get its size. */
+static unsigned char *decode(const char *path, int *w, int *h) {
+    struct jpeg_decompress_struct d;
+    struct jpeg_error_mgr e;
+    FILE *f = fopen(path, "rb");
+    unsigned char *rgb;
+    if (!f) return NULL;
+    d.err = jpeg_std_error(&e);
+    jpeg_create_decompress(&d);
+    jpeg_stdio_src(&d, f);
+    jpeg_read_header(&d, TRUE);
+    d.out_color_space = JCS_RGB;
+    d.scale_num = 1;
+    d.scale_denom = d.image_width >= 2400 ? 4 : d.image_width >= 1200 ? 2 : 1;
+    jpeg_start_decompress(&d);
+    *w = (int)d.output_width; *h = (int)d.output_height;
+    rgb = malloc((size_t)*w * *h * 3);
+    while (d.output_scanline < d.output_height) {
+        JSAMPROW r = rgb + (size_t)d.output_scanline * *w * 3;
+        jpeg_read_scanlines(&d, &r, 1);
+    }
+    jpeg_finish_decompress(&d);
+    jpeg_destroy_decompress(&d);
+    fclose(f);
+    return rgb;
+}
+
+/* fltool level: the picture turned 'deg' anticlockwise (as if the camera were turned clockwise),
+ * cropped to the largest centred rectangle of the same shape with no corners missing, scaled to
+ * 'ow' wide as the camera's live frame would be, then fl_level. Prints "angle confidence blocks". */
+static int level_cmd(const char *path, double deg, int ow) {
+    int w, h, x, y, oh, out[3];
+    unsigned char *src = decode(path, &w, &h), *dst;
+    double t = deg * M_PI / 180, c = cos(t), s = sin(t), at = fabs(s), k1, k2, k;
+    if (!src) { fprintf(stderr, "cannot read %s\n", path); return 1; }
+    k1 = 1 / (c + (double)h / w * at);
+    k2 = 1 / (c + (double)w / h * at);
+    k = k1 < k2 ? k1 : k2;
+    oh = (int)((long)ow * h / w);
+    dst = malloc((size_t)ow * oh * 3);
+    for (y = 0; y < oh; y++) for (x = 0; x < ow; x++) {
+        /* box-average a few source samples per output pixel, as the camera's scaler would */
+        int acc[3] = { 0, 0, 0 }, n = 0, i, j, ch;
+        for (j = 0; j < 4; j++) for (i = 0; i < 4; i++) {
+            double u = ((x + (i + 0.5) / 4) / ow - 0.5) * w * k, v = ((y + (j + 0.5) / 4) / oh - 0.5) * h * k;
+            double sx = u * c - v * s + w / 2.0, sy = u * s + v * c + h / 2.0;
+            int ix = (int)sx, iy = (int)sy;
+            double fx = sx - ix, fy = sy - iy;
+            if (ix < 0 || iy < 0 || ix + 1 >= w || iy + 1 >= h) continue;
+            for (ch = 0; ch < 3; ch++) {
+                const unsigned char *p = src + ((size_t)iy * w + ix) * 3 + ch;
+                acc[ch] += (int)((p[0] * (1 - fx) + p[3] * fx) * (1 - fy) + (p[w * 3] * (1 - fx) + p[w * 3 + 3] * fx) * fy);
+            }
+            n++;
+        }
+        for (ch = 0; ch < 3; ch++) dst[((size_t)y * ow + x) * 3 + ch] = (unsigned char)(n ? acc[ch] / n : 0);
+    }
+    fl_level(dst, ow, oh, out);
+    printf("%.2f %d %d\n", out[0] / 100.0, out[1], out[2]);
+    free(src);
+    free(dst);
+    return 0;
+}
 
 static void progress(void *ctx, int pct) {
     (void)ctx;
@@ -34,6 +102,7 @@ int main(int argc, char **argv) {
         fputs(report, stdout);
         return 0;
     }
+    if (argc >= 4 && !strcmp(argv[1], "level")) return level_cmd(argv[2], atof(argv[3]), argc >= 5 ? atoi(argv[4]) : 320);
     if (argc < 4) {
         fprintf(stderr, "usage: %s process|preview IN OUT  |  bench IN SCALE [--lut F] [--hl N] [--sh N] [--grain N] [--size N] [--q N] [--seed N] [--crop]\n", argv[0]);
         return 2;
@@ -68,6 +137,31 @@ int main(int argc, char **argv) {
         if (fl_bench(argv[2], lut, params, atoi(argv[3]), report, sizeof report) != 0) { fprintf(stderr, "error: %s\n", report); return 1; }
         fputs(report, stdout);
         return 0;
+    } else if (!strcmp(argv[1], "live")) {
+        int info[FL_LIVE_INFO], x, y, k;
+        unsigned int *px = malloc(sizeof(unsigned int) * 320 * 240);
+        unsigned char *jpg;
+        long len;
+        double t1;
+        FILE *f = fopen(argv[2], "rb");
+        if (!f) { fprintf(stderr, "cannot read %s\n", argv[2]); return 1; }
+        fseek(f, 0, SEEK_END); len = ftell(f); rewind(f);
+        jpg = malloc(len);
+        if (fread(jpg, 1, len, f) != (size_t)len) { fprintf(stderr, "short read\n"); return 1; }
+        fclose(f);
+        t1 = now();
+        for (k = 0; k < 10; k++)
+            if (fl_live(jpg, (unsigned long)len, lut, params, px, 320, 240, info, err, sizeof err) != 0) { fprintf(stderr, "error: %s\n", err); return 1; }
+        fprintf(stderr, "live %dx%d in %.1f ms; level %.2f deg, confidence %d, %d blocks\n", info[0], info[1], (now() - t1) * 100, info[2] / 100.0, info[3], info[4]);
+        f = fopen(argv[3], "wb");
+        fprintf(f, "P6\n%d %d\n255\n", info[0], info[1]);
+        for (y = 0; y < info[1]; y++)
+            for (x = 0; x < info[0]; x++) {
+                unsigned int p = px[y * info[0] + x];
+                fputc((p >> 16) & 255, f); fputc((p >> 8) & 255, f); fputc(p & 255, f);
+            }
+        fclose(f);
+        free(px); free(jpg);
     } else if (!strcmp(argv[1], "makepreview")) {
         if (fl_make_preview(argv[2], argv[3], err, sizeof err) != 0) { fprintf(stderr, "error: %s\n", err); return 1; }
     } else if (!strcmp(argv[1], "preview")) {

@@ -65,6 +65,49 @@ final class Library {
         try { o.write((key(photo) + "\r\n").getBytes("UTF-8")); } finally { o.close(); }
     }
 
+    /**
+     * Pictures taken in Latent's viewfinder: LATENT/SHOTS.TXT, one "100MSDCF/DSC04696.JPG" per line.
+     * The camera writes them past Linux's back, so the card's listing may not show them until the card
+     * is read afresh; until it does, they still count as exposures.
+     */
+    static void recordShot(File card, File photo) throws IOException {
+        FileOutputStream o = new FileOutputStream(new File(home(card), "SHOTS.TXT"), true);
+        try { o.write((key(photo) + "\r\n").getBytes("UTF-8")); } finally { o.close(); }
+    }
+
+    /**
+     * These photos (newest first) plus the viewfinder's pictures the listing doesn't show yet, at the
+     * end (their file times aren't known). SHOTS.TXT keeps only those still missing.
+     */
+    static List<File> withShots(File card, List<File> photos) {
+        File list = new File(home(card), "SHOTS.TXT");
+        if (!list.exists()) return photos;
+        java.util.Set<String> seen = new java.util.HashSet<String>();
+        for (File p : photos) seen.add(key(p));
+        List<File> out = new ArrayList<File>(photos);
+        StringBuilder keep = new StringBuilder();
+        java.util.Set<String> added = new java.util.HashSet<String>();
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(list));
+            try {
+                for (String line; (line = r.readLine()) != null; ) {
+                    String k = line.trim().toUpperCase(Locale.US);
+                    if (k.length() == 0 || seen.contains(k) || !added.add(k)) continue;
+                    out.add(new File(new File(card, "DCIM"), k));
+                    keep.append(k).append("\r\n");
+                }
+            } finally { r.close(); }
+            if (keep.length() == 0) list.delete();
+            else {
+                FileOutputStream o = new FileOutputStream(list);
+                try { o.write(keep.toString().getBytes("UTF-8")); } finally { o.close(); }
+            }
+        } catch (IOException e) {
+            // the listing alone, then
+        }
+        return out;
+    }
+
     /** These photos without the ignored ones. */
     static List<File> withoutIgnored(File card, List<File> photos) {
         java.util.Set<String> skip = ignored(card);

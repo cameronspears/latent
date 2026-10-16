@@ -1,0 +1,923 @@
+package com.latent.camera;
+
+import android.app.Activity;
+import android.graphics.Bitmap;
+import android.hardware.Camera;
+import android.os.Handler;
+import android.os.StatFs;
+import android.os.SystemClock;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * Latent's own viewfinder, the way the X Half is the camera: live view with the roll's film look on
+ * it, focus on a half-press, the picture on a full press, and a level read from the picture.
+ *
+ * How, all of it found on this camera by the Shooting and Live view tests:
+ * - The camera opens through Sony's CameraEx on the UI thread, naming the memory card as its target
+ *   (without it the photo reached the card only after the camera was released). Every camera call
+ *   and callback is on this thread.
+ * - Live view runs as usual on the surface behind Latent's drawing; the camera also hands Latent the
+ *   same picture as small JPEG frames (CameraSequence's preview sequence, 320 px). Each frame gets the
+ *   look on the worker thread (FilmCore.live) and is drawn over the camera's own, about 7 a second.
+ *   Centre shows the camera's own live view instead, at full speed.
+ * - Focus is the camera's own (Camera.autoFocus), retried while the button is held (Release).
+ * - The picture is the camera's own (burstableTakePicture): it stores and catalogues it itself, with
+ *   your settings, about 0.2 s after the shutter. Latent learns its name from the catalogue.
+ * - No camera setting is changed: no exposure, focus or drive setting, Auto Review as it is.
+ * - The camera is given back on MENU, when Latent is left, and if Latent crashes.
+ *
+ * Once this process has opened the camera, Sony's image memory stays taken until Latent closes, so the
+ * darkroom can't run (see opened). Pictures taken here develop the next time Latent opens.
+ * Log: LATENT/VIEWFIND.TXT, a few lines per visit.
+ */
+final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
+    interface Host {
+        /** The camera's own live view on screen, behind Latent's drawing (true), or not. */
+        void showLive(boolean on);
+        /** Something on screen changed. */
+        void changed();
+        /** Live view is on: the shutter button works from now. */
+        void live();
+        /** A picture was taken: its file (from the catalogue), or null if the catalogue didn't say. */
+        void shot(File photo);
+        /** The camera is given back; why is null when asked to close, else what went wrong. */
+        void closed(String why);
+    }
+
+    /**
+     * This process has opened the camera. Sony's image memory, which the darkroom needs, is then gone
+     * until Latent closes (v0.23-0.24: not after a release, not in another process), so nothing
+     * develops until the next time Latent opens.
+     */
+    static volatile boolean opened;
+
+    static final int FRAME_W = 320, FRAME_H = 240;
+    /** Frame widths to ask the camera for, in turn, if frames don't come. */
+    static final int[] WIDTHS = { 320, 640 };
+    static final long FRAMES_WAIT_MS = 2500, FOCUS_TIMEOUT_MS = 6000, SHUTTER_TIMEOUT_MS = 10000, STORE_WAIT_MS = 8000;
+    static final long PRINT_MS = 4000, FLASH_MS = 140, CARD_MS = 1600, NOTE_MS = 2600;
+    /** Display modes: up and down cycle them. */
+    static final int D_STANDARD = 0, D_GRID = 1, D_CLEAN = 2;
+    static final String[] DISPLAY_NAMES = { "Standard", "Grid and histogram", "Clean" };
+
+    private final Activity activity;
+    private final File card;
+    private final SurfaceView surface;
+    private final ExecutorService worker;   // FilmCore's one thread
+    private final Host host;
+    private final Handler ui = new Handler();
+    private final ExecutorService catalogue = Executors.newSingleThreadExecutor();
+    private final StringBuilder log = new StringBuilder();
+    private final long t0 = SystemClock.uptimeMillis();
+    final Release release;
+    final Level level = new Level();
+
+    // the film
+    private String lut;
+    private final int[] params = new int[FilmCore.COUNT];
+
+    // the camera
+    private Object cameraEx, sequence;
+    private Camera camera;
+    private String mediaId;
+    private boolean previewing, closed;
+    private Thread.UncaughtExceptionHandler previousHandler;
+
+    // live frames
+    private int widthIndex;
+    private boolean inFlight, sequenceStopped;
+    private long framesAskedAt, lastFrameAt, lastLookAt;
+    private int frames, lookMsSum, grabFails;
+    private final int[] px = new int[FRAME_W * FRAME_H], info = new int[FilmCore.L_COUNT];
+    private Bitmap frame;
+    private Method mFrames, mSize, mRead, mFrameRelease;
+    boolean lookOn = true;     // the film look on live view; off: the camera's own picture
+    private boolean lookFailed;
+    int[] hist;
+
+    // focus
+    private int focusGen;
+    private long focusStart;
+    private boolean lamp, lampThisTry;
+    private int locks, misses;
+    String afMode = "", afArea = "";
+
+    // exposure
+    String shutter = "", aperture = "", iso = "";
+    boolean isoAuto;
+    int ev;
+    int shotsLeft = -1;
+    private long photoBytes = 6 * 1024 * 1024;
+
+    // pictures
+    private long shutterAt, flashUntil, printAt;
+    int shots;                 // taken on this visit
+    private int stored;        // of those, found in the catalogue
+    private int highestKnown;  // the highest photo number known (the card's, then each new one)
+    private boolean catalogueBusy;
+    private Bitmap print;
+
+    // the screen
+    int display = D_STANDARD;
+    private long cardUntil, noteUntil;
+    private String note = "";
+
+    Viewfinder(Activity activity, File card, SurfaceView surface, ExecutorService worker, Stock stock, boolean focusFirst,
+               int highestPhoto, Host host) {
+        this.activity = activity; this.card = card; this.surface = surface; this.worker = worker; this.host = host;
+        this.release = new Release(this, focusFirst);
+        this.highestKnown = highestPhoto;
+        setFilm(stock);
+    }
+
+    /** The film whose look is on live view. */
+    void setFilm(Stock stock) {
+        lut = stock == null ? null : stock.lut.getPath();
+        params[FilmCore.HIGHLIGHT] = stock == null ? 0 : stock.highlight;
+        params[FilmCore.SHADOW] = stock == null ? 0 : stock.shadow;
+        params[FilmCore.GRAIN_SIZE] = 1;
+        params[FilmCore.QUALITY] = 90;
+        params[FilmCore.THREADS] = 1;
+    }
+
+    private void note(String line) {
+        log.append("  ").append(SystemClock.uptimeMillis() - t0).append(" ms  ").append(line).append("\r\n");
+    }
+
+    // ------------------------------------------------------------------------------ open
+
+    void open() {
+        opened = true;
+        log.append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())).append(" viewfinder\r\n");
+        previousHandler = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            public void uncaughtException(Thread t, Throwable e) {
+                // a camera held by a dead app can freeze the body: give it back first
+                try { note("crash: " + Probe.why(e)); releaseCamera(); writeLog(); } catch (Throwable ignored) { }
+                if (previousHandler != null) previousHandler.uncaughtException(t, e);
+            }
+        });
+        long t = SystemClock.uptimeMillis();
+        try {
+            Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
+            Class<?> oc = Class.forName("com.sony.scalar.hardware.CameraEx$OpenOptions");
+            Object options = null;
+            try {   // the memory card as the target, as Sony's own apps open it
+                String[] ids = (String[]) Class.forName("com.sony.scalar.provider.AvindexStore").getMethod("getExternalMediaIds").invoke(null);
+                if (ids != null && ids.length > 0) {
+                    mediaId = ids[0];
+                    options = oc.newInstance();
+                    oc.getMethod("setTargetMedia", String.class).invoke(options, mediaId);
+                    try { oc.getMethod("setRecordingMode", int.class).invoke(options, 0); } catch (Throwable e) { note("recording mode: " + Probe.why(e)); }
+                }
+            } catch (Throwable e) {
+                note("no target media: " + Probe.why(e));
+                options = null;
+            }
+            cameraEx = cx.getMethod("open", int.class, oc).invoke(null, 0, options);
+            camera = (Camera) cx.getMethod("getNormalCamera").invoke(cameraEx);
+        } catch (Throwable e) {
+            note("open: " + Probe.why(e));
+            fail("The camera wouldn't open");
+            return;
+        }
+        note("camera open in " + (SystemClock.uptimeMillis() - t) + " ms (media " + mediaId + ")");
+        host.showLive(true);
+        SurfaceHolder h = surface.getHolder();
+        h.addCallback(this);
+        if (h.getSurface() != null && h.getSurface().isValid()) surfaceCreated(h);
+        ui.postDelayed(new Runnable() {
+            public void run() { if (!previewing && !closed) { note("no live view surface in 4 s"); fail("Live view didn't start"); } }
+        }, 4000);
+    }
+
+    public void surfaceCreated(SurfaceHolder h) {
+        if (previewing || closed || camera == null) return;
+        try {
+            camera.setPreviewDisplay(h);
+            camera.startPreview();
+            previewing = true;
+        } catch (Throwable e) {
+            note("live view: " + Probe.why(e));
+            fail("Live view didn't start");
+            return;
+        }
+        note("live view on");
+        catalogue.execute(baseline);
+        listen();
+        readSettings();
+        startFrames();
+        ui.post(tick);
+        host.live();
+        host.changed();
+    }
+
+    public void surfaceChanged(SurfaceHolder h, int format, int w, int hh) { }
+
+    public void surfaceDestroyed(SurfaceHolder h) { if (!closed) close(null); }
+
+    /** The camera's answers: the shutter, the AF lamp, and exposure as it changes. Each is optional (bodies differ). */
+    private void listen() {
+        set("setShutterListener", "com.sony.scalar.hardware.CameraEx$ShutterListener", new InvocationHandler() {
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().equals("onShutter") && a != null && a.length > 0) onShutter((Integer) a[0]);
+                return objectMethod(p, m, a);
+            }
+        });
+        set("setFocusLightStateListener", "com.sony.scalar.hardware.CameraEx$FocusLightStateListener", new InvocationHandler() {
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().equals("onChanged") && a != null && a.length > 1) {
+                    lamp = (Boolean) a[1];
+                    if (lamp) lampThisTry = true;
+                    host.changed();
+                }
+                return objectMethod(p, m, a);
+            }
+        });
+        set("setAutoFocusDoneListener", "com.sony.scalar.hardware.CameraEx$AutoFocusDoneListener", new InvocationHandler() {
+            private int logged;
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().equals("onDone") && a != null && a.length > 1 && logged++ < 6)
+                    note("AF done: status " + a[0] + ", areas " + (a[1] instanceof int[] ? java.util.Arrays.toString((int[]) a[1]) : String.valueOf(a[1])));
+                return objectMethod(p, m, a);
+            }
+        });
+        set("setShutterSpeedChangeListener", "com.sony.scalar.hardware.CameraEx$ShutterSpeedChangeListener", new InvocationHandler() {
+            private boolean logged;
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().startsWith("on") && a != null && a.length > 0 && a[0] != null) {
+                    if (!logged) { logged = true; note("shutter speed info: " + fields(a[0])); }
+                    int n = intField(a[0], "currentShutterSpeed_n"), d = intField(a[0], "currentShutterSpeed_d");
+                    if (n > 0 && d > 0) { shutter = shutterText(n, d); host.changed(); }
+                }
+                return objectMethod(p, m, a);
+            }
+        });
+        set("setApertureChangeListener", "com.sony.scalar.hardware.CameraEx$ApertureChangeListener", new InvocationHandler() {
+            private boolean logged;
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().startsWith("on") && a != null && a.length > 0 && a[0] != null) {
+                    if (!logged) { logged = true; note("aperture info: " + fields(a[0])); }
+                    int f = intField(a[0], "currentAperture");
+                    if (f > 0) { aperture = apertureText(f); host.changed(); }
+                }
+                return objectMethod(p, m, a);
+            }
+        });
+        set("setAutoISOSensitivityListener", "com.sony.scalar.hardware.CameraEx$AutoISOSensitivityListener", new InvocationHandler() {
+            public Object invoke(Object p, Method m, Object[] a) {
+                if (m.getName().startsWith("on") && a != null && a.length > 0 && a[0] instanceof Integer) {
+                    int v = (Integer) a[0];
+                    if (v > 0 && isoAuto) { iso = String.valueOf(v); host.changed(); }
+                }
+                return objectMethod(p, m, a);
+            }
+        });
+    }
+
+    /** Focus mode and area, exposure as set, and how many more photos fit on the card. Read once; changes nothing. */
+    private void readSettings() {
+        try {
+            Camera.Parameters p = camera.getParameters();
+            afMode = afModeText(p.get("af-mode"), p.getFocusMode());
+            afArea = areaText(p.get("focus-area-type"));
+            float step = p.getExposureCompensationStep();
+            ev = Math.round(p.getExposureCompensation() * (step > 0 ? step : 1f / 3) * 3);
+            try {
+                Object m = cameraEx.getClass().getMethod("createParametersModifier", Camera.Parameters.class).invoke(cameraEx, p);
+                Object pair = m.getClass().getMethod("getShutterSpeed").invoke(m);
+                if (pair instanceof android.util.Pair) {
+                    Object n = ((android.util.Pair<?, ?>) pair).first, d = ((android.util.Pair<?, ?>) pair).second;
+                    if (n instanceof Integer && d instanceof Integer && (Integer) n > 0 && (Integer) d > 0) shutter = shutterText((Integer) n, (Integer) d);
+                }
+                Object f = m.getClass().getMethod("getAperture").invoke(m);
+                if (f instanceof Integer && (Integer) f > 0) aperture = apertureText((Integer) f);
+                Object i = m.getClass().getMethod("getISOSensitivity").invoke(m);
+                if (i instanceof Integer) { isoAuto = (Integer) i == 0; iso = isoAuto ? "" : String.valueOf(i); }
+            } catch (Throwable e) {
+                note("exposure: " + Probe.why(e));
+            }
+            note("focus " + afMode + ", " + afArea + "; " + shutter + " " + aperture + " ISO " + (isoAuto ? "auto" : iso) + ", exposure " + ev + "/3");
+        } catch (Throwable e) {
+            note("settings: " + Probe.why(e));
+        }
+        catalogue.execute(new Runnable() {   // reading the card's folders takes a while: not on this thread
+            public void run() {
+                int left;
+                try {
+                    StatFs fs = new StatFs(card.getPath());
+                    List<File> newest = Library.photos(card);
+                    if (!newest.isEmpty() && newest.get(0).length() > 1024 * 1024) photoBytes = newest.get(0).length();
+                    left = (int) Math.min(9999, (long) fs.getAvailableBlocks() * fs.getBlockSize() / photoBytes);
+                } catch (Throwable e) {
+                    left = -1;
+                }
+                final int l = left;
+                ui.post(new Runnable() { public void run() { shotsLeft = l; host.changed(); } });
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------------------ live frames with the look
+
+    private void startFrames() {
+        try {
+            Class<?> cs = Class.forName("com.sony.scalar.hardware.CameraSequence");
+            if (sequence == null) sequence = cs.getMethod("open", Class.forName("com.sony.scalar.hardware.CameraEx")).invoke(null, cameraEx);
+            Class<?> oc = Class.forName("com.sony.scalar.hardware.CameraSequence$Options");
+            Object o = oc.newInstance();
+            option(o, (String) oc.getField("PREVIEW_FRAME_MAX_NUM").get(null), 1);
+            option(o, (String) oc.getField("PREVIEW_FRAME_WIDTH").get(null), WIDTHS[widthIndex]);
+            option(o, (String) oc.getField("PREVIEW_FRAME_HEIGHT").get(null), 0);   // the picture's own shape
+            option(o, "PREVIEW_FRAME_FORMAT", 0x100);                                // JPEG
+            option(o, "JPEG_COMPRESS_RATE_DENOM", 15);
+            option(o, "JPEG_COMPRESS_MAX_SIZE", 100);
+            cs.getMethod("startPreviewSequence", oc).invoke(sequence, o);
+            mFrames = cs.getMethod("getPreviewSequenceFrames", int.class);
+        } catch (Throwable e) {
+            note("live frames: " + Probe.why(e));
+            noLook("no live frames");
+            return;
+        }
+        sequenceStopped = false;
+        framesAskedAt = SystemClock.uptimeMillis();
+        note("live frames asked for at " + WIDTHS[widthIndex] + " px");
+        ui.post(poll);
+    }
+
+    /** The camera's own live view from now on, with a word on the screen. */
+    private void noLook(String why) {
+        if (lookFailed) return;
+        lookFailed = true;
+        lookOn = false;
+        say("Film look unavailable on live view");
+        note("look off: " + why);
+        host.changed();
+    }
+
+    private final Runnable poll = new Runnable() {
+        public void run() {
+            if (closed || sequence == null || sequenceStopped) return;
+            long now = SystemClock.uptimeMillis();
+            // with the look off the camera's own picture shows, and frames still come now and then, for the level
+            if (!inFlight && (lookOn || now - lastLookAt > 300)) {
+                byte[] f = grab();
+                if (f != null) { lastLookAt = now; look(f); }
+            }
+            if (frames == 0 && lastFrameAt == 0 && now - framesAskedAt > FRAMES_WAIT_MS) {   // none yet: another size, or none at all
+                stopSequence();
+                if (++widthIndex < WIDTHS.length) { note("no frames at " + WIDTHS[widthIndex - 1] + " px"); startFrames(); }
+                else noLook("no frames at any size");
+                return;
+            }
+            ui.postDelayed(this, inFlight ? 40 : 25);
+        }
+    };
+
+    private byte[] grab() {
+        Object[] got = null;
+        try {
+            got = (Object[]) mFrames.invoke(sequence, 1);
+            if (got == null || got.length == 0 || got[0] == null) return null;
+            Object fr = got[0];
+            if (mSize == null) {
+                mSize = fr.getClass().getMethod("getSize");
+                mRead = fr.getClass().getMethod("read", byte[].class);
+                mFrameRelease = fr.getClass().getMethod("release");
+            }
+            int size = (Integer) mSize.invoke(fr);
+            if (size <= 0) return null;
+            byte[] data = new byte[size];
+            mRead.invoke(fr, data);
+            lastFrameAt = SystemClock.uptimeMillis();
+            return data;
+        } catch (Throwable e) {
+            if (grabFails++ < 3) note("frame: " + Probe.why(e));
+            return null;
+        } finally {
+            if (got != null) for (Object fr : got) {
+                if (fr == null) continue;
+                try {
+                    if (mFrameRelease != null) mFrameRelease.invoke(fr); else fr.getClass().getMethod("release").invoke(fr);
+                } catch (Throwable ignored) { }
+            }
+        }
+    }
+
+    /** The look on one frame, on the worker; drawn on the UI thread. One frame at a time. */
+    private void look(final byte[] jpeg) {
+        inFlight = true;
+        final String l = lut;
+        final int[] p = params.clone();
+        worker.execute(new Runnable() {
+            public void run() {
+                // a little behind the UI thread, which shares this core: presses come first
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE * 4);
+                long t = SystemClock.uptimeMillis();
+                final int rc;
+                try { rc = FilmCore.live(jpeg, jpeg.length, l, p, px, FRAME_W, FRAME_H, info); }
+                finally { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT); }
+                final long ms = SystemClock.uptimeMillis() - t;
+                final String err = rc == 0 ? null : FilmCore.lastError();
+                ui.post(new Runnable() {
+                    public void run() {
+                        inFlight = false;
+                        if (closed) return;
+                        if (err != null) { if (frames == 0) noLook(err); return; }
+                        show(ms);
+                    }
+                });
+            }
+        });
+    }
+
+    private void show(long ms) {
+        int w = info[FilmCore.L_W], h = info[FilmCore.L_H];
+        if (w <= 0 || h <= 0) return;
+        if (frame == null || frame.getWidth() != w || frame.getHeight() != h) frame = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        frame.setPixels(px, 0, w, 0, 0, w, h);
+        if (frames++ == 0) note("first frame " + w + "x" + h + " after " + (SystemClock.uptimeMillis() - framesAskedAt) + " ms; look " + ms + " ms");
+        lookMsSum += ms;
+        level.frame(info[FilmCore.L_ANGLE], info[FilmCore.L_CONFIDENCE], info[FilmCore.L_SUPPORT], SystemClock.uptimeMillis());
+        if (hist == null) hist = new int[FilmCore.L_HIST_BINS];
+        System.arraycopy(info, FilmCore.L_HIST, hist, 0, FilmCore.L_HIST_BINS);
+        host.changed();
+    }
+
+    // ------------------------------------------------------------------------------ keys
+
+    void halfDown() { if (ready()) { release.halfDown(); host.changed(); } }
+
+    void halfUp() { release.halfUp(); host.changed(); }
+
+    /** A full press; full is false when the roll has no frames left (then nothing is taken). */
+    void fullDown(boolean roomOnRoll) {
+        if (!ready()) return;
+        if (!roomOnRoll) { say("Roll finished"); return; }
+        release.fullDown();
+        if (release.refused) say("Not in focus");
+        host.changed();
+    }
+
+    private boolean ready() { return previewing && !closed; }
+
+    /** Centre: the film look on live view, or the camera's own picture (smooth, at full speed). */
+    void toggleLook() {
+        if (lookFailed) { say("Film look unavailable on live view"); return; }
+        lookOn = !lookOn;
+        say(lookOn ? "Film look on" : "Film look off  ·  the camera's own view");
+        host.changed();
+    }
+
+    void cycleDisplay(int step) {
+        display = (display + step + DISPLAY_NAMES.length) % DISPLAY_NAMES.length;
+        say(DISPLAY_NAMES[display]);
+        host.changed();
+    }
+
+    void showCard() { cardUntil = SystemClock.uptimeMillis() + CARD_MS; ui.removeCallbacks(tick); ui.post(tick); host.changed(); }
+
+    void say(String text) { note = text; noteUntil = SystemClock.uptimeMillis() + NOTE_MS; ui.removeCallbacks(tick); ui.post(tick); host.changed(); }
+
+    void setFocusFirst(boolean on) { release.focusFirst = on; }
+
+    // ------------------------------------------------------------------------------ focus (Release.Camera)
+
+    public void focus() {
+        if (camera == null || closed) return;
+        final int g = ++focusGen;
+        focusStart = SystemClock.uptimeMillis();
+        lampThisTry = lamp;
+        try {
+            camera.autoFocus(new Camera.AutoFocusCallback() {
+                public void onAutoFocus(boolean success, Camera c) { focusDone(g, success); }
+            });
+        } catch (Throwable e) {
+            note("autoFocus: " + Probe.why(e));
+            focusDone(g, false);
+            return;
+        }
+        ui.postDelayed(new Runnable() { public void run() { if (g == focusGen) { note("focus timed out"); focusDone(g, false); } } }, FOCUS_TIMEOUT_MS);
+    }
+
+    private void focusDone(int g, boolean locked) {
+        if (g != focusGen || closed) return;
+        focusGen++;   // this try is answered
+        long ms = SystemClock.uptimeMillis() - focusStart;
+        if (locked) locks++; else misses++;
+        if (locks + misses <= 12) note("focus try " + release.tries + ": " + (locked ? "locked" : "no lock") + " in " + ms + " ms" + (lampThisTry ? ", AF lamp" : ""));
+        release.focused(locked);
+        host.changed();
+    }
+
+    public void cancelFocus() {
+        focusGen++;
+        try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable e) { note("cancelAutoFocus: " + Probe.why(e)); }
+    }
+
+    public void later(Runnable r, long ms) { ui.postDelayed(r, ms); }
+
+    // ------------------------------------------------------------------------------ the picture
+
+    private boolean retryWithoutFrames;
+
+    public void shoot() {
+        if (closed) return;
+        shutterAt = SystemClock.uptimeMillis();
+        try {
+            call("burstableTakePicture");
+        } catch (Throwable e) {
+            note("burstableTakePicture: " + Probe.why(e) + (sequence != null && !retryWithoutFrames ? "; again without live frames" : ""));
+            safely("cancelTakePicture");
+            if (sequence != null && !sequenceStopped && !retryWithoutFrames) {   // the frames may hold the camera: once more without them
+                retryWithoutFrames = true;
+                stopSequence();
+                sequenceStopped = true;
+                ui.postDelayed(new Runnable() { public void run() { if (!closed && release.shooting) shootAgain(); } }, 150);
+                return;
+            }
+            say("The camera wouldn't take it");
+            release.shot(false);
+            restartFrames();
+            return;
+        }
+        ui.postDelayed(shutterTimeout, SHUTTER_TIMEOUT_MS);
+    }
+
+    private void shootAgain() {
+        try {
+            call("burstableTakePicture");
+            ui.postDelayed(shutterTimeout, SHUTTER_TIMEOUT_MS);
+        } catch (Throwable e) {
+            note("burstableTakePicture without frames: " + Probe.why(e));
+            safely("cancelTakePicture");
+            say("The camera wouldn't take it");
+            release.shot(false);
+            restartFrames();
+        }
+    }
+
+    private final Runnable shutterTimeout = new Runnable() {
+        public void run() {
+            if (!release.shooting || closed) return;
+            note("no answer from the shutter in " + SHUTTER_TIMEOUT_MS / 1000 + " s");
+            safely("cancelTakePicture");
+            say("The camera didn't answer");
+            release.shot(false);
+            restartFrames();
+        }
+    };
+
+    /** The shutter's answer: 0 taken, 1 cancelled, 2 error. The capture is always ended, or the next one never fires. */
+    private void onShutter(int status) {
+        if (!release.shooting || closed) return;
+        ui.removeCallbacks(shutterTimeout);
+        long ms = SystemClock.uptimeMillis() - shutterAt;
+        safely("cancelTakePicture");
+        if (status == 0) {
+            shots++;
+            long now = SystemClock.uptimeMillis();
+            flashUntil = now + FLASH_MS;
+            if (frame != null) {   // the print: the frame as it was, in the look (frames get it even when it is off on screen)
+                if (print != null) print.recycle();
+                print = frame.copy(Bitmap.Config.ARGB_8888, false);
+                printAt = now;
+            }
+            if (shots <= 30) note("shot " + shots + ": shutter " + ms + " ms" + (sequenceStopped ? " (frames paused)" : ""));
+            storeSince = now;
+            findStored();
+            ui.removeCallbacks(tick);
+            ui.post(tick);
+        } else {
+            note("shutter status " + status + " after " + ms + " ms");
+            say(status == 1 ? "The camera cancelled it" : "The camera reported an error");
+        }
+        release.shot(status == 0);
+        restartFrames();
+        host.changed();
+    }
+
+    private void restartFrames() {
+        if (sequenceStopped && !closed && !lookFailed) { sequenceStopped = false; startFrames(); }
+    }
+
+    /**
+     * The camera stores and catalogues each picture itself (about 0.2 s after the shutter); Linux sees
+     * the file only once the card is read again, so its name comes from the catalogue, asked on a
+     * thread of its own every 120 ms until every picture taken is found (or 8 s pass).
+     */
+    private void findStored() {
+        if (catalogueBusy || closed || stored >= shots) return;
+        if (!baselineKnown && mediaId != null && SystemClock.uptimeMillis() - storeSince < STORE_WAIT_MS) { ui.postDelayed(findAgain, 100); return; }
+        if (mediaId == null || SystemClock.uptimeMillis() - storeSince > STORE_WAIT_MS) {   // not seen: counted anyway, found by number next time
+            note((shots - stored) + " picture(s) not seen in the catalogue");
+            for (; stored < shots; stored++) host.shot(null);
+            return;
+        }
+        catalogueBusy = true;
+        final int after = highestKnown;
+        catalogue.execute(new Runnable() {
+            public void run() {
+                final java.util.ArrayList<Probe.Row> found = new java.util.ArrayList<Probe.Row>();
+                String problem = null;
+                try {
+                    Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
+                    android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
+                    for (Probe.Row r : Probe.query(activity.getContentResolver(), uri)) if (r.jpeg && r.folder * 10000 + r.number > after) found.add(r);
+                } catch (Throwable e) {
+                    problem = Probe.why(e);
+                }
+                java.util.Collections.sort(found, new java.util.Comparator<Probe.Row>() {
+                    public int compare(Probe.Row a, Probe.Row b) { return (a.folder * 10000 + a.number) - (b.folder * 10000 + b.number); }
+                });
+                final String why = problem;
+                ui.post(new Runnable() {
+                    public void run() {
+                        catalogueBusy = false;
+                        if (why != null) note("catalogue: " + why);
+                        for (Probe.Row r : found) {
+                            int n = r.folder * 10000 + r.number;
+                            if (n <= highestKnown || stored >= shots) continue;
+                            highestKnown = n;
+                            stored++;
+                            File f = dcfFile(r.folder, r.number);
+                            if (stored <= 30) note(f.getName() + " in the catalogue " + (SystemClock.uptimeMillis() - storeSince) + " ms after the shutter");
+                            host.shot(f);
+                        }
+                        if (stored < shots && !closed) ui.postDelayed(findAgain, 120);
+                    }
+                });
+            }
+        });
+    }
+
+    private final Runnable findAgain = new Runnable() { public void run() { findStored(); } };
+
+    /**
+     * Before any picture: the highest photo number in the catalogue, so a picture is known by being
+     * above it. The card's listing can lag the catalogue (prints the darkroom made, earlier pictures), so
+     * the catalogue itself says where new ones start. Catalogue thread.
+     */
+    private final Runnable baseline = new Runnable() {
+        public void run() {
+            int max = 0;
+            String problem = null;
+            try {
+                Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
+                android.net.Uri uri = (android.net.Uri) media.getMethod("getContentUri", String.class).invoke(null, mediaId);
+                for (Probe.Row r : Probe.query(activity.getContentResolver(), uri)) max = Math.max(max, r.folder * 10000 + r.number);
+            } catch (Throwable e) {
+                problem = Probe.why(e);
+            }
+            final int m = max;
+            final String why = problem;
+            ui.post(new Runnable() {
+                public void run() {
+                    if (why != null) note("catalogue: " + why);
+                    else note("catalogue's highest photo " + m + ", the card's " + highestKnown);
+                    highestKnown = Math.max(highestKnown, m);
+                    baselineKnown = true;
+                }
+            });
+        }
+    };
+    private boolean baselineKnown;
+    private long storeSince;
+
+    /** DCIM/100MSDCF/DSC04680.JPG for folder 100, number 4680 (the folder's suffix as on the card). */
+    private File dcfFile(int folder, int number) {
+        File dcim = new File(card, "DCIM"), dir = new File(dcim, folder + "MSDCF");
+        File[] dirs = dcim.listFiles();
+        if (dirs != null) for (File d : dirs) if (d.getName().startsWith(String.valueOf(folder))) dir = d;
+        return new File(dir, String.format(Locale.US, "DSC%05d.JPG", number % 100000));
+    }
+
+    // ------------------------------------------------------------------------------ the screen
+
+    /** Animations (the print, the blink, the card, a note, the level fading) move on at 10 a second. */
+    private final Runnable tick = new Runnable() {
+        public void run() {
+            if (closed) return;
+            long now = SystemClock.uptimeMillis();
+            boolean was = level.shown;
+            level.tick(now);
+            boolean moving = now < flashUntil + 100 || now < cardUntil + 100 || now < noteUntil + 100 || (print != null && now - printAt < PRINT_MS + 200);
+            if (moving || was != level.shown) host.changed();
+            if (moving || level.shown) ui.postDelayed(this, moving ? 100 : 300);   // the level hides by itself when frames stop being sure
+        }
+    };
+
+    /** What the viewfinder shows, into s (the roll's own details are MainActivity's). */
+    void fill(UiState s) {
+        long now = SystemClock.uptimeMillis();
+        s.mode = UiState.PHOTO;
+        boolean look = lookOn && frame != null;
+        s.liveImage = look ? frame : null;
+        s.liveThrough = previewing && !look;   // the camera's own live view shows through
+        s.lookLive = look;
+        s.afState = release.state;
+        s.afTry = release.tries;
+        s.afLamp = lamp;
+        s.afNote = release.state == Release.NO_LOCK ? (lampThisTry ? "Too dark to focus" : "Can't focus") : "";
+        s.afMode = afMode;
+        s.afArea = afArea;
+        s.shutter = shutter;
+        s.aperture = aperture;
+        s.iso = isoAuto && iso.length() == 0 ? "AUTO" : iso;
+        s.isoAuto = isoAuto && iso.length() > 0;
+        s.ev = ev;
+        s.shotsLeft = shotsLeft < 0 ? -1 : Math.max(0, shotsLeft - shots);
+        s.grid = display == D_GRID;
+        s.hist = display == D_GRID && look ? hist : null;
+        s.clean = display == D_CLEAN;
+        s.levelShown = display != D_CLEAN && level.shown && previewing;
+        s.levelAngle = level.angle;
+        s.levelOk = level.level;
+        s.flash = now < flashUntil;
+        s.printImage = print;
+        s.printProgress = print == null ? 0 : Math.min(1f, (now - printAt) / (float) PRINT_MS);
+        s.developing = shots;
+        s.lookShown = now < cardUntil;
+        s.vfNote = now < noteUntil ? note : "";
+    }
+
+    // ------------------------------------------------------------------------------ closing
+
+    /** MENU, leaving Latent, or a failure: the camera goes back at once. Safe to call more than once. */
+    void close(String why) {
+        if (closed) return;
+        closed = true;
+        if (why != null) note("closing: " + why);
+        releaseCamera();
+        host.showLive(false);
+        Thread.setDefaultUncaughtExceptionHandler(previousHandler);
+        long liveMs = Math.max(1, (lastFrameAt > 0 ? lastFrameAt : SystemClock.uptimeMillis()) - framesAskedAt);
+        note("closed: " + shots + " picture(s), " + frames + " live frames (" + String.format(Locale.US, "%.1f", frames * 1000.0 / liveMs)
+                + " a second, look " + (frames > 0 ? lookMsSum / frames : 0) + " ms each), focus " + locks + " locked / " + misses
+                + " missed, level sure on " + level.sure + " of " + level.frames + " frames");
+        worker.execute(new Runnable() { public void run() { writeLog(); } });
+        catalogue.shutdown();
+        ui.removeCallbacksAndMessages(null);
+        for (; stored < shots; stored++) host.shot(null);   // taken but not yet named: still exposures on the roll
+        if (frame != null) { frame.recycle(); frame = null; }
+        if (print != null) { print.recycle(); print = null; }
+        host.closed(why);
+    }
+
+    private void fail(String why) { close(why); }
+
+    /** cancel focus and capture, stop the frames and live view, then release: the order the verified apps use. */
+    private void releaseCamera() {
+        ui.removeCallbacks(poll);
+        stopSequence();
+        if (cameraEx == null) return;
+        try { if (camera != null) camera.cancelAutoFocus(); } catch (Throwable ignored) { }
+        if (release.shooting) safely("cancelTakePicture");
+        set("setShutterListener", null, null);
+        set("setFocusLightStateListener", null, null);
+        set("setAutoFocusDoneListener", null, null);
+        set("setShutterSpeedChangeListener", null, null);
+        set("setApertureChangeListener", null, null);
+        set("setAutoISOSensitivityListener", null, null);
+        try { if (camera != null && previewing) camera.stopPreview(); } catch (Throwable e) { note("stopPreview: " + Probe.why(e)); }
+        // Sony's own apps release the Android camera before CameraEx (their ExecutorCreator.terminate)
+        try { if (camera != null) camera.release(); } catch (Throwable e) { note("camera release: " + Probe.why(e)); }
+        try { cameraEx.getClass().getMethod("release").invoke(cameraEx); } catch (Throwable e) { note("release: " + Probe.why(e)); }
+        try { surface.getHolder().removeCallback(this); } catch (Throwable ignored) { }
+        cameraEx = null;
+        camera = null;
+        previewing = false;
+    }
+
+    private void stopSequence() {
+        if (sequence == null) return;
+        try { sequence.getClass().getMethod("stopPreviewSequence").invoke(sequence); } catch (Throwable e) { note("stopPreviewSequence: " + Probe.why(e)); }
+        try { sequence.getClass().getMethod("release").invoke(sequence); } catch (Throwable e) { note("sequence release: " + Probe.why(e)); }
+        sequence = null;
+    }
+
+    private void writeLog() {
+        try {
+            FileOutputStream o = new FileOutputStream(new File(Library.home(card), "VIEWFIND.TXT"), true);
+            try { o.write(log.toString().getBytes("UTF-8")); } finally { o.close(); }
+        } catch (Exception ignored) {
+            // the log is a convenience
+        }
+    }
+
+    // ------------------------------------------------------------------------------ words for the screen
+
+    static String shutterText(int n, int d) {
+        if (n >= d) {   // a second or longer: 2", 1.3"
+            if (n % d == 0) return n / d + "\"";
+            return String.format(Locale.US, "%.1f\"", n / (double) d);
+        }
+        if (n == 1) return "1/" + d;
+        return "1/" + Math.round(d / (double) n);
+    }
+
+    static String apertureText(int f100) {
+        return f100 >= 1000 ? "F" + Math.round(f100 / 100f) : String.format(Locale.US, "F%.1f", f100 / 100f);
+    }
+
+    static String afModeText(String afMode, String focusMode) {
+        if ("manual".equals(focusMode)) return "MF";
+        if ("dmf".equals(focusMode)) return "DMF";
+        if (afMode == null) return "AF";
+        return afMode.toUpperCase(Locale.US);   // af-s -> AF-S
+    }
+
+    static String areaText(String area) {
+        if (area == null) return "";
+        if (area.equals("center")) return "Centre";
+        if (area.equals("wide")) return "Wide";
+        if (area.equals("flex-spot")) return "Spot";
+        if (area.equals("multi")) return "Multi";
+        if (area.equals("local")) return "Zone";
+        if (area.equals("spot")) return "Spot";
+        if (area.equals("tracking")) return "Tracking";
+        return area;
+    }
+
+    // ------------------------------------------------------------------------------ reflection (the Sony classes aren't in the build)
+
+    /** cameraEx.name(listener), the listener made from 'iface' around 'h' (null clears it). False if the camera lacks it. */
+    private boolean set(String name, String iface, InvocationHandler h) {
+        if (cameraEx == null) return false;
+        try {
+            for (Method m : cameraEx.getClass().getMethods()) {
+                if (!m.getName().equals(name) || m.getParameterTypes().length != 1) continue;
+                Object listener = null;
+                if (h != null) {
+                    Class<?> c = Class.forName(iface);
+                    listener = Proxy.newProxyInstance(c.getClassLoader(), new Class<?>[] { c }, h);
+                }
+                m.invoke(cameraEx, listener);
+                return true;
+            }
+            if (h != null) note(name + ": not on this camera");
+        } catch (Throwable e) {
+            if (h != null) note(name + ": " + Probe.why(e));
+        }
+        return false;
+    }
+
+    private void call(String name) throws Exception {
+        try {
+            cameraEx.getClass().getMethod(name).invoke(cameraEx);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            Throwable c = e.getCause();
+            throw c instanceof Exception ? (Exception) c : e;
+        }
+    }
+
+    private void safely(String name) {
+        try { call(name); } catch (Throwable e) { note(name + ": " + Probe.why(e)); }
+    }
+
+    private static void option(Object options, String key, int value) throws Exception {
+        for (Method m : options.getClass().getMethods()) {
+            Class<?>[] t = m.getParameterTypes();
+            if (m.getName().equals("setOption") && t.length == 2 && t[0] == String.class && t[1] == int.class) {
+                m.invoke(options, key, value);
+                return;
+            }
+        }
+        throw new NoSuchMethodException("setOption(String, int)");
+    }
+
+    private static int intField(Object o, String name) {
+        try { return o.getClass().getField(name).getInt(o); } catch (Throwable e) { return -1; }
+    }
+
+    /** An info object's public fields, for the log (so their names are known on this camera). */
+    private static String fields(Object o) {
+        StringBuilder b = new StringBuilder();
+        for (java.lang.reflect.Field f : o.getClass().getFields()) {
+            try { b.append(b.length() > 0 ? ", " : "").append(f.getName()).append('=').append(f.get(o)); } catch (Throwable ignored) { }
+        }
+        return b.length() > 0 ? b.toString() : String.valueOf(o);
+    }
+
+    /** A proxy's own equals / hashCode / toString. */
+    private static Object objectMethod(Object proxy, Method m, Object[] a) {
+        String n = m.getName();
+        if (n.equals("equals")) return a != null && a.length == 1 && proxy == a[0];
+        if (n.equals("hashCode")) return System.identityHashCode(proxy);
+        if (n.equals("toString")) return "Latent viewfinder";
+        return null;
+    }
+}

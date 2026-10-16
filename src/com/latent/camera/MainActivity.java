@@ -47,7 +47,8 @@ import java.util.concurrent.ThreadFactory;
  */
 public class MainActivity extends Activity {
     private static final int BACK = UiState.BACK, LOAD = UiState.LOAD, DARKROOM = UiState.DARKROOM,
-            SHEET = UiState.SHEET, VIEW = UiState.VIEW, LAB = UiState.LAB, PROBE = UiState.PROBE, SETTINGS = UiState.SETTINGS;
+            SHEET = UiState.SHEET, VIEW = UiState.VIEW, LAB = UiState.LAB, PROBE = UiState.PROBE, SETTINGS = UiState.SETTINGS,
+            PHOTO = UiState.PHOTO;
     private static final int[] LENGTHS = { 12, 24, 36, Roll.ENDLESS };
 
     // camera key scan codes (Sony ScalarInput)
@@ -177,6 +178,7 @@ public class MainActivity extends Activity {
         shootPending = false;
         if (liveRun != null) liveRun.close();    // never keep the camera when Latent isn't on screen
         if (shootRun != null) shootRun.close();
+        if (vf != null) vf.close(null);
         final Runnable keysLog = new Runnable() { public void run() { logKeys(); } };
         worker.execute(keysLog);
         Display.fullColour(false);
@@ -185,14 +187,31 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStop() {
+        super.onStop();
+        // once the camera has been opened here, Sony's image memory stays taken until this process ends:
+        // close Latent when it's left, so the next time it opens the darkroom can develop what was shot
+        if (Viewfinder.opened && !isFinishing()) finish();
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         worker.shutdown();
         filer.shutdown();
+        if (Viewfinder.opened) {
+            devLog("closing Latent: the camera was opened, so its image memory comes back only once Latent has closed");
+            try { worker.awaitTermination(1500, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
+            filer.shutdownNow();
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
     }
 
     /** Re-read the card (looks, rolls, photos), then run 'then' on the UI thread. */
+    private int refreshing;            // card reads under way: the camera waits for them (one may set the camera neutral)
+
     private void refresh(final Runnable then) {
+        refreshing++;
         worker.execute(new Runnable() {
             public void run() {
                 String problem = null;
@@ -209,7 +228,10 @@ public class MainActivity extends Activity {
                 final List<Roll> ro = Roll.list(card);
                 Roll.upgrade(ro);
                 long r2 = SystemClock.uptimeMillis();
-                List<File> all = Library.withoutIgnored(card, Library.photos(card));   // test shots are never exposures
+                List<File> listed = Library.photos(card);
+                final int highest = Roll.highest(listed);
+                // test shots are never exposures; the viewfinder's are, even before the listing shows them
+                List<File> all = Library.withoutIgnored(card, Library.withShots(card, listed));
                 long r3 = SystemClock.uptimeMillis();
                 try {
                     String tidied = Roll.tidy(ro, Roll.exposable(all, ro));
@@ -248,6 +270,8 @@ public class MainActivity extends Activity {
                 final String msg = problem;
                 ui.post(new Runnable() {
                     public void run() {
+                        refreshing--;
+                        highestOnCard = Math.max(highestOnCard, highest);
                         stocks = st;
                         rolls = ro;
                         photos = ph;
@@ -375,6 +399,9 @@ public class MainActivity extends Activity {
             rows.add(new String[] { "Develop now", "›", "develop" });
         if (current != null && !Roll.DEVELOPING.equals(current.state)) rows.add(new String[] { "Change film", "›", "change" });
         rows.add(new String[] { "Rolls", "›", "rolls" });
+        rows.add(new String[] { "Shooting", "", "" });
+        rows.add(new String[] { "Latent's viewfinder", viewfinderOn() ? "on" : "off", "viewfinder" });
+        rows.add(new String[] { "Focus first", focusFirst() ? "on" : "off", "focusFirst" });
         rows.add(new String[] { "Developing", "", "" });
         rows.add(new String[] { "Use three cores", developCores() > 1 ? "on" : "off", "cores" });
         rows.add(new String[] { "Shoot neutral while a roll is loaded", neutralOn() ? "on" : "off", "neutral" });
@@ -392,6 +419,8 @@ public class MainActivity extends Activity {
     private String settingsFooter(String action) {
         if (action.equals("cores")) return prefs.getBoolean("multicoreOk", false) ? "Develops on cores 1 and 2 as well. Core 0 is left to the camera." : "Run the Speed test first: it checks the other cores.";
         if (action.equals("neutral")) return "Every look starts from the same picture. Your settings come back after.";
+        if (action.equals("viewfinder")) return viewfinderOn() ? "Shoot shows the film on live view. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
+        if (action.equals("focusFirst")) return focusFirst() ? "A full press waits for focus to lock, as AF-S does." : "A full press takes the picture at once, in focus or not.";
         if (action.equals("shootTest")) return "Latent focuses and takes one photo itself. Changes no setting.";
         if (action.equals("develop")) return "Ends the roll here and develops the " + exposed + " shot so far.";
         if (action.equals("change")) return current != null && current.endless() ? "This roll's photos keep developing." : "Keeps the frames shot so far for developing.";
@@ -399,6 +428,8 @@ public class MainActivity extends Activity {
     }
 
     private boolean neutralOn() { return prefs.getBoolean("neutral", true); }
+    private boolean viewfinderOn() { return prefs.getBoolean("viewfinder", true); }
+    private boolean focusFirst() { return prefs.getBoolean("focusFirst", true); }
 
     /** The camera shoots neutral while a roll is loaded: every look starts from a plain picture. */
     private boolean neutralWanted(boolean filmLoaded) { return neutralOn() && filmLoaded; }
@@ -425,6 +456,10 @@ public class MainActivity extends Activity {
                 else prefs.edit().putInt("cores", developCores() > 1 ? 1 : 3).commit();
             } else if (action.equals("neutral")) {
                 setNeutral(!neutralOn());
+            } else if (action.equals("viewfinder")) {
+                prefs.edit().putBoolean("viewfinder", !viewfinderOn()).commit();
+            } else if (action.equals("focusFirst")) {
+                prefs.edit().putBoolean("focusFirst", !focusFirst()).commit();
             } else if (action.equals("lab")) {
                 openLab();
                 fromSettings = true;
@@ -614,7 +649,7 @@ public class MainActivity extends Activity {
             toast("Finishing a photo…");
             return;
         }
-        if (neutralBusy > 0) {   // never start shooting while settings are being written: check again shortly
+        if (neutralBusy > 0 || refreshing > 0 || filing) {   // never start shooting while settings are being written (or the card read, or an original filed): check again shortly
             if (!shootPending) { shootPending = true; toast("Setting up the camera…"); }
             ui.removeCallbacks(shootWhenSettled);
             ui.postDelayed(shootWhenSettled, 300);
@@ -628,6 +663,7 @@ public class MainActivity extends Activity {
             return;
         }
         shootPending = false;
+        if (viewfinderOn() && current != null && Roll.LOADED.equals(current.state)) { openViewfinder(); return; }
         // a breadcrumb: if the camera restarts on the way to shooting, the next start shows it came right after this
         devLog("shoot: handing over to the camera" + (current != null ? " (" + current.label() + ", " + exposed + " exposed)" : " (no roll)")
                 + (since >= 0 ? ", settings last changed " + since / 1000 + " s before" : ""));
@@ -639,6 +675,126 @@ public class MainActivity extends Activity {
             // no home activity: just leave
         }
         finish();
+    }
+
+    // ------------------------------------------------------------------------------ the viewfinder
+
+    private Viewfinder vf;             // while it's open (it holds the camera)
+    private int vfBase;                // the roll's exposures when it opened
+    private int vfWaiting;             // pictures taken in it since Latent opened: they develop next time
+    private int highestOnCard;         // the highest photo number the card listed
+    private volatile boolean filing;   // an original is being removed with Sony's delete: the camera waits
+    private boolean s1Held;            // the shutter button is half-pressed now
+
+    /**
+     * Latent's own viewfinder in place of the camera's shooting mode: live view in the roll's film,
+     * focus and the picture from the shutter button, the level read from the picture. Pictures are
+     * the roll's exposures as the camera stores them; they develop the next time Latent opens.
+     */
+    private void openViewfinder() {
+        if (vf != null || current == null) return;
+        if (!current.endless() && exposed >= current.length) { toast("Roll finished"); return; }
+        Stock st = Stock.byId(stocks, current.stock);
+        mode = PHOTO;
+        vfBase = exposed;
+        readBattery();
+        devLog("viewfinder: opening (" + current.label() + ", " + exposed + " exposed)");
+        vf = new Viewfinder(this, card, liveSurface, worker, st, focusFirst(), highestOnCard, new Viewfinder.Host() {
+            public void showLive(boolean on) {
+                liveSurface.setVisibility(on ? View.VISIBLE : View.GONE);
+                screen.invalidate();
+            }
+            public void changed() { screen.invalidate(); }
+            public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
+            public void shot(File photo) { vfShot(photo); }
+            public void closed(String why) {
+                vf = null;
+                ui.removeCallbacks(closeWhenFinished);
+                if (mode == PHOTO) mode = BACK;
+                devLog("viewfinder: closed" + (why != null ? " (" + why + ")" : "") + ", " + exposed + " exposed");
+                if (why != null) toast(why);
+                screen.invalidate();
+            }
+        });
+        vf.open();
+        screen.invalidate();
+    }
+
+    /** One picture stored (photo is its file, or null when the catalogue didn't name it). */
+    private void vfShot(final File photo) {
+        vfWaiting++;
+        exposed++;
+        if (photo != null) {
+            highestOnCard = Math.max(highestOnCard, Roll.number(photo));
+            worker.execute(new Runnable() {
+                public void run() {
+                    try { Library.recordShot(card, photo); } catch (Exception e) { devLog("viewfinder: " + photo.getName() + " not noted (" + Probe.why(e) + ")"); }
+                }
+            });
+        }
+        if (current != null && !current.endless() && exposed >= current.length && vf != null) {   // the last frame: back to the camera back
+            vf.say("Roll finished");
+            ui.removeCallbacks(closeWhenFinished);
+            ui.postDelayed(closeWhenFinished, 1800);
+        }
+        readBattery();
+        saveSnapshot();
+        screen.invalidate();
+    }
+
+    private final Runnable closeWhenFinished = new Runnable() { public void run() { if (vf != null) vf.close(null); } };
+
+    /** Nothing shot on this roll yet: its film can still change. */
+    private boolean filmFresh() {
+        return current != null && Roll.LOADED.equals(current.state) && current.frames.isEmpty() && vfBase + (vf != null ? vf.shots : 0) == 0;
+    }
+
+    /** The wheel in the viewfinder: the film's card; on a fresh roll, the next film, as a film simulation dial. */
+    private void vfFilm(int step) {
+        if (vf == null) return;
+        if (filmFresh() && stocks.size() > 1) {
+            Stock now = Stock.byId(stocks, current.stock);
+            int i = Math.max(0, stocks.indexOf(now));
+            final Stock next = stocks.get((i + step + stocks.size()) % stocks.size());
+            current.stock = next.id;
+            final Roll r = current;
+            prefs.edit().putString("lastStock", next.id).commit();
+            worker.execute(new Runnable() {
+                public void run() {
+                    try { r.save(); } catch (Exception e) { devLog(r.label() + ": film not changed on the card (" + Probe.why(e) + ")"); }
+                }
+            });
+            vf.setFilm(next);
+            saveSnapshot();
+        }
+        vf.showCard();
+    }
+
+    /** Keys while the viewfinder is open. */
+    private void vfKey(int keyCode, KeyEvent e, boolean down) {
+        int sc = e.getScanCode();
+        boolean half = sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS, full = sc == SC_S2 || keyCode == KeyEvent.KEYCODE_CAMERA;
+        if (half) {
+            if (down && e.getRepeatCount() == 0) vf.halfDown();
+            else if (!down) vf.halfUp();
+            return;
+        }
+        if (full) {
+            if (down && e.getRepeatCount() == 0) vf.fullDown(current != null && (current.endless() || vfBase + vf.shots < current.length));
+            return;
+        }
+        if (!down) {
+            if (sc == SC_MENU || sc == SC_SK1 || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_BACK) vf.close(null);
+            return;
+        }
+        if (sc == SC_WHEEL_CW || sc == SC_DIAL_CW) { vfFilm(1); return; }
+        if (sc == SC_WHEEL_CCW || sc == SC_DIAL_CCW) { vfFilm(-1); return; }
+        int k = key(keyCode, sc);
+        if (k == K_LEFT) vfFilm(-1);
+        else if (k == K_RIGHT) vfFilm(1);
+        else if (k == K_UP) vf.cycleDisplay(-1);
+        else if (k == K_DOWN) vf.cycleDisplay(1);
+        else if (k == K_ENTER && e.getRepeatCount() == 0) vf.toggleLook();
     }
 
     private void toast(String msg) {
@@ -758,6 +914,10 @@ public class MainActivity extends Activity {
      */
     private void startDevelop(Roll r, boolean quiet) {
         if (r == null) return;
+        if (Viewfinder.opened) {   // the camera has the image memory until Latent closes
+            if (!quiet) toast("It develops the next time you open Latent");
+            return;
+        }
         if (developing != null) {
             if (devQuiet && !quiet) {   // your photos give way to the film: after the frame in hand
                 paused = true;
@@ -978,7 +1138,7 @@ public class MainActivity extends Activity {
      * Returns how many originals were filed. Filer thread.
      */
     private int fileSettled(Roll r, boolean wait) {
-        if (HardwareDevelop.hung()) return 0;
+        if (HardwareDevelop.hung() || Viewfinder.opened) return 0;   // never alongside the camera
         List<Integer> todo = unfiled(r);
         if (todo.isEmpty()) return 0;
         HardwareDevelop sony = new HardwareDevelop(this, card, new StringBuilder(), null);
@@ -1008,14 +1168,18 @@ public class MainActivity extends Activity {
             long left = negAt.get(key) + SETTLE_MS - SystemClock.elapsedRealtime();
             if (left > 0 && !wait) continue;
             try {
-                while (left > 0 || !resumed) {
+                while (left > 0 || !resumed || mode == PHOTO || shootPending) {
+                    if (Viewfinder.opened) return filed;
                     Thread.sleep(left > 0 ? Math.min(left, 500) : 500);
                     left = negAt.get(key) + SETTLE_MS - SystemClock.elapsedRealtime();
                 }
             } catch (InterruptedException e) {
                 return filed;
             }
-            String w = sony.removeOriginal(original, print, neg, negCrc.get(key));
+            String w;
+            filing = true;   // the camera doesn't open meanwhile
+            try { w = Viewfinder.opened ? "the camera is open" : sony.removeOriginal(original, print, neg, negCrc.get(key)); }
+            finally { filing = false; }
             if (wait) showFiling(--remaining);
             if (w == null) filed++;
             else devLog(original.getName() + " stays in the camera roll: " + w);
@@ -1628,6 +1792,13 @@ public class MainActivity extends Activity {
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent e) {
         int sc = e.getScanCode();
+        if (sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS) s1Held = true;
+        if (mode == PHOTO && vf != null) { vfKey(keyCode, e, true); return true; }
+        if (shutterKey(sc, keyCode) && e.getRepeatCount() == 0 && mode == BACK && ready && current != null && !wantsDeveloping(current)
+                && viewfinderOn() && shootAllowed() && !Roll.DEVELOPING.equals(current.state)) {
+            goShoot();   // the viewfinder opens on the press itself (the camera's own mode had to wait for the release)
+            return true;
+        }
         if (shutterKey(sc, keyCode)) {
             // half-press the shutter, like a camera: you're shooting. It goes when the button is released, so the
             // camera's shooting mode starts with the shutter up (started mid-press, the A5100 wouldn't focus)
@@ -1653,6 +1824,8 @@ public class MainActivity extends Activity {
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent e) {
         int sc = e.getScanCode();
+        if (sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS) s1Held = false;
+        if (mode == PHOTO && vf != null) { vfKey(keyCode, e, false); return true; }
         if (shutterKey(sc, keyCode)) {
             if (shutterDown && shootAllowed()) {
                 // choosing film, a half-press loads it and goes to shoot: one press from an empty camera to shooting
@@ -1714,7 +1887,18 @@ public class MainActivity extends Activity {
                     for (int i = 0; i < endlessPrints.size() && i < 8; i++) s.thumbs.add(thumb(endlessPrints.get(i)));
                 }
                 s.developing = devQuiet && developing != null ? quietLeft : 0;
+                s.developLater = Viewfinder.opened;
+                s.waiting = vfWaiting;
                 break;
+            case PHOTO: {
+                if (vf != null) vf.fill(s);
+                for (Stock st : stocks) s.looks.add(film(st));
+                s.lookSel = Math.max(0, stocks.indexOf(cur));
+                s.exposed = vfBase + (vf != null ? vf.shots : 0);
+                if (current != null) { s.length = current.length; s.endless = current.endless(); }
+                s.cardNote = filmFresh() ? "" : "Loaded for the whole roll";
+                break;
+            }
             case SETTINGS: {
                 List<String[]> rows = settingsRows();
                 int sel = Math.min(settingsSel, rows.size() - 1);

@@ -90,6 +90,32 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_preview(JNIEnv *env, jcla
     return rc;
 }
 
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_live(JNIEnv *env, jclass cls, jbyteArray jjpeg, jint len,
+        jstring jlut, jintArray jparams, jintArray jpixels, jint w, jint h, jintArray jinfo) {
+    int params[FL_PARAM_COUNT], info[FL_LIVE_INFO];
+    const char *lut = NULL;
+    jbyte *jpeg;
+    jint *px;
+    int rc;
+    (void)cls;
+    g_err[0] = 0;
+    if (read_params(env, jparams, params) != 0) { strcpy(g_err, "bad parameters"); return -1; }
+    if (!jjpeg || len <= 0 || (*env)->GetArrayLength(env, jjpeg) < len || !jpixels || (*env)->GetArrayLength(env, jpixels) < w * h
+            || !jinfo || (*env)->GetArrayLength(env, jinfo) < FL_LIVE_INFO) {
+        strcpy(g_err, "bad live frame buffers");
+        return -1;
+    }
+    if (jlut) lut = (*env)->GetStringUTFChars(env, jlut, NULL);
+    jpeg = (*env)->GetByteArrayElements(env, jjpeg, NULL);
+    px = (*env)->GetIntArrayElements(env, jpixels, NULL);
+    rc = fl_live((const unsigned char *)jpeg, (unsigned long)len, lut, params, (unsigned int *)px, w, h, info, g_err, sizeof g_err);
+    (*env)->ReleaseIntArrayElements(env, jpixels, px, 0);
+    (*env)->ReleaseByteArrayElements(env, jjpeg, jpeg, JNI_ABORT);
+    if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
+    if (rc == 0) (*env)->SetIntArrayRegion(env, jinfo, 0, FL_LIVE_INFO, (const jint *)info);
+    return rc;
+}
+
 JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_lastError(JNIEnv *env, jclass cls) {
     (void)cls;
     return (*env)->NewStringUTF(env, g_err);
