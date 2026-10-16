@@ -43,6 +43,9 @@ final class NeutralSettings {
     private static long now() { return System.nanoTime() / 1000000; }
 
     /** Milliseconds since Latent last changed a camera setting, or -1 if it hasn't this run. */
+    /** A camera setting was just changed some other way (Auto Review): shooting mode waits as after any write. */
+    static void wrote() { lastWriteAt = now(); }
+
     static long sinceLastWrite() { return lastWriteAt == 0 ? -1 : now() - lastWriteAt; }
 
     NeutralSettings(File card, StringBuilder log) {

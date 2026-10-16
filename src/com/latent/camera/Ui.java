@@ -719,6 +719,13 @@ final class Ui {
             "Takes one photo with the film look applied as it is captured, using the camera's own memory map, as Sony's effect apps do. Kept off your rolls. If the camera hangs, pull the battery.",
             "Changes no camera setting. Point the camera at something and hold still.",
     };
+    static final String[] LOOK_PLAN = {
+            "Opens the camera and sets Auto Review to 0, as Sony's Smart Remote does for every picture it takes while it streams live view. Your time goes back at the end.",
+            "Asks for the live frames Latent's film look needs, then takes two photos with them running, and checks each is stored. Kept off your rolls.",
+            "If a photo isn't stored, the camera is kept open (releasing it froze the camera before) and the screen says what to do. Point it at something.",
+    };
+    static final String LOOK_FOOTER = "About half a minute. Log: LATENT/LIVELOOK.TXT.";
+
     static final String[] RESTART_PLAN = {
             "Copies Sony's own camera apps (Smart Remote among them) to LATENT/APPS, to be read on a computer. Only reads.",
             "Opens the camera with live view for a moment, the way the viewfinder does, and gives it back. Takes no picture.",

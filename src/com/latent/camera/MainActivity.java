@@ -221,7 +221,9 @@ public class MainActivity extends Activity {
         if (Viewfinder.opened) {
             devLog("leaving: the camera was opened, so Latent closes itself (its image memory comes back only then)");
             killWhenClosed = true;
-            if (vf != null) {
+            if (lookRun != null) {   // the test ends first (never with a picture on its way); it ends Latent then
+                lookRun.close();
+            } else if (vf != null) {
                 vf.close(null);
                 ui.postDelayed(new Runnable() { public void run() { if (vf != null) vf.closeNow(); killNow(); } }, 12000);
             } else {
@@ -456,6 +458,7 @@ public class MainActivity extends Activity {
         rows.add(new String[] { "Live view test", "›", "liveTest" });
         rows.add(new String[] { "Shooting test", "›", "shootTest" });
         rows.add(new String[] { "Restart test", "›", "restartTest" });
+        rows.add(new String[] { "Live look test", "›", "lookTest" });
         return rows;
     }
 
@@ -466,6 +469,7 @@ public class MainActivity extends Activity {
         if (action.equals("viewfinder")) return viewfinderOn() ? "Shoot stays in Latent. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
         if (action.equals("focusFirst")) return focusFirst() ? "A full press waits for focus to lock, as AF-S does." : "A full press takes the picture at once, in focus or not.";
         if (action.equals("shootTest")) return "Latent focuses and takes one photo itself. Changes no setting.";
+        if (action.equals("lookTest")) return "Live frames with two photos taken. Auto Review is off while it runs.";
         if (action.equals("restartTest")) return "Latent gives the camera back and starts again by itself. Takes no photo.";
         if (action.equals("develop")) return "Ends the roll here and develops the " + exposed + " shot so far.";
         if (action.equals("change")) return current != null && current.endless() ? "This roll's photos keep developing." : "Keeps the frames shot so far for developing.";
@@ -516,7 +520,7 @@ public class MainActivity extends Activity {
                 Roll r = firstRollWithFrames();
                 if (r == null) toast("No rolls yet");
                 else openSheet(r);
-            } else if (action.equals("settingsCheck") || action.equals("speedTest") || action.equals("liveTest") || action.equals("shootTest") || action.equals("restartTest")) {
+            } else if (action.equals("settingsCheck") || action.equals("speedTest") || action.equals("liveTest") || action.equals("shootTest") || action.equals("restartTest") || action.equals("lookTest")) {
                 mode = PROBE;
                 probeStage = 0;
                 hardwareTest = false;
@@ -525,6 +529,7 @@ public class MainActivity extends Activity {
                 liveTest = action.equals("liveTest");
                 shootTest = action.equals("shootTest");
                 restartTest = action.equals("restartTest");
+                lookTest = action.equals("lookTest");
                 fromSettings = true;
             }
         }
@@ -581,6 +586,8 @@ public class MainActivity extends Activity {
     private boolean shootTest;         // can Latent focus and shoot itself, and get live frames
     private boolean restartTest;       // can Latent give the camera back and start again, with the image memory back
     private RestartTest restartRun;    // while it runs (it holds the camera)
+    private boolean lookTest;          // can the camera store pictures with live frames running (Auto Review off)
+    private LiveLookTest lookRun;      // while it runs (it holds the camera)
     private ShootingTest shootRun;     // while it runs (it holds the camera)
     private android.view.SurfaceView liveSurface;
     private LiveViewTest liveRun;      // while it runs (it holds the camera)
@@ -590,7 +597,7 @@ public class MainActivity extends Activity {
     private String[] probeDetail = new String[0];
 
     private void runProbe() {
-        final String[] steps = restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
+        final String[] steps = lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
         probeStage = 1;
         probeStatus = new int[steps.length];
         probeDetail = new String[steps.length];
@@ -604,7 +611,7 @@ public class MainActivity extends Activity {
         if (st == null && !stocks.isEmpty()) st = stocks.get(0);
         final Stock stock = st;
         if ((hardwareTest || speedTest) && stock == null) { toast("No film looks on the card"); probeStage = 0; return; }
-        if ((shootTest || liveTest || restartTest) && vf != null) {   // the viewfinder holds the camera until Latent is left
+        if ((shootTest || liveTest || restartTest || lookTest) && vf != null) {   // the viewfinder holds the camera until Latent is left
             toast("The camera is in use. Leave Latent and open it again to run this test");
             probeStage = 0;
             return;
@@ -620,6 +627,23 @@ public class MainActivity extends Activity {
                 public void finished() { shootRun = null; liveNote = ""; probeStage = 2; screen.invalidate(); }
             });
             shootRun.start();
+            screen.invalidate();
+            return;
+        }
+        if (lookTest) {   // the camera answers on the thread that opens it: this one
+            lookRun = new LiveLookTest(this, card, liveSurface, prefs, listener, new LiveViewTest.Host() {
+                public void showLive(boolean on) {
+                    liveOn = on;
+                    liveSurface.setVisibility(on ? View.VISIBLE : View.GONE);
+                    screen.invalidate();
+                }
+                public void note(String text) { liveNote = text; screen.invalidate(); }
+                public void finished() {
+                    lookRun = null; liveNote = ""; probeStage = 2; screen.invalidate();
+                    if (killWhenClosed) killNow();   // left during the test: it ends now the camera is back
+                }
+            });
+            lookRun.start();
             screen.invalidate();
             return;
         }
@@ -1949,6 +1973,7 @@ public class MainActivity extends Activity {
                 if (liveRun != null) liveRun.close();   // MENU stops the live view test at once
                 else if (shootRun != null) shootRun.close();
                 else if (restartRun != null) restartRun.close(false);
+                else if (lookRun != null) lookRun.close();   // never with a picture on its way (it waits)
                 else if (probeStage != 1) { if (fromSettings) mode = SETTINGS; else goHome(); developWaiting(); }
                 break;
             default: goHome(); break;
@@ -2063,10 +2088,10 @@ public class MainActivity extends Activity {
             case PROBE:
                 s.live = liveOn;
                 s.liveNote = liveNote;
-                s.probeTitle = restartTest ? "Restart test" : shootTest ? "Shooting test" : liveTest ? "Live view test" : speedTest ? "Speed test" : settingsCheck ? "Camera settings check" : hardwareTest ? "Hardware develop test" : "Camera roll test";
-                s.probeSteps = restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
-                s.probePlan = restartTest ? Ui.RESTART_PLAN : shootTest ? Ui.SHOOT_PLAN : liveTest ? Ui.LIVE_PLAN : speedTest ? Ui.SPEED_PLAN : settingsCheck ? Ui.SETTINGS_PLAN : hardwareTest ? Ui.HARDWARE_PLAN : Ui.PROBE_PLAN;
-                s.probeFooter = restartTest ? Ui.RESTART_FOOTER : shootTest ? Ui.SHOOT_FOOTER : liveTest ? Ui.LIVE_FOOTER : speedTest ? Ui.SPEED_FOOTER : settingsCheck ? Ui.SETTINGS_FOOTER : hardwareTest ? Ui.HARDWARE_FOOTER : Ui.PROBE_FOOTER;
+                s.probeTitle = lookTest ? "Live look test" : restartTest ? "Restart test" : shootTest ? "Shooting test" : liveTest ? "Live view test" : speedTest ? "Speed test" : settingsCheck ? "Camera settings check" : hardwareTest ? "Hardware develop test" : "Camera roll test";
+                s.probeSteps = lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
+                s.probePlan = lookTest ? Ui.LOOK_PLAN : restartTest ? Ui.RESTART_PLAN : shootTest ? Ui.SHOOT_PLAN : liveTest ? Ui.LIVE_PLAN : speedTest ? Ui.SPEED_PLAN : settingsCheck ? Ui.SETTINGS_PLAN : hardwareTest ? Ui.HARDWARE_PLAN : Ui.PROBE_PLAN;
+                s.probeFooter = lookTest ? Ui.LOOK_FOOTER : restartTest ? Ui.RESTART_FOOTER : shootTest ? Ui.SHOOT_FOOTER : liveTest ? Ui.LIVE_FOOTER : speedTest ? Ui.SPEED_FOOTER : settingsCheck ? Ui.SETTINGS_FOOTER : hardwareTest ? Ui.HARDWARE_FOOTER : Ui.PROBE_FOOTER;
                 s.probeStage = probeStage;
                 s.probeStatus = probeStatus.clone();
                 s.probeDetail = probeDetail.clone();
