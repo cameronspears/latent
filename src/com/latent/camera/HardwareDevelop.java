@@ -489,20 +489,21 @@ final class HardwareDevelop {
         Object scratch = null;
         try {
             scratch = call(proc, "createBuffer", size);
-            if (scratch == null) return null;
+            if (scratch == null) { log.append("block ").append(size).append(": no scratch buffer\r\n"); return null; }
             int hs = SonyMemory.handle(scratch);
             byte[] a = new byte[size], back = new byte[size];
             for (int i = 0; i < size; i++) a[i] = (byte) (i * 7 + 3 + (i >> 9));
             scratch.getClass().getMethod("write", byte[].class, int.class, int.class, int.class).invoke(scratch, a, 0, size, 0);
             long t0 = System.currentTimeMillis();
-            if (SonyMemory.read(hs, back, size, 0) != size || !java.util.Arrays.equals(a, back)) return null;
+            if (SonyMemory.read(hs, back, size, 0) != size) { log.append("block ").append(size).append(": read failed (").append(SonyMemory.lastError()).append(")\r\n"); return null; }
+            if (!java.util.Arrays.equals(a, back)) { log.append("block ").append(size).append(": read back different bytes\r\n"); return null; }
             long t1 = System.currentTimeMillis();
             for (int i = 0; i < size; i++) a[i] = (byte) (255 - i - (i >> 11));
-            if (SonyMemory.write(hs, a, size, 0) != size) return null;
+            if (SonyMemory.write(hs, a, size, 0) != size) { log.append("block ").append(size).append(": write failed (").append(SonyMemory.lastError()).append(")\r\n"); return null; }
             long t2 = System.currentTimeMillis();
             java.util.Arrays.fill(back, (byte) 0);
             scratch.getClass().getMethod("read", byte[].class, int.class, int.class, int.class).invoke(scratch, back, 0, size, 0);
-            if (!java.util.Arrays.equals(a, back)) return null;
+            if (!java.util.Arrays.equals(a, back)) { log.append("block ").append(size).append(": written bytes read back different\r\n"); return null; }
             return (t1 - t0) + "/" + (t2 - t1);
         } catch (Throwable e) {
             log.append("block ").append(size).append(": ").append(Probe.why(e)).append("\r\n");

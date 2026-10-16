@@ -491,9 +491,22 @@ final class ShootingTest implements SurfaceHolder.Callback {
         }
     }
 
+    /** Live frames and the look timing are known (v0.21-0.23); this run develops right after the release instead. */
+    static final boolean FRAMES = false;
+
     private void afterPicture() {
         if (closed) return;
-        frames();
+        if (FRAMES) { frames(); return; }
+        report(S_FRAMES, INFO, "skipped this run (up to 19 a second before)");
+        report(S_LOOK, INFO, "skipped this run (143 ms at 320 px before)");
+        closeCamera();
+        out.step(S_DEVELOP, RUN, "developing…");
+        new Thread(new Runnable() {
+            public void run() {
+                final String[] dev = developShot();
+                ui.post(new Runnable() { public void run() { report(S_DEVELOP, Integer.parseInt(dev[0]), dev[1]); finish(); } });
+            }
+        }, "develop-shot").start();
     }
 
     /** With the camera given back: does a photo the test didn't see land now? (Background thread.) */
