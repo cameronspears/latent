@@ -503,6 +503,7 @@ final class ShootingTest implements SurfaceHolder.Callback {
         out.step(S_DEVELOP, RUN, "developing…");
         new Thread(new Runnable() {
             public void run() {
+                waitForImageMemory();
                 final String[] dev = developShot();
                 ui.post(new Runnable() { public void run() { report(S_DEVELOP, Integer.parseInt(dev[0]), dev[1]); finish(); } });
             }
@@ -652,6 +653,32 @@ final class ShootingTest implements SurfaceHolder.Callback {
                 ui.post(new Runnable() { public void run() { report(S_DEVELOP, Integer.parseInt(dev[0]), dev[1]); finish(); } });
             }
         }, "look-timing").start();
+    }
+
+    /**
+     * v0.23.1: after the camera was released, Sony's image processor gave no buffer at all. Is that
+     * for a while, or for as long as Latent runs? Asks for a small buffer now and then, up to 20 s.
+     * Background thread.
+     */
+    private void waitForImageMemory() {
+        long released = SystemClock.uptimeMillis();
+        for (long at : new long[] { 0, 1000, 3000, 6000, 10000, 20000 }) {
+            long wait = released + at - SystemClock.uptimeMillis();
+            if (wait > 0) try { Thread.sleep(wait); } catch (InterruptedException e) { return; }
+            Object proc = null, buf = null;
+            try {
+                Class<?> dsp = Class.forName("com.sony.scalar.hardware.DSP");
+                proc = dsp.getMethod("createProcessor", String.class).invoke(null, "sony-di-dsp");
+                buf = HardwareDevelop.call(proc, "createBuffer", 65536);   // as the darkroom asks
+                note("image memory " + at / 1000 + " s after the release: " + (buf != null ? "a buffer" : "none"));
+                if (buf != null) return;
+            } catch (Throwable e) {
+                note("image memory " + at / 1000 + " s after the release: " + Probe.why(e));
+            } finally {
+                try { if (buf != null) buf.getClass().getMethod("release").invoke(buf); } catch (Throwable ignored) { }
+                try { if (proc != null) proc.getClass().getMethod("release").invoke(proc); } catch (Throwable ignored) { }
+            }
+        }
     }
 
     /**
