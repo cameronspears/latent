@@ -2615,6 +2615,7 @@ typedef struct {
     look_pool *P;
     pthread_t th;
     int core, index, ok, started;
+    long cpu;   /* CPU ms it ran, filled in as it quits */
     char why[96];
 } look_helper;
 
@@ -2623,16 +2624,20 @@ typedef struct {
  * thread that also had reading and writing to do simply takes fewer. Rows are independent, so the
  * picture doesn't depend on who did which.
  */
-static void pool_slice(look_pool *P) {
-    int r;
-    while ((r = __sync_fetch_and_add(&P->next, 1)) < P->n)
+static int pool_slice(look_pool *P) {
+    int r, done = 0;
+    while ((r = __sync_fetch_and_add(&P->next, 1)) < P->n) {
         look_variant(P->variant, P->Y, P->G, P->rows + (size_t)r * P->stride, P->w, P->y0 + r);
+        done++;
+    }
+    return done;
 }
 
 static void *pool_helper(void *arg) {
     look_helper *h = (look_helper *)arg;
     look_pool *P = h->P;
     int seen = 0;
+    long cpu0 = cpu_ms();
     h->ok = 1;
 #ifdef __linux__
     {
@@ -2662,6 +2667,7 @@ static void *pool_helper(void *arg) {
         pthread_cond_broadcast(&P->done);
     }
     pthread_mutex_unlock(&P->mu);
+    h->cpu = cpu_ms() - cpu0;
     return NULL;
 }
 
@@ -2678,8 +2684,8 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
     fl_grain G;
     look_pool P;
     look_helper helpers[MAX_HELPERS];
-    long t0 = now_ms(), cpu0 = cpu_ms(), t, t_read = 0, t_look = 0, t_write = 0;
-    int y = 0, last = -1, rc = 0, i, nh = 0, want, v = g_variant;
+    long t0 = now_ms(), cpu0 = cpu_ms(), t, t_read = 0, t_look = 0, t_write = 0, t_wait = 0, hcpu = 0;
+    int y = 0, last = -1, rc = 0, i, nh = 0, want, v = g_variant, own_rows = 0;
 
     memset(g_timing, 0, sizeof g_timing);
     if (w < 2 || h < 1 || (w & 1) || w > 20000 || h > 20000) { set_err(err, errlen, "bad image size %dx%d", w, h); return -1; }
@@ -2751,10 +2757,12 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
                     if (!next_rows || next_n < 1 || y + n + next_n > h) { set_err(err, errlen, "reading rows from %d failed", y + n); rc = -1; }
                 }
             }
-            pool_slice(&P);   /* then help with block k */
+            own_rows += pool_slice(&P);   /* then help with block k */
+            t = now_ms();
             pthread_mutex_lock(&P.mu);
             while (P.finished < P.threads - 1) pthread_cond_wait(&P.done, &P.mu);
             pthread_mutex_unlock(&P.mu);
+            t_wait += now_ms() - t;
             t_look += now_ms() - tb;
             if (rc != 0) break;
             if (P.threads > 1) {
@@ -2789,7 +2797,7 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
     P.quit = 1;
     pthread_cond_broadcast(&P.go);
     pthread_mutex_unlock(&P.mu);
-    for (i = 0; i < want; i++) if (helpers[i].started) pthread_join(helpers[i].th, NULL);
+    for (i = 0; i < want; i++) if (helpers[i].started) { pthread_join(helpers[i].th, NULL); hcpu += helpers[i].cpu; }
     pthread_cond_destroy(&P.go);
     pthread_cond_destroy(&P.done);
     pthread_mutex_destroy(&P.mu);
@@ -2800,6 +2808,9 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
         g_timing[FL_TIME_TOTAL] = (int)(now_ms() - t0);
         g_timing[FL_TIME_CPU] = (int)(cpu_ms() - cpu0);
         g_timing[FL_TIME_THREADS] = P.threads;
+        g_timing[FL_TIME_WAIT] = (int)t_wait;
+        g_timing[FL_TIME_ROWS] = own_rows;
+        g_timing[FL_TIME_HCPU] = (int)hcpu;
     }
     ycc_free(&Y);
     look_free(&L); grain_free(&G);

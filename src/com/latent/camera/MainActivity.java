@@ -494,6 +494,7 @@ public class MainActivity extends Activity {
         rows.add(new String[] { "Camera", "", "" });
         rows.add(new String[] { "Settings check", "›", "settingsCheck" });
         rows.add(new String[] { "Speed test", "›", "speedTest" });
+        rows.add(new String[] { "Develop test", "›", "devTest" });
         rows.add(new String[] { "Live view test", "›", "liveTest" });
         rows.add(new String[] { "Shooting test", "›", "shootTest" });
         rows.add(new String[] { "Restart test", "›", "restartTest" });
@@ -510,6 +511,7 @@ public class MainActivity extends Activity {
                 : "The camera's own live view. Run the Live look test (Camera, below) to turn the film on.";
         if (action.equals("focusFirst")) return focusFirst() ? "A full press waits for focus to lock, as AF-S does." : "A full press takes the picture at once, in focus or not.";
         if (action.equals("shootTest")) return "Latent focuses and takes one photo itself. Changes no setting.";
+        if (action.equals("devTest")) return "Times the darkroom's develop on your newest photo. Saves nothing new.";
         if (action.equals("lookTest")) return "The film look on live frames while two photos are taken. If both are stored, the look comes on.";
         if (action.equals("restartTest")) return "Latent gives the camera back and starts again by itself. Takes no photo.";
         if (action.equals("develop")) return "Ends the roll here and develops the " + exposed + " shot so far.";
@@ -570,12 +572,13 @@ public class MainActivity extends Activity {
                 Roll r = firstRollWithFrames();
                 if (r == null) toast("No rolls yet");
                 else openSheet(r);
-            } else if (action.equals("settingsCheck") || action.equals("speedTest") || action.equals("liveTest") || action.equals("shootTest") || action.equals("restartTest") || action.equals("lookTest")) {
+            } else if (action.equals("settingsCheck") || action.equals("speedTest") || action.equals("devTest") || action.equals("liveTest") || action.equals("shootTest") || action.equals("restartTest") || action.equals("lookTest")) {
                 mode = PROBE;
                 probeStage = 0;
                 hardwareTest = false;
                 settingsCheck = action.equals("settingsCheck");
                 speedTest = action.equals("speedTest");
+                devTest = action.equals("devTest");
                 liveTest = action.equals("liveTest");
                 shootTest = action.equals("shootTest");
                 restartTest = action.equals("restartTest");
@@ -632,6 +635,7 @@ public class MainActivity extends Activity {
     private boolean hardwareTest;      // phase 2: develop one photo through the camera's hardware
     private boolean settingsCheck;     // read the camera's white balance and Creative Style (read only)
     private boolean speedTest;         // time the look's inner loops on this chip; keep the fastest accurate one
+    private boolean devTest;           // time the darkroom's develop one idea at a time; keep a faster way only if the picture is identical
     private boolean liveTest;          // can live view be shown with a film look on it
     private boolean shootTest;         // can Latent focus and shoot itself, and get live frames
     private boolean restartTest;       // can Latent give the camera back and start again, with the image memory back
@@ -647,7 +651,7 @@ public class MainActivity extends Activity {
     private String[] probeDetail = new String[0];
 
     private void runProbe() {
-        final String[] steps = lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
+        final String[] steps = lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : devTest ? DevelopTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
         probeStage = 1;
         probeStatus = new int[steps.length];
         probeDetail = new String[steps.length];
@@ -660,7 +664,17 @@ public class MainActivity extends Activity {
         Stock st = current != null ? Stock.byId(stocks, current.stock) : null;
         if (st == null && !stocks.isEmpty()) st = stocks.get(0);
         final Stock stock = st;
-        if ((hardwareTest || speedTest) && stock == null) { toast("No film looks on the card"); probeStage = 0; return; }
+        if ((hardwareTest || speedTest || devTest) && stock == null) { toast("No film looks on the card"); probeStage = 0; return; }
+        if (devTest && Viewfinder.opened) {   // the camera has Sony's image memory until Latent closes
+            toast("The camera has the image memory. Leave Latent and open it again to run this test");
+            probeStage = 0;
+            return;
+        }
+        if (devTest && (developing != null || filing || HardwareDevelop.hung())) {   // one user of Sony's image memory at a time
+            toast(HardwareDevelop.hung() ? "A camera call is still busy. Restart Latent first" : "Finishing a photo first. Try again in a moment");
+            probeStage = 0;
+            return;
+        }
         if ((shootTest || liveTest || restartTest || lookTest) && developing != null) {   // the darkroom and the camera never overlap (v0.33.0)
             paused = true;
             toast("Finishing a photo first. Try again in a moment");
@@ -732,10 +746,12 @@ public class MainActivity extends Activity {
             return;
         }
         dim(hardwareTest || speedTest);
-        if (speedTest) powerSave.hold();
+        if (speedTest || devTest) powerSave.hold();
         worker.execute(new Runnable() {
             public void run() {
-                if (speedTest) {
+                if (devTest) {
+                    new DevelopTest(MainActivity.this, card, stock, prefs, developCores(), versionName(), listener).run();
+                } else if (speedTest) {
                     new SpeedTest(card, stock, prefs, listener).run();
                 } else if (settingsCheck) {
                     new SettingsCheck(card, listener).run();
@@ -748,7 +764,7 @@ public class MainActivity extends Activity {
                 } else {
                     new Probe(MainActivity.this, card, ui, listener).run();
                 }
-                ui.post(new Runnable() { public void run() { probeStage = 2; dim(false); if (speedTest) powerSave.release(); screen.invalidate(); } });
+                ui.post(new Runnable() { public void run() { probeStage = 2; dim(false); if (speedTest || devTest) powerSave.release(); screen.invalidate(); } });
             }
         });
         screen.invalidate();
@@ -1239,7 +1255,7 @@ public class MainActivity extends Activity {
                 StringBuilder hl = new StringBuilder();
                 HardwareDevelop h = new HardwareDevelop(MainActivity.this, card, hl, null);
                 try {
-                    h.prepare(false);
+                    h.prepare(false, prefs.getInt(DevelopTest.P_BLOCK, HardwareDevelop.DARKROOM_BLOCK));   // the Develop test may have chosen another size
                     hw = h;
                 } catch (Throwable e) {
                     hw = null;
@@ -1337,7 +1353,7 @@ public class MainActivity extends Activity {
                         logHardware(src, film, print, h.ms, " (read " + h.look[FilmCore.T_READ] + " look " + h.look[FilmCore.T_LOOK]
                                 + " write " + h.look[FilmCore.T_WRITE] + ") " + (HardwareDevelop.extraFine() ? "xfine" : "fine")
                                 + " loop=" + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, prefs.getInt("lookVariant", 0)))]
-                                + " rows=" + (SonyMemory.lastDirect() ? "direct" : "gathered")
+                                + " rows=" + (SonyMemory.lastDirect() ? "direct" : "gathered") + " block=" + HardwareDevelop.block() / 1024 + "K"
                                 + " threads=" + h.look[FilmCore.T_THREADS] + (FilmCore.helperNote().length() > 0 ? " (" + FilmCore.helperNote() + ")" : ""), System.currentTimeMillis() - t0);
                     } catch (Throwable e) {
                         hw = null;
@@ -2298,10 +2314,10 @@ public class MainActivity extends Activity {
             case PROBE:
                 s.live = liveOn;
                 s.liveNote = liveNote;
-                s.probeTitle = lookTest ? "Live look test" : restartTest ? "Restart test" : shootTest ? "Shooting test" : liveTest ? "Live view test" : speedTest ? "Speed test" : settingsCheck ? "Camera settings check" : hardwareTest ? "Hardware develop test" : "Camera roll test";
-                s.probeSteps = lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
-                s.probePlan = lookTest ? Ui.LOOK_PLAN : restartTest ? Ui.RESTART_PLAN : shootTest ? Ui.SHOOT_PLAN : liveTest ? Ui.LIVE_PLAN : speedTest ? Ui.SPEED_PLAN : settingsCheck ? Ui.SETTINGS_PLAN : hardwareTest ? Ui.HARDWARE_PLAN : Ui.PROBE_PLAN;
-                s.probeFooter = lookTest ? Ui.LOOK_FOOTER : restartTest ? Ui.RESTART_FOOTER : shootTest ? Ui.SHOOT_FOOTER : liveTest ? Ui.LIVE_FOOTER : speedTest ? Ui.SPEED_FOOTER : settingsCheck ? Ui.SETTINGS_FOOTER : hardwareTest ? Ui.HARDWARE_FOOTER : Ui.PROBE_FOOTER;
+                s.probeTitle = lookTest ? "Live look test" : restartTest ? "Restart test" : shootTest ? "Shooting test" : liveTest ? "Live view test" : devTest ? "Develop test" : speedTest ? "Speed test" : settingsCheck ? "Camera settings check" : hardwareTest ? "Hardware develop test" : "Camera roll test";
+                s.probeSteps = lookTest ? LiveLookTest.STEPS : restartTest ? RestartTest.STEPS : shootTest ? ShootingTest.STEPS : liveTest ? LiveViewTest.STEPS : devTest ? DevelopTest.STEPS : speedTest ? SpeedTest.STEPS : settingsCheck ? SettingsCheck.STEPS : hardwareTest ? HardwareTest.STEPS : Probe.STEPS;
+                s.probePlan = lookTest ? Ui.LOOK_PLAN : restartTest ? Ui.RESTART_PLAN : shootTest ? Ui.SHOOT_PLAN : liveTest ? Ui.LIVE_PLAN : devTest ? Ui.DEVTEST_PLAN : speedTest ? Ui.SPEED_PLAN : settingsCheck ? Ui.SETTINGS_PLAN : hardwareTest ? Ui.HARDWARE_PLAN : Ui.PROBE_PLAN;
+                s.probeFooter = lookTest ? Ui.LOOK_FOOTER : restartTest ? Ui.RESTART_FOOTER : shootTest ? Ui.SHOOT_FOOTER : liveTest ? Ui.LIVE_FOOTER : devTest ? Ui.DEVTEST_FOOTER : speedTest ? Ui.SPEED_FOOTER : settingsCheck ? Ui.SETTINGS_FOOTER : hardwareTest ? Ui.HARDWARE_FOOTER : Ui.PROBE_FOOTER;
                 s.probeStage = probeStage;
                 s.probeStatus = probeStatus.clone();
                 s.probeDetail = probeDetail.clone();

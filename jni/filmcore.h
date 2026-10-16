@@ -23,7 +23,10 @@
 #define FL_TIME_TOTAL  4   /* wall time                                     */
 #define FL_TIME_CPU    5   /* CPU time summed over every thread             */
 #define FL_TIME_THREADS 6  /* threads the look ran on (block develop)       */
-#define FL_TIME_COUNT  7
+#define FL_TIME_WAIT   7   /* block develop: ms this thread waited for the helpers after its share */
+#define FL_TIME_ROWS   8   /* block develop: rows this thread looked itself (the rest: helpers)    */
+#define FL_TIME_HCPU   9   /* block develop: CPU ms of the helpers together                        */
+#define FL_TIME_COUNT  10
 
 typedef void (*fl_progress_fn)(void *ctx, int percent);
 

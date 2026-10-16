@@ -57,6 +57,19 @@ int sb_develop(void *src, const int *sg, void *dst, const int *dg, int block, co
 const char *sb_last_error(void);
 int sb_develop_inplace(void *img, const int *g, int block, const char *lut, const int *params, fl_progress_fn progress, void *pctx);
 int sb_verify_inplace(void *img, const int *g, int size);
+int sb_hash(void *img, const int *g, int block, unsigned long long *out, long long *out_us);
+int sb_speed(void *img, const int *g, int size, int count, int write_back, long long *out_us);
+
+/* the Develop test's hash, computed here straight from memory: each row's picture bytes as 32-bit words */
+static unsigned long long ref_hash(const unsigned char *mem, const int *g) {
+    unsigned long long hash = 1469598103934665603ULL;
+    for (int y = 0; y < g[1]; y++) {
+        const unsigned char *r = mem + g[4] + ((size_t)(g[6] + y) * g[2] + g[5]) * 2;
+        for (int k = 0; k + 4 <= g[0] * 2; k += 4)
+            hash = (hash ^ (r[k] | (unsigned)r[k + 1] << 8 | (unsigned)r[k + 2] << 16 | (unsigned)r[k + 3] << 24)) * 1099511628211ULL;
+    }
+    return hash;
+}
 
 /* the reference: the same picture through the core's copy-in / copy-out path, without the bridge */
 static unsigned char *g_src, *g_ref;
@@ -77,7 +90,7 @@ int main(int argc, char **argv) {
     int params[FL_PARAM_COUNT] = { -2, 1, 5, 2, 95, 7, 1 };
     if (argc > 3) params[FL_PARAM_THREADS] = atoi(argv[3]);   /* threads for the block develop */
     if (getenv("SB_SLOW")) sscanf(getenv("SB_SLOW"), "%lf,%lf", &slow_read, &slow_write);
-    int blocks[] = { 1, 65536, 262144, 1048576, 2097152 };
+    int blocks[] = { 1, 65536, 262144, 1048576, 2097152, 4194304 };
     fakemem src;
     d.err = jpeg_std_error(&e);
     jpeg_create_decompress(&d);
@@ -116,7 +129,7 @@ int main(int argc, char **argv) {
         fakemem *from = i == 2 ? &flat : &src;
         int *fromg = i == 2 ? fg : sg;
         dg[7] = dg[4] + dg[2] * dg[3] * 2;
-        for (b = 0; b < 5; b++) {
+        for (b = 0; b < 6; b++) {
             fakemem dst;
             dst.size = dg[7]; dst.type = 2; dst.mem = malloc(dst.size);
             memset(dst.mem, 0xA5, dst.size);        /* sentinel: padding must stay 0xA5 */
@@ -134,6 +147,18 @@ int main(int argc, char **argv) {
             }
             for (int k = 0; k < dg[4]; k++) if (dst.mem[k] != 0xA5) padding_ok = 0;
             int same = memcmp(pic, reference, (size_t)w * 2 * h) == 0;   /* against the copy path */
+            {   /* the Develop test's hash: the same at every block size, and as computed straight from memory */
+                unsigned long long hh = 0, want = ref_hash(dst.mem, dg);
+                long long us;
+                static unsigned long long first[3];
+                long r0 = calls_read, w0 = calls_write;
+                if (sb_hash(&dst, dg, blocks[b], &hh, &us) != 0 || hh != want || (b > 0 && hh != first[i]) || calls_write != w0) {
+                    printf("  FAIL  hash canvas %d block %d: %s\n", i, blocks[b], sb_last_error()); pass = 0;
+                }
+                if (b == 0) first[i] = hh;
+                int per = blocks[b] / (dg[2] * 2) > 0 ? blocks[b] / (dg[2] * 2) : 1;   /* whole rows per read */
+                if (calls_read - r0 != (h + per - 1) / per) { printf("  FAIL  hash read in too many calls\n"); pass = 0; }
+            }
             if (slow_read > 0 && blocks[b] == 2097152) {
                 int t[FL_TIME_COUNT];
                 fl_last_timing(t);
@@ -151,7 +176,7 @@ int main(int argc, char **argv) {
     for (i = 0; i < 2; i++) {
         int *g0 = i == 0 ? sg : fg;
         fakemem *orig = i == 0 ? &src : &flat;
-        for (b = 0; b < 5; b++) {
+        for (b = 0; b < 6; b++) {
             fakemem img;
             int ig[8];
             memcpy(ig, g0, sizeof ig);
@@ -177,6 +202,37 @@ int main(int argc, char **argv) {
             if (!same || !padding_ok || refused) pass = 0;
             free(pic); free(img.mem);
         }
+    }
+    /* the hash sees a one-byte change anywhere in the picture, and ignores the padding */
+    {
+        unsigned long long a = 0, b2 = 0, c = 0;
+        long long us;
+        int ok = sb_hash(&src, sg, 2097152, &a, &us) == 0;
+        src.mem[(size_t)(h / 2) * sg[2] * 2 + 7] ^= 1;
+        ok = ok && sb_hash(&src, sg, 2097152, &b2, &us) == 0 && b2 != a;
+        src.mem[(size_t)(h / 2) * sg[2] * 2 + 7] ^= 1;
+        src.mem[(size_t)(h / 2) * sg[2] * 2 + w * 2 + 3] ^= 0x40;   /* padding */
+        ok = ok && sb_hash(&src, sg, 2097152, &c, &us) == 0 && c == a;
+        src.mem[(size_t)(h / 2) * sg[2] * 2 + w * 2 + 3] ^= 0x40;
+        printf("  %s  hash: one changed byte %s, padding %s\n", ok ? "pass" : "FAIL", b2 != a ? "seen" : "MISSED", c == a ? "left out" : "COUNTED");
+        if (!ok) pass = 0;
+    }
+    /* raw transfer timing: bounded, wraps at the canvas end, writing back leaves the image as it was */
+    {
+        long long us[2];
+        unsigned char *before = malloc(src.size);
+        int sizes[] = { 65536, 1048576, 4194304 }, ok = 1;
+        memcpy(before, src.mem, src.size);
+        for (int k = 0; k < 3; k++) {
+            refused = 0;
+            int n = (int)((long long)sg[2] * sg[3] * 2 / sizes[k]) + 3;   /* walks past the end: must wrap */
+            if (sb_speed(&src, sg, sizes[k], n, 1, us) != 0 || refused) { printf("  FAIL  speed %d: %s\n", sizes[k], sb_last_error()); ok = 0; }
+        }
+        if (memcmp(before, src.mem, src.size) != 0) { printf("  FAIL  speed write-back changed the image\n"); ok = 0; }
+        if (sb_speed(&src, sg, 4194305, 1, 0, us) == 0 || sb_speed(&src, sg, 0, 1, 0, us) == 0) { printf("  FAIL  speed took a bad size\n"); ok = 0; }
+        printf("  %s  transfer timing: bounded, wraps, writes back unchanged\n", ok ? "pass" : "FAIL");
+        if (!ok) pass = 0;
+        free(before);
     }
     printf(pass ? "SONY BRIDGE OK\n" : "SONY BRIDGE FAILED\n");
     return pass ? 0 : 1;

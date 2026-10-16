@@ -5,7 +5,9 @@ final class FilmCore {
     static final int HIGHLIGHT = 0, SHADOW = 1, GRAIN = 2, GRAIN_SIZE = 3, QUALITY = 4, SEED = 5, THREADS = 6, COUNT = 7;
     static final int PREVIEW_FIT = 0, PREVIEW_CROP = 1;
     /** indexes into timing(): milliseconds spent decoding, applying the look, encoding, finishing, in total */
-    static final int T_READ = 0, T_LOOK = 1, T_WRITE = 2, T_FINISH = 3, T_TOTAL = 4, T_CPU = 5, T_THREADS = 6, T_COUNT = 7;
+    static final int T_READ = 0, T_LOOK = 1, T_WRITE = 2, T_FINISH = 3, T_TOTAL = 4, T_CPU = 5, T_THREADS = 6;
+    /** block develops only: ms Latent's thread waited for the helpers, rows it looked itself, the helpers' CPU ms */
+    static final int T_WAIT = 7, T_ROWS = 8, T_HCPU = 9, T_COUNT = 10;
 
     interface Progress { void onProgress(int percent); }
 
