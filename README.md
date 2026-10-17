@@ -230,6 +230,11 @@ test.
 
 ## Credits and licences
 
+Latent itself is MIT-licensed (`LICENSE`). The parts below keep their own licences.
+
+- Test photos (`testdata/`): Wikimedia Commons, CC BY-SA, by Michael Barera and Ted Eytan; see
+  `testdata/SOURCES.txt`. They're used only by the tests on a Mac.
+
 - JPEG coding: libjpeg-turbo 2.1.5.1, plain C build (`vendor/libjpeg-turbo-2.1.5.1`, IJG and BSD
   licences, see its LICENSE.md). This software is based in part on the work of the Independent JPEG
   Group.

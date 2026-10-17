@@ -26,9 +26,9 @@ per screen. They like the current designs.
 - `latent.keystore` signs every build. It's gitignored and must be kept, or new builds won't install
   over old ones.
 - In a git worktree, `latent.keystore` and `tools/pmca/` are missing (both gitignored). Link the key
-  from the main checkout first (`ln -s /Users/cam/Projects/latent/latent.keystore latent.keystore`),
+  from the main checkout first (`ln -s ~/Projects/latent/latent.keystore latent.keystore`),
   or `./build.sh` makes a new key and the APK won't install. Run the installer by its full path,
-  `/Users/cam/Projects/latent/tools/pmca/pmca-console-v0.18-osx`, from the worktree.
+  `~/Projects/latent/tools/pmca/pmca-console-v0.18-osx`, from the worktree.
 
 ## Build and test
 
