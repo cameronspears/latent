@@ -80,6 +80,8 @@ final class UiState implements Cloneable {
     float levelAngle;                  // degrees, positive when the scene's lines rise to the right
     String vfNote = "";                // a short word under the counter ("Grid and histogram", "Roll finished")
     String cardNote = "";              // under the film's name on its card, in place of the tagline
+    String fatal;                      // the viewfinder can't go on (a photo isn't saving): what to do, full screen; null normally
+    boolean coach;                     // the first visit: the viewfinder's keys, once, for a few seconds
 
     // Settings
     List<String[]> rows = new ArrayList<String[]>();   // {label, value}: value "on"/"off" draws a switch, "›" opens, "" is a heading

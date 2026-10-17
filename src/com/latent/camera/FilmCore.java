@@ -1,6 +1,9 @@
 package com.latent.camera;
 
-/** The native image core (jni/filmcore.c). Not thread-safe: call from one worker thread only. */
+/**
+ * The native image core (jni/filmcore.c). Its caches (films, grain, decoded previews) are shared and locked
+ * (v0.45.0), so any thread may call it; a frame composer (frameNew) belongs to one thread at a time.
+ */
 final class FilmCore {
     static final int HIGHLIGHT = 0, SHADOW = 1, GRAIN = 2, GRAIN_SIZE = 3, QUALITY = 4, SEED = 5, THREADS = 6, COUNT = 7;
     static final int PREVIEW_FIT = 0, PREVIEW_CROP = 1;
@@ -78,6 +81,12 @@ final class FilmCore {
     static native void prewarm(String lutPath, int[] params);
 
     /**
+     * A film file read and kept in the shared film cache (several films, least recently used dropped), so the
+     * next look on it, on any thread, needs no card read. Safe from any thread. 0, or -1 (lastError).
+     */
+    static native int cacheLut(String lutPath);
+
+    /**
      * Block develops remember recent per-pair lookups, 2^bits entries per thread (8..16), or don't (0, the
      * default). The picture is the same either way; the Develop test chooses whether it is faster.
      */
@@ -110,8 +119,15 @@ final class FilmCore {
 
     // ---- the viewfinder's frame composer (v0.38.0): one live JPEG to the screen's 16-bit picture in one go
     static final int F_LEVEL = 1, F_HIST = 2, F_TEMPORAL = 4;
+    /**
+     * F_STILL: after decoding, compare the frame's signature (info[FI_SIG..], FI_SIG_N cells of mean
+     * brightness, 8 across x 6 down, 0..255) with the one setStillRef gave; when no cell differs by more than
+     * its threshold, stop there and return 1 (nothing written to the screen bitmap: the scene is still).
+     * Without F_STILL the signature is still written to info, and the frame is composed as usual.
+     */
+    static final int F_STILL = 8;
     static final int FMT_565 = 0, FMT_4444 = 1;
-    static final int NO_READING = -999999, FI_OVERLAY = 69, FI_COUNT = 70;
+    static final int NO_READING = -999999, FI_OVERLAY = 69, FI_SIG = 70, FI_SIG_N = 48, FI_COUNT = 118;
     static final int TM_DECODE = 0, TM_READ = 1, TM_LOOK = 2, TM_COMPOSE = 3, TM_BLEND = 4, TM_DITHER = 5, TM_COUNT = 6;
 
     /** A composer for one thread (its buffers and its film); 0 if there's no memory. */
@@ -125,7 +141,8 @@ final class FilmCore {
      * (FMT_565 opaque, or FMT_4444 with shifts). Written into bitmap (an android.graphics.Bitmap, ow x oh, that format) when given,
      * else into out. jpeg null: the last frame again, with the overlay as it is now. info[FI_COUNT]: frame
      * size, level (NO_READING when not read), histogram, FI_OVERLAY the overlay generation laid in; tm
-     * [TM_COUNT] ms per stage. Returns 0, -1 (lastError), or -2 when bitmaps can't be written here.
+     * [TM_COUNT] ms per stage. Returns 0, 1 (F_STILL and the scene is still: nothing written), -1 (lastError),
+     * or -2 when bitmaps can't be written here.
      */
     static native int frame(long ctx, byte[] jpeg, int len, String lutPath, int[] params, int flags, int seq,
                             short[] out, Object bitmap, int ow, int oh, int aspect1000, int format,
@@ -133,6 +150,12 @@ final class FilmCore {
 
     /** This core's and its memory's speed, as a line for the log; bitmap (an android.graphics.Bitmap) is filled too, or null. */
     static native String probe(Object bitmap);
+
+    /**
+     * The still scene F_STILL compares against (FI_SIG_N cells, as frame() wrote them to info), and how far a
+     * cell may move and still count as still (0..255); sig null forgets it, and F_STILL then always composes.
+     */
+    static native void setStillRef(int[] sig, int threshold);
 
     /** Latent's type and fades laid over every frame from now on (argb as getPixels gives it, ow x oh); null clears. Its generation. */
     static native int setOverlay(int[] argb, int w, int h);

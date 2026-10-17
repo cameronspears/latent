@@ -19,6 +19,11 @@ final class Ui {
     static final int RED = 0xFFE0412F, RED2 = 0xFF8E2A20, RED3 = 0xFF3A110D, RED4 = 0xFF5C1A13;
 
     static final float L = 56, TOP = 50, FOOT = 444, H = 480;
+    /**
+     * The viewfinder's overlay (photoType) draws only in rows [0, OVL_TOP_END) and [OVL_BOTTOM_START, H) unless
+     * the grid is on, so the overlay thread renders, clears and reads back just those two bands.
+     */
+    static final int OVL_TOP_END = 64, OVL_BOTTOM_START = 384;
 
     static void draw(Gfx g, UiState s) {
         if (s.live) {   // live view shows through: only a quiet label over it
@@ -227,6 +232,19 @@ final class Ui {
                 .append(s.exposed).append('/').append(s.length).append('|').append(s.battery).append('|').append(s.vfNote).append('|')
                 .append(s.evEdit).append(s.ev).append('|').append(s.shutter).append('|').append(s.aperture).append('|')
                 .append(s.iso).append(s.isoAuto);
+        return k.toString();
+    }
+
+    /**
+     * What Latent's own window shows in the viewfinder (PART_WINDOW: the side bars, and what is drawn in
+     * them): when this is unchanged, the window isn't drawn again.
+     */
+    static String windowKey(UiState s) {
+        StringBuilder k = new StringBuilder(64);
+        k.append(s.mode).append('|').append(s.width).append('|').append(s.clean).append(s.liveThrough).append(s.lookLive).append('|')
+                .append(s.afMode).append('|').append(s.afArea).append('|').append(s.shotsLeft).append('|').append(s.afLamp)
+                .append(s.afState).append('|').append(s.evEdit).append(s.ev).append('|').append(s.developing).append('|')
+                .append(s.fatal).append('|').append(s.toast);
         return k.toString();
     }
 
