@@ -498,7 +498,7 @@ public class MainActivity extends Activity {
         rows.add(new String[] { "Camera", "", "" });
         rows.add(new String[] { "Settings check", "›", "settingsCheck" });
         rows.add(new String[] { "Speed test", "›", "speedTest" });
-        rows.add(new String[] { "Develop test", "›", "devTest" });
+        // the Develop test (devTest) answered its questions by v0.44.0 and saves two test photos a run: off the menu
         rows.add(new String[] { "Screen test", "›", "screenTest" });   // in place of the Live view test (v0.27: answered long ago)
         rows.add(new String[] { "Shooting test", "›", "shootTest" });
         rows.add(new String[] { "Restart test", "›", "restartTest" });
