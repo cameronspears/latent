@@ -32,8 +32,10 @@ To remove it later: **MENU → Application → Application Management → Manage
 - UP / DOWN sets the roll: 12, 24, 36 or ∞.
 - Press the centre button to load the film, or half-press to load it and go straight to shooting.
 
-**Shoot.** The camera back shows the frame counter. Half-press, or press the centre button, to go to
-the camera. Every photo you take is an exposure on the roll. Rolls count by the camera's photo
+**Shoot.** The camera back shows the frame counter. Half-press, or press the centre button, to open
+Latent's viewfinder: live view in the roll's film look (about 11 frames a second), the frame counter,
+exposure compensation (DOWN, then the wheel), and the film changed with the wheel (frame by frame on
+an ∞ roll). MENU in the viewfinder goes straight to the red darkroom. Every photo you take is an exposure on the roll. Rolls count by the camera's photo
 numbers (DSC04592, DSC04593, …), because file times can shift by hours between power-ons.
 
 **Develop.**
@@ -216,8 +218,9 @@ test.
 
 ## Known limits / not yet verified on the camera
 
-- **Speed:** a frame develops into the camera roll in about 7–8 s (v0.14.1 on), down from about 19 s
-  in v0.11.
+- **Speed:** a frame develops into the camera roll in about 6–7 s (v0.44), down from about 19 s
+  in v0.11. Live view with the look runs at about 11 frames a second (up to ~15) on this camera's
+  cores; the camera's own live view is faster because its image chip isn't open to apps.
 - **Portrait photos:** the orientation fix is confirmed on the A5100 (v0.12).
 - **Power cut during a save:** if the battery dies in the second between Sony's save and Latent
   recording it, that frame may develop again next time, leaving one extra photo in the camera roll.

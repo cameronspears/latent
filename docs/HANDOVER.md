@@ -39,7 +39,13 @@ per screen. They like the current designs.
 | Screen previews on the Mac | `tools/preview.sh`, renders to `out/preview/` |
 | Roll model tests | compile `src/.../Roll,Library,Stock,Probe,FilmCore` and `tests/.../RollTest` with the android.jar from the toolchain, then run `RollTest <empty dir>` |
 | Image core on the Mac | `tools/build-host.sh`, then `out/host/fltool` |
-| Sony memory bridge test | build `tools/sonytest.c` with `-DSB_HOST_TEST` (see `git log` for v0.25.0), then run it on a test JPEG and a LUT. Covers one and three threads, and in place |
+| Sony memory bridge test | `tools/sony-test.sh` (4 photos, 1 and 3 threads, the lookup memory, prewarm, under UBSan and Guard Malloc) |
+| JNI and the live frame composer | `tools/test-jni.sh testdata/STREET.JPG` (37+ checks: the composer, overlay maths, two threads) |
+| Viewfinder logic | `tools/viewfinder-test.sh`; roll model `tools/roll-test.sh`; sanitizer `tools/sanitize-test.sh testdata/X.JPG` |
+| Previews check the viewfinder's layers | `tools/preview.sh` fails if the overlay / screen / surface parts don't add up to the whole (scenes 8w, 8x) |
+
+Build with your own `TMPDIR` when another session may build too: `build.sh` works in `$TMPDIR/latent-build`,
+and two builds there at once mix their objects.
 
 ## Where things are
 
@@ -51,7 +57,10 @@ per screen. They like the current designs.
   The look runs in YCbCr, on three cores, with pipelined blocks.
 - `NeutralSettings.java`, `jni/settings_bridge.c`: neutral camera settings while a roll is loaded,
   with your own settings put back afterwards. Writes are limited to 11 allowlisted settings.
-- `ShootingTest.java`, `LiveViewTest.java`: on-camera diagnostics, under MENU, Camera.
+- `Viewfinder.java`: the live view with the film look (see below). `ScreenTest.java`, `ShootingTest.java`,
+  `LiveLookTest.java`, `RestartTest.java`, `DevelopTest.java`: on-camera checks (MENU, Camera).
+- `Relaunch.java`: restarts Latent (its own process) to develop after the viewfinder, drawing the darkroom.
+- `docs/DEVELOP-SPEED.md`: every darkroom speed idea since v0.38, with the camera's numbers.
 - `tools/make_luts.py`: the six looks (Natural, Portra, Classic Neg, Cuban Neg, Tri-X, Afterparty).
 
 ## What works on the camera today
@@ -64,7 +73,9 @@ per screen. They like the current designs.
 - Finished rolls develop as soon as Latent opens.
 - ∞ rolls develop in the background each time you come back.
 - MENU is one scrolling list.
-- A darkroom frame takes about 7–8 s. Startup takes about 0.2–0.4 s to the first frame.
+- A darkroom frame takes about 6–7 s (develop ~2.7 s, Sony's save ~1.75 s). Startup takes about
+  0.2–0.4 s to the first frame.
+- Latent's own viewfinder with the film look live: ~11 frames a second (up to ~15), v0.44.1.
 - Test shots are kept off rolls through `LATENT/IGNORE.TXT`.
 
 ## Camera facts learned the hard way
@@ -91,50 +102,48 @@ per screen. They like the current designs.
   Lighting's) stops the camera hardware from opening. The experiment is still in `ShootingTest`
   behind `CAPTURE_HOOK = false`. It's a closed topic; don't revisit it.
 
-## The viewfinder (v0.31.0-v0.32.1, on the camera)
+## The viewfinder (v0.44.1, on the camera)
 
-`Viewfinder.java` (camera, keys, catalogue), `Release.java` (the shutter button's logic),
-`Level.java` (steadying the level), `FilmCore.live` / `fl_level` in `jni/filmcore.c` (a live frame
-from memory with the look, histogram, horizon). Tests: `tools/viewfinder-test.sh` (host logic and the
-level on turned photos), `tools/test-jni.sh`, `tools/sanitize-test.sh`. Log: `LATENT/VIEWFIND.TXT`,
-written as it goes. Preview scenes `4c`, `5b`, `6c`, `8h`-`8p`.
+Shoot or a half-press opens Latent's viewfinder: live frames from the camera with the roll's film
+look on them, ~11 frames a second (up to ~15), Latent's HUD, the print developing in the corner,
+exposure compensation (DOWN, the wheel), the film changed with the wheel (per frame on ∞ rolls).
+MENU restarts Latent (Relaunch) to develop the new pictures in the red darkroom. Log:
+`LATENT/VIEWFIND.TXT` (a stats line every 10 s: ms per stage, frames per core, each core's load).
 
-**Works today (v0.32.1, confirmed by the user):** Shoot or a half-press opens Latent's viewfinder:
-the camera's own live view with Latent's HUD over it. Latent focuses (retries while held, Focus
-first in MENU > Shooting) and takes the picture (`burstableTakePicture`, `cancelTakePicture` in the
-shutter's answer); the camera stores it at the shutter. MENU hides the viewfinder and keeps the
-camera open (never reopened in one visit). Leaving Latent (onPause) closes it for good: camera
-released, process killed. The next open sees the new photos in the listing and develops them
-(the ∞-roll background develop, or a finished roll's darkroom).
+**How a frame is made (read before changing it):**
+- The camera's preview sequence gives 320 px JPEG frames (compression 1/8). The UI thread grabs
+  them (~10 ms) and hands each to a look thread: cores 2 and 1, and 3 at background priority.
+- Each look thread runs `fl_frame` (`jni/filmcore.c`), a composer per thread: decode straight into a
+  kept buffer, the film's look at 17 points (a 29 KB cube the cache holds), packed two channels a
+  word, then per screen pixel (540x480) a bilinear stretch, Latent's static type and fades laid in
+  (the overlay: drawn by Skia only when it changes, as runs), blue-noise dither to 4 bits a channel,
+  written straight into an RGB565 bitmap (libjnigraphics, opened at run time).
+- A presenter thread puts the newest bitmap up on a 16-bit SurfaceView over the picture's area and
+  draws what moves over it (focus, the print, notes): `UiState.PART_PICTURE`. Latent's screen draws
+  only the side bars (`PART_WINDOW`). The Screen test chose this (31.5 frames a second vs 20.9).
 
-**What the camera showed (read before changing any of this):**
-- **No picture is stored once the preview sequence (live JPEG frames) has been started in that
-  camera session.** v0.31.0 (frames running, app shutter), v0.31.1 (frames stopped and released
-  before the shutter), v0.31.2 (direct shutter, the camera's own button, before the first frame had
-  even arrived): every picture lost; releasing or reopening the camera with them pending froze the
-  body (it wouldn't switch off; battery pull). Hence `Viewfinder.LIVE_LOOK = false`: no film look and
-  no level on live view. The frames themselves work: 320 px, look ~140-190 ms, level reads fine.
-- **Reopening the camera within one process froze it twice** (7-10 s after a release, with a
-  picture possibly still pending). Hence MENU only hides the viewfinder.
-- **Leaving a camera app only pauses it**: no onStop / onDestroy came. Latent kills its own process
-  in onPause once the camera has been opened, so the next open is fresh (the image memory comes back
-  only when the process ends).
-- **The catalogue doesn't show the viewfinder's pictures while the camera is open** (8 s polls, every
-  300 ms, with or without the `exist_jpeg` filter), yet the Shooting test saw its picture 0.2 s after
-  the shutter. Not understood yet; pictures still count on the next open (by photo number).
-- **Direct shutter** starts and stops fine (27 ms); with it, the camera's AF reports arrive
-  (AutoFocusDoneListener: 1 lock, 0 clear, 2 can't, areas[] indices). `DIRECT_SHUTTER = false` now.
-- Exposure listeners work: `currentShutterSpeed_n/_d`, `currentAperture` (f x 100).
-- The load average on this body is 57-78 before Latent does anything.
+**Camera facts from this work (each cost an install or a battery pull):**
+- **The screen plane must be 16-bit (RGBA4444) while the camera is open:** with Latent's 32-bit OSD
+  the camera stores only the first picture (`Display.fullColour(false)` before opening).
+- **Never use core 0:** it is the camera's own. A look thread and the overlay thread there (v0.41-0.42)
+  starved its video path: live view tore into green and pink lines and the camera restarted itself.
+- **These cores are slow:** ~54 M dependent multiply-adds a second; memory reads ~60-90 MB/s. The
+  look is limited by memory traffic more than by arithmetic.
+- **Asking for a 16-bit window does nothing here** (setFormat); a SurfaceView with its own format works.
+- **Never free a bitmap a look thread may be writing:** a reaper waits for the threads (v0.41.0's crash).
+- **Never flush the catalogue while a picture may be storing.** The camera catalogues its pictures
+  itself within ~0.5-2 s.
+- **Image memory belongs to the camera while it is open,** so developing needs Latent to restart.
+- Sony's DSP preview plugin exists but needs Sony's DSP programs; none ship on this body. The
+  camera's own rendering (Creative Style, WB shift) could do looks natively, but the user ruled out
+  camera recipes.
 
-**Open (the user wants all of these):** the film look and the level on live view again (find a way
-the preview frames and storing coexist, or another frame source); prints in the corner that
-develop instead of staying latent; the camera back saying "develops the next time you open Latent"
-while Latent is open (develop without making the user leave, e.g. Latent restarting itself once the
-camera is given back); the wheel changing the look on a roll already started (now only on a fresh
-roll); exposure compensation in the viewfinder.
+**Off by choice:** the level (`Viewfinder.LEVEL`; the user didn't want the line), moving grain,
+the shutter blink, the exposure numbers brightening on a half-press.
 
 ## Card housekeeping
 
-`LATENT/FW` (with `FW/M0001.BIN` and `FW/MEMMAP.TXT`, the copied memory map), `LOGCAT.TXT`,
-`DARKPROC.TXT` and `LIVEFRM.JPG` are diagnostic leftovers, and the user can delete them. Roll 13 (Natural, ∞) is loaded; `LATENT/VIEWFIND.TXT` is the viewfinder's log.
+`LATENT/FW`, `LOGCAT.TXT`, `DARKPROC.TXT`, `VFLOG.TXT`, `LIVEVIEW.TXT`, `LIVELOOK.TXT` and `LIVEFRM.JPG` are
+diagnostic leftovers the user can delete. `LIVE.JPG` is one live frame kept each visit. The Develop
+test (off the menu since v0.44.1) left test photos listed in `LATENT/IGNORE.TXT`. If playback ever says
+"unable to display" on older photos, restarting the camera has fixed it (the files were intact).
