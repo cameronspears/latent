@@ -906,11 +906,16 @@ public class MainActivity extends Activity {
                 liveSurface.setVisibility(on ? View.VISIBLE : View.GONE);
                 screen.invalidate();
             }
-            public void changed() { screen.invalidate(); }
-            public void frame() {   // a new live frame: only the picture's area
+            public void changed() {
+                screen.invalidate();
+                if (vf != null && vf.onSurface()) presentPicture();
+            }
+            public void frame() {   // a new live frame: only the picture's area (or its own surface)
+                if (vf != null && vf.onSurface()) { presentPicture(); return; }
                 int w = screen.getWidth(), side = Math.round((logicalWidth - 720) / 2 * w / logicalWidth);
                 if (w <= 0 || side <= 0) screen.invalidate(); else screen.invalidate(side - 1, 0, w - side + 1, screen.getHeight());
             }
+            public void pictureGone() { dropPictureSurface(); screen.invalidate(); }
             public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
             public void shot(File photo, String film) { vfShot(photo, film); }
             public void hud(boolean on) { screen.setVisibility(on ? View.VISIBLE : View.INVISIBLE); }
@@ -926,8 +931,7 @@ public class MainActivity extends Activity {
             }
             public void closed(String why) {
                 vf = null;
-                // full colour again, the camera given back; not when Latent is about to start over (to develop)
-                if (!relaunchWhenClosed && !killWhenClosed) getWindow().setFormat(android.graphics.PixelFormat.RGBA_8888);
+                dropPictureSurface();   // the camera given back first
                 screen.setVisibility(View.VISIBLE);
                 if (relaunchWhenClosed) { relaunch(); return; }   // the camera is back: Latent starts again and develops
                 if (killWhenClosed) { killNow(); return; }
@@ -939,19 +943,63 @@ public class MainActivity extends Activity {
             }
         });
         // the picture's area on screen in real pixels: the 3:2 area (720 x 480 of the design space)
-        if (screen.getWidth() > 0) vf.setLiveSize(Math.round(720f * screen.getWidth() / logicalWidth), screen.getHeight());
-        // the window 16-bit while the camera is held (v0.39.2): the screen is 16-bit then anyway, and each frame's
-        // copy into the 32-bit window cost ~45 ms (writing to display memory). Changed before the camera opens:
-        // the window's new surface is made on the next pass, and the open follows it in the queue.
-        getWindow().setFormat(android.graphics.PixelFormat.RGB_565);
+        final int liveW = Math.round(720f * screen.getWidth() / logicalWidth);
+        if (screen.getWidth() > 0) vf.setLiveSize(liveW, screen.getHeight());
         final Viewfinder opening = vf;
-        screen.post(new Runnable() {
+        final Runnable open = new Runnable() {
             public void run() {
-                if (vf != opening) return;
+                if (vf != opening || vf.opened()) return;
                 vf.open();
                 screen.invalidate();
             }
-        });
+        };
+        int path = prefs.getInt(ScreenTest.P_PATH, 0);
+        if ((path == 2 || path == 3) && liveLook() && liveW > 0) {
+            // the picture on a 16-bit surface of its own, as the Screen test chose (31.5 frames a second against 20.9):
+            // made before the camera opens, which waits for it (at most 2 s, then the picture goes through Latent's screen)
+            try {
+                final android.view.SurfaceView pv = new android.view.SurfaceView(this);
+                pv.setZOrderOnTop(true);
+                pv.getHolder().setFormat(android.graphics.PixelFormat.RGB_565);
+                pv.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
+                    public void surfaceCreated(android.view.SurfaceHolder holder) {
+                        if (vf == opening && pictureView == pv) vf.pictureSurface(holder);
+                        ui.removeCallbacks(open);
+                        ui.post(open);
+                    }
+                    public void surfaceChanged(android.view.SurfaceHolder holder, int format, int w, int h) { }
+                    public void surfaceDestroyed(android.view.SurfaceHolder holder) { if (vf != null) vf.pictureSurface(null); }
+                });
+                android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(liveW, screen.getHeight());
+                lp.leftMargin = (screen.getWidth() - liveW) / 2;
+                lp.gravity = android.view.Gravity.LEFT | android.view.Gravity.TOP;
+                pictureView = pv;
+                root.addView(pv, lp);
+                ui.postDelayed(open, 2000);
+                return;
+            } catch (Throwable e) {
+                devLog("viewfinder: no picture surface (" + Probe.why(e) + ")");
+                dropPictureSurface();
+            }
+        }
+        screen.post(open);
+    }
+
+    private android.view.SurfaceView pictureView;   // the viewfinder's picture surface, while there is one
+    private final Runnable dropSurface = new Runnable() { public void run() { if (mode != PHOTO) { dropPictureSurface(); screen.invalidate(); } } };
+
+    private void dropPictureSurface() {
+        if (pictureView == null) return;
+        if (vf != null) vf.pictureSurface(null);
+        try { root.removeView(pictureView); } catch (Throwable ignored) { }
+        pictureView = null;
+    }
+
+    /** The viewfinder's state to its picture surface: what moves over the newest picture. UI thread. */
+    private void presentPicture() {
+        UiState s = state();
+        vf.layer(s);
+        vf.present(s);
     }
 
     /** One picture stored (photo is its file, or null when the catalogue didn't name it). */
@@ -1056,6 +1104,7 @@ public class MainActivity extends Activity {
         if (vf == null) return;
         ui.removeCallbacks(closeWhenFinished);
         int taken = Math.max(vfWaiting, vf.shots);   // listed or not yet: the hand-back waits for them
+        dropPictureSurface();   // it's on top of everything: the camera back and the darkroom show at once
         if (taken > 0) { restartToDevelop(taken + " picture(s) to develop"); return; }
         vf.hide();
         if (mode == PHOTO) mode = BACK;
@@ -2504,7 +2553,11 @@ public class MainActivity extends Activity {
             long ts = SystemClock.uptimeMillis();
             UiState s = state();
             drawStateMs += SystemClock.uptimeMillis() - ts;
-            if (mode == PHOTO && vf != null) vf.layer(s);   // the type over the picture comes in the frames themselves
+            if (mode == PHOTO && vf != null) {
+                vf.layer(s);   // the type over the picture comes in the frames themselves
+                if (vf.onSurface()) s.vfPart = UiState.PART_WINDOW;   // the picture and what's over it are on its own surface
+            }
+            if (pictureView != null && mode != PHOTO) ui.post(dropSurface);   // it's on top: away with it off the viewfinder
             Ui.draw(gfx, s);
             c.restore();
             drawCount++;

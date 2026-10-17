@@ -340,6 +340,34 @@ public class RenderScreens {
         ImageIO.write(dm, "png", new File(out, name + "-diff.png"));
         System.out.println(name + ": layered differs from whole on " + String.format("%.2f", diff * 100.0 / (w * 480)) + "% of pixels");
         if (diff * 100.0 / (w * 480) > 1.0) throw new IllegalStateException(name + ": the layers don't add up to the viewfinder");
+
+        // and in parts (v0.43.1): Latent's screen draws the side bars; the picture's own surface, on top, gets
+        // the composed picture and then what moves over it
+        BufferedImage parts = new BufferedImage(w, 480, BufferedImage.TYPE_INT_RGB);
+        g = parts.createGraphics();
+        UiState win = s.copy();
+        win.vfLayer = UiState.LAYER_SCREEN; win.vfPart = UiState.PART_WINDOW; win.liveImage = null;
+        Ui.draw(new HostGfx(g, fonts), win);
+        g.dispose();
+        BufferedImage surf = new BufferedImage(720, 480, BufferedImage.TYPE_INT_RGB);
+        g = surf.createGraphics();
+        g.drawImage(pic, 0, 0, null);
+        g.translate(-(s.width - 720) / 2, 0);
+        UiState sp = s.copy();
+        sp.vfLayer = UiState.LAYER_SCREEN; sp.vfPart = UiState.PART_PICTURE; sp.liveImage = null;
+        Ui.draw(new HostGfx(g, fonts), sp);
+        g.dispose();
+        g = parts.createGraphics();
+        g.drawImage(surf, Math.round((s.width - 720) / 2), 0, null);
+        g.dispose();
+        int pdiff = 0;
+        for (int y = 0; y < 480; y++) for (int x = 0; x < w; x++) {
+            int p = all.getRGB(x, y), q = parts.getRGB(x, y);
+            if (Math.abs((p >> 16 & 255) - (q >> 16 & 255)) + Math.abs((p >> 8 & 255) - (q >> 8 & 255)) + Math.abs((p & 255) - (q & 255)) > 24) pdiff++;
+        }
+        ImageIO.write(parts, "png", new File(out, name + "-parts.png"));
+        System.out.println(name + ": in parts differs from whole on " + String.format("%.2f", pdiff * 100.0 / (w * 480)) + "% of pixels");
+        if (pdiff * 100.0 / (w * 480) > 1.0) throw new IllegalStateException(name + ": the parts don't add up to the viewfinder");
     }
 
     /** With 'video' drawn first where the camera's live view would be (3:2, full height, centred). */

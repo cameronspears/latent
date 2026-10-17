@@ -53,6 +53,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         void changed();
         /** Only the picture changed (a new live frame): redraw just its area. */
         void frame();
+        /** The picture's own surface can't be used (the look is off): take it away, so the camera's view shows. */
+        void pictureGone();
         /** Live view is on: the shutter button works from now. */
         void live();
         /**
@@ -279,7 +281,13 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      */
     static final boolean SHOOT_16BIT = true;
 
+    private boolean openCalled;
+
+    boolean opened() { return openCalled; }
+
     void open() {
+        if (openCalled) return;
+        openCalled = true;
         opened = true;
         if (SHOOT_16BIT) Display.fullColour(false);
         log.append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())).append(" viewfinder\r\n");
@@ -563,6 +571,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     /** The camera's own live view from now on, with a word on the screen. */
     private void noLook(String why) {
+        if (pictureHolder != null) host.pictureGone();
         if (lookFailed) return;
         lookFailed = true;
         lookOn = false;
@@ -684,7 +693,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private int takeBitmap() {
         synchronized (shown16) {
             for (int i = 0; i < shown16.length; i++) {
-                if (i == front16 || (posted16 & 1 << i) != 0) continue;
+                if (i == front16 || i == presenting || (posted16 & 1 << i) != 0) continue;
                 posted16 |= 1 << i;
                 return i;
             }
@@ -864,6 +873,84 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             }
         }
         note(b.toString());
+    }
+
+    // ---- the picture on a 16-bit surface of its own (v0.43.1). The Screen test: 31.5 frames a second there against
+    // 20.9 through Latent's screen, whose copy of each picture into its 32-bit window took ~45 ms of the UI thread.
+    // A presenter thread puts the newest picture up and draws what moves over it; Latent's screen keeps the side bars.
+
+    private volatile SurfaceHolder pictureHolder;
+    private final Object presentLock = new Object();
+    private UiState presentState;
+    private boolean presentWanted;
+    private volatile int presenting = -1;   // the bitmap being copied up: no look thread writes it meanwhile
+    private Thread presenter;
+    private int presents, presentMsSum, statPresents, statPresentMs;
+
+    /** UI thread: the picture's surface is ready (null: it's gone). */
+    void pictureSurface(SurfaceHolder h) {
+        pictureHolder = h;
+        if (h != null && presenter == null) {
+            presenter = new Thread(new Runnable() { public void run() { presentLoop(); } }, "presenter");
+            presenter.start();
+            note("the picture on its own 16-bit surface");
+            synchronized (presentLock) { presentWanted = true; presentLock.notifyAll(); }   // black until the first frame
+        }
+        if (h == null) synchronized (presentLock) { presentLock.notifyAll(); }
+    }
+
+    /** The picture goes up on its own surface (not through Latent's screen). */
+    boolean onSurface() { return pictureHolder != null && lookOn && !lookFailed && !sequenceStopped && !closed; }
+
+    /** UI thread: the newest state, to draw over the newest picture. */
+    void present(UiState s) {
+        s.vfPart = UiState.PART_PICTURE;
+        synchronized (presentLock) { presentState = s; presentWanted = true; presentLock.notifyAll(); }
+    }
+
+    private void presentLoop() {
+        AndroidGfx gfx = new AndroidGfx(activity.getAssets());
+        while (true) {
+            UiState s;
+            synchronized (presentLock) {
+                while (!presentWanted && !closed && pictureHolder != null) {
+                    try { presentLock.wait(); } catch (InterruptedException e) { return; }
+                }
+                if (closed || pictureHolder == null) return;
+                presentWanted = false;
+                s = presentState;
+            }
+            SurfaceHolder h = pictureHolder;
+            int f;
+            synchronized (shown16) { f = front16; presenting = f; }
+            long t = SystemClock.uptimeMillis();
+            try {
+                Bitmap b = f >= 0 ? shown16[f] : null;
+                if (h == null) continue;
+                android.graphics.Canvas c = h.lockCanvas();
+                if (c == null) continue;
+                try {
+                    if (b == null || b.isRecycled()) { c.drawColor(0xFF000000); continue; }   // no frame yet: black, not what was there
+                    c.drawBitmap(b, 0, 0, null);
+                    if (s != null) {
+                        c.save();
+                        c.scale(b.getWidth() / 720f, b.getHeight() / 480f);   // Latent's layout, the picture's 720 x 480 of it
+                        c.translate(-(s.width - 720) / 2, 0);
+                        gfx.begin(c);
+                        Ui.draw(gfx, s);
+                        c.restore();
+                    }
+                } finally {
+                    h.unlockCanvasAndPost(c);
+                }
+                presents++;
+                presentMsSum += SystemClock.uptimeMillis() - t;
+            } catch (Throwable e) {
+                if (presents < 3) note("presenter: " + Probe.why(e));
+            } finally {
+                synchronized (shown16) { presenting = -1; }
+            }
+        }
     }
 
     /** A frame of the look is ready to show. */
@@ -1770,6 +1857,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                     long until = SystemClock.uptimeMillis() + 3000;
                     for (Looker k : lookers) if (k != null) stopped &= k.exec.awaitTermination(Math.max(1, until - SystemClock.uptimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS);
                     stopped &= overlayer.awaitTermination(Math.max(1, until - SystemClock.uptimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS);
+                    Thread p = presenter;
+                    if (p != null) { synchronized (presentLock) { presentLock.notifyAll(); } p.join(Math.max(1, until - SystemClock.uptimeMillis())); stopped &= !p.isAlive(); }
                 } catch (InterruptedException e) {
                     stopped = false;
                 }
@@ -1821,6 +1910,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     /** The live frames stop for good (the camera's own live view shows). */
     private void pauseFrames() {
+        if (pictureHolder != null) host.pictureGone();
         ui.removeCallbacks(poll);
         if (!sequenceStopped) { stopSequence(); sequenceStopped = true; }
         host.changed();
@@ -1885,7 +1975,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 statFramesBy[i] = framesBy[i];
             }
             note("live: " + n + " frames in " + (now - statsAt) / 1000 + " s, " + look + " ms each (" + st + ") on " + cores + ", grab " + grab + " ms, "
-                    + draws + " draws of " + (draws > 0 ? drawMsSum / draws : 0) + " ms (picture " + (draws > 0 ? blitMsSum / draws : 0) + "), cores " + coreLoad() + ", "
+                    + draws + " draws of " + (draws > 0 ? drawMsSum / draws : 0) + " ms (picture " + (draws > 0 ? blitMsSum / draws : 0) + "), "
+                    + (pictureHolder != null ? (presents - statPresents) + " put up on the surface, " + (presents - statPresents > 0 ? (presentMsSum - statPresentMs) / (presents - statPresents) : 0) + " ms each, " : "")
+                    + "cores " + coreLoad() + ", "
                     + (overlaysMade - statOverlays) + " overlays of "
                     + (overlaysMade > 0 ? overlayMsSum / overlaysMade : 0) + " ms, Latent's CPU "
                     + (cpu >= 0 && statCpu >= 0 ? (cpu - statCpu) * 100 / Math.max(1, now - statsAt) + "%" : "?") + ", load " + loadAvg()
@@ -1902,6 +1994,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         statFrames = frames;
         statLookMs = lookMsSum;
         statOverlays = overlaysMade;
+        statPresents = presents;
+        statPresentMs = presentMsSum;
         grabs = 0;
         grabMsSum = 0;
         draws = 0;

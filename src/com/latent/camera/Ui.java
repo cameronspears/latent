@@ -26,7 +26,8 @@ final class Ui {
             return;
         }
         if (s.mode == UiState.PHOTO && s.vfLayer == UiState.LAYER_OVERLAY) { photo(g, s); return; }   // the type over the picture, alone
-        if (s.mode == UiState.PHOTO && (s.liveThrough || s.liveImage != null)) {   // the picture fills its area: black bars only
+        if (s.mode == UiState.PHOTO && s.vfPart == UiState.PART_PICTURE) { photo(g, s); toast(g, s); return; }   // over the picture, on its surface
+        if (s.mode == UiState.PHOTO && (s.liveThrough || s.liveImage != null || s.vfPart == UiState.PART_WINDOW)) {   // the picture fills its area: black bars only
             float iw = H * 1.5f, ix = (s.width - iw) / 2;
             g.rect(0, 0, ix, H, BG);
             g.rect(ix + iw, 0, s.width - ix - iw, H, BG);
@@ -131,8 +132,8 @@ final class Ui {
         int accent = f != null ? f.accent : INK;
         // layers: 'over' is Latent's type and fades over the picture (in the frames themselves when the screen
         // draws SCREEN), 'under' the picture and what moves with it
-        boolean over = s.vfLayer != UiState.LAYER_SCREEN, under = s.vfLayer != UiState.LAYER_OVERLAY;
-        if (under) {
+        boolean over = s.vfLayer != UiState.LAYER_SCREEN && s.vfPart != UiState.PART_WINDOW, under = s.vfLayer != UiState.LAYER_OVERLAY;
+        if (under && s.vfPart == UiState.PART_ALL) {
             if (s.liveImage != null && s.liveExact) g.imageExact(s.liveImage, ix, 0, iw, H);
             else if (s.liveImage != null) g.image(s.liveImage, ix, 0, iw, H, false);
             else if (!s.liveThrough) g.rect(ix, 0, iw, H, 0xFF0B0B0A);
@@ -140,7 +141,7 @@ final class Ui {
         if (over) photoType(g, s, f, accent, ix, iw, ir);
         if (under) photoMoving(g, s, f, ix, iw, ir);
         // ---- the look, large, for a moment after the wheel turns (a Fuji film simulation answering its dial)
-        if (under && s.lookShown && f != null) lookCard(g, s, f);
+        if (under && s.vfPart != UiState.PART_WINDOW && s.lookShown && f != null) lookCard(g, s, f);
     }
 
     /** Over the picture and still: the fades, the film, the counter, the battery, exposure (the viewfinder's overlay). */
@@ -191,7 +192,9 @@ final class Ui {
     /** What moves, drawn over the picture every frame: the histogram, the side bars, the level, focus, the print. */
     private static void photoMoving(Gfx g, UiState s, UiState.Film f, float ix, float iw, float ir) {
         int accent = f != null ? f.accent : INK;
-        if (s.hist != null) histogram(g, s.hist, ir - 18 - 112, 54, 112, 40);
+        boolean bars = s.vfPart != UiState.PART_PICTURE;
+        if (s.vfPart != UiState.PART_WINDOW) photoMovingPicture(g, s, ix, iw, ir, accent);
+        if (!bars) return;
 
         // ---- the side bars: focus mode on the left, photos left on the card on the right
         if (!s.clean) {
@@ -200,7 +203,11 @@ final class Ui {
             sideLabel(g, ir + ix / 2, 214, s.shotsLeft >= 0 ? String.valueOf(s.shotsLeft) : "", "LEFT");
         }
         if (s.afLamp) lamp(g, ir + ix / 2, 268, s.afState == 1 ? INK : INK2);
+    }
 
+    /** What moves over the picture: the histogram, the level, focus, its dot, the print. */
+    private static void photoMovingPicture(Gfx g, UiState s, float ix, float iw, float ir, int accent) {
+        if (s.hist != null) histogram(g, s.hist, ir - 18 - 112, 54, 112, 40);
         // ---- the level, then focus (both out of the way while the look card is up)
         if (s.levelShown && !s.lookShown) level(g, s, ix + iw / 2, H / 2);
         if (!s.lookShown) afBrackets(g, s, ix, iw);

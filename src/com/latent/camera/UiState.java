@@ -40,6 +40,13 @@ final class UiState implements Cloneable {
      */
     static final int LAYER_ALL = 0, LAYER_OVERLAY = 1, LAYER_SCREEN = 2;
     int vfLayer;
+    /**
+     * Where the viewfinder is drawn (v0.43.1): PART_ALL one screen; with the picture on a 16-bit surface of
+     * its own, PART_WINDOW is Latent's screen (the side bars only: the surface covers the rest) and
+     * PART_PICTURE the surface (what moves over the picture, and notes; the picture itself is put up first).
+     */
+    static final int PART_ALL = 0, PART_WINDOW = 1, PART_PICTURE = 2;
+    int vfPart;
 
     /** A shallow copy (the lists shared: they're not changed once the state is built). */
     UiState copy() {
