@@ -819,10 +819,10 @@ final class Ui {
 
     static final String[] DEVTEST_PLAN = {
             "Decodes your newest photo in hardware and makes an output image, exactly as the darkroom does.",
-            "Develops it six times, taking turns: on cores 1, 2 and 3 as today, and with core 0 helping too, below the camera's own work there. Every picture byte is checked.",
-            "Saves nothing: no new photo, the original only read. If core 0 makes it faster and identical, the darkroom uses it from now on.",
+            "Develops it twelve times, taking turns: as today, and with each core remembering colours it has already worked out, at three sizes. Every picture byte is checked.",
+            "Saves nothing: no new photo, the original only read. If remembering is faster and identical, the darkroom uses it from now on.",
     };
-    static final String DEVTEST_FOOTER = "About a minute. If the camera hangs, remove the battery. Log: LATENT/DEVTEST.TXT.";
+    static final String DEVTEST_FOOTER = "About two minutes. If the camera hangs, remove the battery. Log: LATENT/DEVTEST.TXT.";
 
     static final String[] SETTINGS_PLAN = {
             "Reads your white balance, its fine-tune grid, and your Creative Style, the settings the camera keeps between uses.",

@@ -90,6 +90,9 @@ int main(int argc, char **argv) {
     int params[FL_PARAM_COUNT] = { -2, 1, 5, 2, 95, 7, 1 };
     if (argc > 3) params[FL_PARAM_THREADS] = atoi(argv[3]);   /* threads for the block develop */
     if (getenv("SB_SLOW")) sscanf(getenv("SB_SLOW"), "%lf,%lf", &slow_read, &slow_write);
+    int warm = getenv("SB_WARM") != NULL;   /* each develop's film made ready first, on its own thread (fl_prewarm) */
+    const char *other = warm && strlen(getenv("SB_WARM")) > 1 ? getenv("SB_WARM") : argv[2];   /* SB_WARM=F.cub: some blocks warm the wrong film */
+    if (getenv("SB_MEMO")) fl_set_pair_memo(atoi(getenv("SB_MEMO")));   /* bits: the block develops remember lookups; the reference never does */
     int blocks[] = { 1, 65536, 262144, 1048576, 2097152, 4194304 };
     fakemem src;
     d.err = jpeg_std_error(&e);
@@ -134,6 +137,7 @@ int main(int argc, char **argv) {
             dst.size = dg[7]; dst.type = 2; dst.mem = malloc(dst.size);
             memset(dst.mem, 0xA5, dst.size);        /* sentinel: padding must stay 0xA5 */
             calls_read = calls_write = refused = 0;
+            if (warm) { if (b % 2) fl_forget_lut(); fl_prewarm(b % 3 == 2 ? other : argv[2], params); }   /* odd: from cold; every third: the wrong film */
             if (sb_develop(from, fromg, &dst, dg, blocks[b], argv[2], params, NULL, NULL) != 0) {
                 printf("  FAIL  canvas %s block %d: %s\n", i == 1 ? "padded" : i == 2 ? "same" : "contiguous", blocks[b], sb_last_error());
                 pass = 0; free(dst.mem); continue;
@@ -185,6 +189,7 @@ int main(int argc, char **argv) {
             if (i == 0) for (y = 0; y < h; y++) memset(img.mem + (size_t)y * sg[2] * 2 + w * 2, 0xA5, (size_t)(sg[2] - w) * 2);   /* padding sentinel */
             calls_read = calls_write = refused = 0;
             if (sb_verify_inplace(&img, ig, blocks[b] < 65536 ? 65536 : blocks[b]) != 0) { printf("  FAIL  in place verify %d: %s\n", blocks[b], sb_last_error()); pass = 0; free(img.mem); continue; }
+            if (warm) fl_prewarm(argv[2], params);
             if (sb_develop_inplace(&img, ig, blocks[b], argv[2], params, NULL, NULL) != 0) {
                 printf("  FAIL  in place %s block %d: %s\n", i == 0 ? "padded" : "unpadded", blocks[b], sb_last_error());
                 pass = 0; free(img.mem); continue;

@@ -508,8 +508,7 @@ public class MainActivity extends Activity {
 
     /** What the chosen row does, in a line at the foot of Settings. */
     private String settingsFooter(String action) {
-        if (action.equals("cores")) return !prefs.getBoolean("multicoreOk", false) ? "Run the Speed test first: it checks the other cores."
-                : prefs.getBoolean(DevelopTest.P_CORE0, false) ? "Develops on cores 1, 2 and 0 as well, below the camera's own work." : "Develops on cores 1 and 2 as well. Core 0 is left to the camera.";
+        if (action.equals("cores")) return prefs.getBoolean("multicoreOk", false) ? "Develops on cores 1 and 2 as well. Core 0 is left to the camera." : "Run the Speed test first: it checks the other cores.";
         if (action.equals("neutral")) return "Every look starts from the same picture. Your settings come back after.";
         if (action.equals("viewfinder")) return viewfinderOn() ? "Shoot stays in Latent. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
         if (action.equals("liveLook")) return liveLook() ? "Live view shows the film, with the level. Turn it off for the camera's own view."
@@ -631,11 +630,9 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** Threads for the look: 3 (Latent's core plus helpers on cores 1 and 2) once the Speed test has checked them, 4 (core 0 too) once the Develop test chose it, unless switched off. */
+    /** Threads for the look: 3 (Latent's core plus helpers on cores 1 and 2) once the Speed test has checked them, unless switched off. */
     private int developCores() {
-        if (!prefs.getBoolean("multicoreOk", false)) return 1;
-        int n = Math.max(1, Math.min(3, prefs.getInt("cores", 3)));
-        return n == 3 && prefs.getBoolean(DevelopTest.P_CORE0, false) ? 4 : n;   // core 0 as well, once the Develop test chose it
+        return prefs.getBoolean("multicoreOk", false) ? Math.max(1, Math.min(3, prefs.getInt("cores", 3))) : 1;   // never core 0: the camera's (v0.42.2)
     }
 
     // camera roll test (phase 1)
@@ -781,7 +778,7 @@ public class MainActivity extends Activity {
         worker.execute(new Runnable() {
             public void run() {
                 if (devTest) {
-                    new DevelopTest(MainActivity.this, card, stock, prefs, versionName(), listener).run();
+                    new DevelopTest(MainActivity.this, card, stock, prefs, developCores(), versionName(), listener).run();
                 } else if (speedTest) {
                     new SpeedTest(card, stock, prefs, listener).run();
                 } else if (settingsCheck) {
@@ -1296,6 +1293,7 @@ public class MainActivity extends Activity {
                 // developing into the camera roll needs the catalogue and a verified memory path
                 FilmCore.setVariant(prefs.getInt("lookVariant", 0));   // the inner loop the speed test chose
                 FilmCore.setFastCube(true);   // film files read Latent's way: identical on the camera, row for row, for every film (v0.39.1)
+                FilmCore.setPairMemo(prefs.getInt(DevelopTest.P_MEMO, 0));   // lookups remembered, if the Develop test chose it
                 StringBuilder hl = new StringBuilder();
                 HardwareDevelop h = new HardwareDevelop(MainActivity.this, card, hl, null);
                 try {
@@ -1396,6 +1394,19 @@ public class MainActivity extends Activity {
         final int frame = next;
         final File src = r.source(frame), out = r.output(frame), prv = r.preview(out);
         devSource = src;
+        // the frame after this one: its film is made ready while Sony saves this one (FilmCore.prewarm)
+        int after = -1;
+        for (int i = 0; i < view.length && after < 0; i++) if (i != frame && !failed.contains(i) && view[i] == null) after = i;
+        Stock nextStock = after < 0 ? null : Stock.byId(stocks, r.stockFor(after));
+        final String nextLut = after < 0 || nextStock == null ? null : nextStock.lut.getPath();
+        final int[] nextParams = new int[FilmCore.COUNT];
+        if (nextStock != null) {
+            nextParams[FilmCore.HIGHLIGHT] = nextStock.highlight; nextParams[FilmCore.SHADOW] = nextStock.shadow;
+            nextParams[FilmCore.GRAIN] = nextStock.grain; nextParams[FilmCore.GRAIN_SIZE] = nextStock.grainSize;
+        } else {
+            nextParams[FilmCore.GRAIN] = 4; nextParams[FilmCore.GRAIN_SIZE] = 1;   // as params() gives a frame with no film
+        }
+        final boolean prepareNext = after >= 0;
         final String film = r.stockFor(frame);   // on an endless roll, the film this frame was shot in
         final Stock stock = Stock.byId(stocks, film);
         devFrame = frame;
@@ -1436,8 +1447,10 @@ public class MainActivity extends Activity {
                         int[] hp = p.clone();
                         hp[FilmCore.THREADS] = developCores();   // the look's threads (the software fallback keeps its own)
                         final long draws0 = drawCount, drawMs0 = drawMs, stateMs0 = drawStateMs;
+                        h.beforeSave = !prepareNext ? null : new Runnable() { public void run() { FilmCore.prewarm(nextLut, nextParams); } };
                         HardwareDevelop.Print print = h.develop(src, lut, hp, progress);
-                        final String draws = " setup=" + h.look[FilmCore.T_SETUP] + " draws=" + (drawCount - draws0) + "/" + (drawMs - drawMs0) + "ms"
+                        h.beforeSave = null;
+                        final String draws = " setup=" + h.look[FilmCore.T_SETUP] + (h.look[FilmCore.T_WARM] != 0 ? " (ready)" : "") + " draws=" + (drawCount - draws0) + "/" + (drawMs - drawMs0) + "ms"
                                 + " (state " + (drawStateMs - stateMs0) + "ms)";
                         made = print.file;
                         r.setPrint(frame, print.file);
@@ -1453,7 +1466,7 @@ public class MainActivity extends Activity {
                                 + " loop=" + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, prefs.getInt("lookVariant", 0)))]
                                 + " rows=" + (SonyMemory.lastDirect() ? "direct" : "gathered") + " block=" + HardwareDevelop.block() / 1024 + "K"
                                 + " threads=" + h.look[FilmCore.T_THREADS] + (FilmCore.helperNote().length() > 0 ? " (" + FilmCore.helperNote() + ")" : "")
-                                + draws, System.currentTimeMillis() - t0);
+                                + draws + " memo=" + prefs.getInt(DevelopTest.P_MEMO, 0), System.currentTimeMillis() - t0);
                     } catch (Throwable e) {
                         hw = null;
                         devLog(src.getName() + ": camera roll develop failed (" + Probe.why(e) + "); developing in software");

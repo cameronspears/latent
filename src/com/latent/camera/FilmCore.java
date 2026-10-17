@@ -7,7 +7,7 @@ final class FilmCore {
     /** indexes into timing(): milliseconds spent decoding, applying the look, encoding, finishing, in total */
     static final int T_READ = 0, T_LOOK = 1, T_WRITE = 2, T_FINISH = 3, T_TOTAL = 4, T_CPU = 5, T_THREADS = 6;
     /** block develops only: ms Latent's thread waited for the helpers, rows it looked itself, the helpers' CPU ms */
-    static final int T_WAIT = 7, T_ROWS = 8, T_HCPU = 9, T_SETUP = 10, T_COUNT = 11;   /* T_SETUP: ms before the first block */
+    static final int T_WAIT = 7, T_ROWS = 8, T_HCPU = 9, T_SETUP = 10, T_WARM = 11, T_COUNT = 12;   /* T_SETUP: ms before the first block; T_WARM: 1 if its film was ready */
 
     interface Progress { void onProgress(int percent); }
 
@@ -69,6 +69,19 @@ final class FilmCore {
      * camera's check found every row of every film identical) or sscanf (false).
      */
     static native void setFastCube(boolean on);
+
+    /**
+     * The next develop's film (lutPath, highlight, shadow, grain, grain size from params) made ready on a
+     * thread of its own while this thread waits on something else: Sony's encoder. Returns at once; the
+     * next look waits for it if it isn't done. The picture is the same either way.
+     */
+    static native void prewarm(String lutPath, int[] params);
+
+    /**
+     * Block develops remember recent per-pair lookups, 2^bits entries per thread (8..16), or don't (0, the
+     * default). The picture is the same either way; the Develop test chooses whether it is faster.
+     */
+    static native void setPairMemo(int bits);
 
     /** The cached film forgotten: the next develop reads its file from the card again. */
     static native void forgetLut();

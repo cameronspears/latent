@@ -20,36 +20,41 @@ import java.util.Locale;
  * that touches the camera's image memory, so a hang still leaves a record.
  *
  * Ideas so far: v0.38 transfer size (no gain, 2 MB kept: P_BLOCK); v0.39 film files read without sscanf
- * (-324 ms a new film; always on since v0.42.0, after the setting was lost in a crash). v0.39.1 also showed the look is now the limit: Latent's
- * thread waited ~20 ms a develop for the helpers on cores 1 and 2, each busy ~4.5 s.
- * This version's idea (v0.41.0): a third helper on core 0, the camera's own core, at the helpers' low
- * priority (the camera's work still comes first there). Rows are independent, so the picture can't
- * depend on it; every develop is hashed all the same.
+ * (-324 ms a new film; always on since v0.42.0). v0.39.1 also showed the look is now the limit: Latent's
+ * thread waited ~20 ms a develop for the helpers on cores 1 and 2, each busy ~4.5 s. v0.41.0's third
+ * helper on core 0 was dropped untried: core 0 is the camera's (v0.42.2).
+ * This version's idea (v0.43.0): each look thread remembers its recent per-pair lookups (brightness, Cb,
+ * Cr -> the tetrahedron's result), so a colour met again costs one small read instead of four table
+ * nodes and the arithmetic. On the test photos a 4K-entry memory finds 38-71% of the lookups left after
+ * the previous-pair reuse; on a Mac that was -12% to +15% by photo, so the camera decides, at three sizes.
+ * A remembered entry is exactly what the lookup gives: every develop is hashed all the same.
  */
 final class DevelopTest {
-    static final String[] STEPS = { "Test picture", "Memory check", "Today's (3 cores)", "With core 0", "Same picture", "Darkroom" };
-    static final int S_PICTURE = 0, S_MEMORY = 1, S_FIRST = 2, S_SAME = 4, S_RESULT = 5;
+    static final String[] STEPS = { "Test picture", "Memory check", "Today's (no memory)", "1K memory", "4K memory", "16K memory",
+            "Same picture", "Darkroom" };
+    static final int S_PICTURE = 0, S_MEMORY = 1, S_FIRST = 2, S_SAME = 6, S_RESULT = 7;
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
-    /** The ways timed, today's first: threads for the look (Latent's core plus helpers on 1, 2, then 0). */
-    static final int[] THREADS = { 3, 4 };
+    /** The ways timed, today's first: lookup memory per thread, 2^bits entries (0 = none). */
+    static final int[] WAYS = { 0, 10, 12, 14 };
     static final int ROUNDS = 3;
     /** A way is only kept when its median develop is this much faster than today's (ms, and per cent). */
     static final int MIN_GAIN_MS = 120, MIN_GAIN_PCT = 3;
     /** The darkroom's transfer size, as v0.38's test chose it (HardwareDevelop.DARKROOM_BLOCK until then). */
     static final String P_BLOCK = "developBlock";
-    /** The look also runs on core 0 (four threads), once this test has shown it helps. */
-    static final String P_CORE0 = "core0";
+    /** Lookup memory per look thread, 2^bits entries (0 = none), as this test chooses. */
+    static final String P_MEMO = "pairMemo";
 
     private final Context ctx;
     private final File card;
     private final Stock stock;
     private final SharedPreferences prefs;
     private final Probe.Listener out;
+    private final int threads;
     private final String version;
     private final StringBuilder log = new StringBuilder();
 
-    DevelopTest(Context ctx, File card, Stock stock, SharedPreferences prefs, String version, Probe.Listener out) {
-        this.ctx = ctx; this.card = card; this.stock = stock; this.prefs = prefs; this.version = version; this.out = out;
+    DevelopTest(Context ctx, File card, Stock stock, SharedPreferences prefs, int threads, String version, Probe.Listener out) {
+        this.ctx = ctx; this.card = card; this.stock = stock; this.prefs = prefs; this.threads = threads; this.version = version; this.out = out;
     }
 
     /** The step under way: a failure is shown there. */
@@ -94,21 +99,20 @@ final class DevelopTest {
         };
         final HardwareDevelop hw = new HardwareDevelop(ctx, card, log, hwSteps);
         try {
-            if (!prefs.getBoolean("multicoreOk", false)) { report(S_PICTURE, FAIL, "run the Speed test first: it checks the other cores"); return finish(); }
             List<File> photos = Library.photos(card);
             if (photos.isEmpty()) { report(S_PICTURE, FAIL, "no photo on the card"); return finish(); }
             final File photo = photos.get(0);
             final int[] p = new int[FilmCore.COUNT];
             p[FilmCore.HIGHLIGHT] = stock.highlight; p[FilmCore.SHADOW] = stock.shadow;
             p[FilmCore.GRAIN] = stock.grain; p[FilmCore.GRAIN_SIZE] = stock.grainSize;
-            p[FilmCore.QUALITY] = 95; p[FilmCore.SEED] = 1;
+            p[FilmCore.QUALITY] = 95; p[FilmCore.SEED] = 1; p[FilmCore.THREADS] = threads;   // the darkroom's threads
             int variant = prefs.getInt("lookVariant", 0);
             FilmCore.setVariant(variant);   // the inner loop the darkroom uses
             FilmCore.setFastCube(true);   // and its way of reading film files
             final int block = prefs.getInt(P_BLOCK, HardwareDevelop.DARKROOM_BLOCK);
             note("photo " + photo.getName() + ", film " + stock.name + ", loop " + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, variant))]
                     + ", block " + block / 1024 + " KB"
-                    + ", core 0 now " + (prefs.getBoolean(P_CORE0, false) ? "used" : "left to the camera"));
+                    + ", " + threads + " threads, lookup memory now " + memoName(prefs.getInt(P_MEMO, 0)));
             note(FilmCore.cores().replace("\n", "\r\n").trim());   // how busy each core is with nothing of ours running
 
             begin(S_MEMORY, "checking…");
@@ -128,6 +132,8 @@ final class DevelopTest {
                 note("stopped: " + Probe.why(e));
                 out.step(current, FAIL, Probe.why(e));
             }
+        } finally {
+            FilmCore.setPairMemo(prefs.getInt(P_MEMO, 0));   // whatever happened, as the darkroom will develop
         }
         return finish();
     }
@@ -149,7 +155,7 @@ final class DevelopTest {
         note("  output before developing " + Long.toHexString(blank) + " in " + h[1] / 1000 + " ms");
 
         // the develops: each way in turn, ROUNDS times, each hashed
-        int ways = THREADS.length;
+        int ways = WAYS.length;
         long[][] ms = new long[ways][ROUNDS];
         int[][] ran = new int[ways][ROUNDS];
         long[] hash = new long[ways];
@@ -161,9 +167,9 @@ final class DevelopTest {
         for (int r = 0; r < ROUNDS; r++) {
             for (int b = 0; b < ways; b++) {
                 begin(S_FIRST + b, "round " + (r + 1) + " of " + ROUNDS + "…");
-                note("round " + (r + 1) + ": developing on " + THREADS[b] + " threads");
+                note("round " + (r + 1) + ": developing with " + memoName(WAYS[b]));
                 save();
-                p[FilmCore.THREADS] = THREADS[b];
+                FilmCore.setPairMemo(WAYS[b]);
                 long t0 = System.currentTimeMillis();
                 int rc;
                 CpuGate.busy(true);
@@ -185,7 +191,7 @@ final class DevelopTest {
                         + (why.length() > 0 ? " (" + why + ")" : "") + "; output " + Long.toHexString(h[0]));
                 if (r == 0) hash[b] = h[0];   // today's way, round 1, is the picture every other develop must match
                 if (h[0] != hash[0] || h[0] == blank || h[0] != hash[b]) same[b] = false;
-                out.step(S_FIRST + b, same[b] ? RUN : FAIL, ms[b][r] + " ms on " + ran[b][r] + " threads" + (same[b] ? "" : ", PICTURE DIFFERS"));
+                out.step(S_FIRST + b, same[b] ? RUN : FAIL, ms[b][r] + " ms" + (same[b] ? "" : ", PICTURE DIFFERS"));
             }
         }
         current = S_SAME;
@@ -203,20 +209,29 @@ final class DevelopTest {
             median[b] = sorted[ROUNDS / 2];
             String vs = b == 0 ? "" : ", " + signed(median[b] - median[0]) + " ms";
             report(S_FIRST + b, same[b] ? OK : FAIL, median[b] + " ms" + vs + (same[b] ? "" : ", PICTURE DIFFERS"));
-            note("  " + THREADS[b] + " threads: " + Arrays.toString(ms[b]) + " ms, median " + median[b] + "; ran on " + Arrays.toString(ran[b]));
+            note("  " + memoName(WAYS[b]) + ": " + Arrays.toString(ms[b]) + " ms, median " + median[b] + "; ran on " + Arrays.toString(ran[b]) + " threads"
+                    + (refused.length() > 0 ? " (" + refused + ")" : ""));
         }
-        boolean allSame = untouched && same[0] && same[1];
+        boolean allSame = untouched;
+        for (int b = 0; b < ways; b++) if (!same[b]) allSame = false;
         report(S_SAME, allSame ? OK : FAIL, allSame ? "every develop identical, source untouched"
-                : !untouched ? "THE SOURCE CHANGED" : !same[0] ? "today's way disagreed with itself" : "core 0 gave another picture");
+                : !untouched ? "THE SOURCE CHANGED" : !same[0] ? "today's way disagreed with itself" : "a memory gave another picture");
 
-        boolean granted = true;
-        for (int r = 0; r < ROUNDS; r++) if (ran[1][r] < THREADS[1]) granted = false;
-        long gain = median[0] - median[1];
-        boolean keep = allSame && granted && gain >= MIN_GAIN_MS && gain * 100 >= median[0] * MIN_GAIN_PCT;
-        prefs.edit().putBoolean(P_CORE0, keep).commit();
-        report(S_RESULT, OK, keep ? "develops on core 0 too, " + gain + " ms faster a photo"
-                : !granted ? "keeps 3 cores (core 0 not given: " + refused + ")" : "keeps 3 cores (nothing clearly faster)");
+        int best = 0;
+        if (untouched && same[0]) {
+            for (int b = 1; b < ways; b++) {
+                if (!same[b]) continue;
+                long gain = median[0] - median[b];
+                if (gain >= MIN_GAIN_MS && gain * 100 >= median[0] * MIN_GAIN_PCT && median[b] < median[best]) best = b;
+            }
+        }
+        prefs.edit().putInt(P_MEMO, WAYS[best]).commit();
+        FilmCore.setPairMemo(WAYS[best]);   // as the darkroom will develop from now on
+        report(S_RESULT, OK, best == 0 ? "no lookup memory (nothing clearly faster)"
+                : "remembers lookups (" + memoName(WAYS[best]) + "), " + (median[0] - median[best]) + " ms faster a photo");
     }
+
+    private static String memoName(int bits) { return bits == 0 ? "no memory" : (1 << bits) / 1024 + "K memory"; }
 
     private static String signed(long v) { return v > 0 ? "+" + v : "" + v; }
 

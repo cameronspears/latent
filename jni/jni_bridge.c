@@ -295,9 +295,24 @@ JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_setVariant(JNIEnv *env, j
     fl_set_variant(v);
 }
 
+JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_prewarm(JNIEnv *env, jclass cls, jstring jlut, jintArray jparams) {
+    int params[FL_PARAM_COUNT];
+    const char *lut = NULL;
+    (void)cls;
+    if (read_params(env, jparams, params) != 0) return;
+    if (jlut) lut = (*env)->GetStringUTFChars(env, jlut, NULL);
+    fl_prewarm(lut, params);
+    if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
+}
+
 JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_setFastCube(JNIEnv *env, jclass cls, jboolean on) {
     (void)env; (void)cls;
     fl_set_fast_cube(on == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_setPairMemo(JNIEnv *env, jclass cls, jint bits) {
+    (void)env; (void)cls;
+    fl_set_pair_memo(bits);
 }
 
 JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_forgetLut(JNIEnv *env, jclass cls) {

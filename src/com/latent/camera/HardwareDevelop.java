@@ -92,6 +92,8 @@ final class HardwareDevelop {
     private String mediaId;
     private Uri uri;
     final long[] ms = new long[T_COUNT];
+    /** Run just before Sony's encoder saves a develop (the darkroom: FilmCore.prewarm of the next frame's film). */
+    volatile Runnable beforeSave;
     final int[] look = new int[FilmCore.T_COUNT];
     int current;
 
@@ -202,7 +204,8 @@ final class HardwareDevelop {
             call(o.src, "release");
             o.src = null;
 
-            // Sony's encoder saves and catalogues it
+            // Sony's encoder saves and catalogues it; meanwhile the next frame's film is made ready
+            if (beforeSave != null) try { beforeSave.run(); } catch (Throwable ignored) { }
             step(S_SAVE, RUN, "saving…");
             Set<String> before = new HashSet<String>();
             for (File f : Library.photos(card)) before.add(f.getPath());

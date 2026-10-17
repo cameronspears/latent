@@ -27,7 +27,8 @@
 #define FL_TIME_ROWS   8   /* block develop: rows this thread looked itself (the rest: helpers)    */
 #define FL_TIME_HCPU   9   /* block develop: CPU ms of the helpers together                        */
 #define FL_TIME_SETUP  10  /* block develop: ms before the first block (look, grain, tables, threads) */
-#define FL_TIME_COUNT  11
+#define FL_TIME_WARM   11  /* block develop: 1 if its look's tables were already made (fl_prewarm, or the last develop) */
+#define FL_TIME_COUNT  12
 
 typedef void (*fl_progress_fn)(void *ctx, int percent);
 
@@ -140,7 +141,7 @@ void fl_set_variant(int v);
  * Blocks are read and sent in order, top to bottom; a buffer is only read into after its block was sent. */
 typedef unsigned char *(*fl_block_get)(void *ctx, int y, int buf, int *n, int *stride);
 typedef int (*fl_block_put)(void *ctx, int y, int n, int buf);
-/* The look a block at a time; params[FL_PARAM_THREADS] 1..4 = this core plus helpers on cores 1, 2 and 0. */
+/* The look a block at a time; params[FL_PARAM_THREADS] 1..3 = this core plus helpers on cores 1 and 2 (never 0). */
 int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_block_get get, fl_block_put put, void *ctx,
                       fl_progress_fn progress, void *pctx, char *err, int errlen);
 /* .cube rows read by Latent's own exact decimal reader (1, the default) or sscanf (0). */
@@ -150,6 +151,12 @@ void fl_forget_lut(void);
 /* Reads path both ways: ms[0] ms with sscanf, ms[1] ms with the fast reader, ms[2] rows the fast reader took,
  * ms[3] rows it left to sscanf. 0 = identical tables and identical floats in every row it took, 1 = not, -1 = error. */
 int fl_cube_check(const char *path, int *ms, char *err, int errlen);
+/* The next develop's film made ready on a thread of its own (file read, grain tile, Y'CbCr table), while
+ * the caller waits on something else (Sony's encoder). Returns at once; the next look waits for it. */
+void fl_prewarm(const char *lut_path, const int *params);
+/* Block develops (per-pair loops) remember recent lookups in 2^bits entries per thread (bits 8..16), or don't
+ * (0, the default). The picture is the same either way. */
+void fl_set_pair_memo(int bits);
 /* Threads the last fl_develop_blocks used; note gets why a helper didn't join, if one didn't. */
 int fl_last_threads(char *note, int len);
 
