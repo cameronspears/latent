@@ -142,14 +142,18 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      * cores 1 and 2 sit almost idle), each with its own composer (FilmCore.frame): frames go to whichever is
      * free, so two are made at once. v0.37.0 had one, on core 2: 2.7 frames a second.
      */
-    static final int[] LOOK_CORES = { 2, 1 };
+    static final int[] LOOK_CORES = { 2, 1, 3 };
     /**
      * Never core 0: it is the camera's own. v0.41-0.42 ran a third look thread there (background priority)
      * and the overlay's (normal priority); in a demo the camera's live view tore into green and pink lines and
      * the camera restarted itself, a store took 3.5 s, not 0.5: its own video path starved. Kept for the
      * record: no look thread is put there any more.
+     *
+     * Core 3 is Latent's own, the screen's: with the picture on its own surface (v0.43.1) it sat half idle
+     * (44-51%) while cores 1 and 2 did every frame. A third look thread runs there at background priority,
+     * so the screen and the presenter always come first, and only gets a frame when 2 and 1 are busy.
      */
-    static final int LOW_PRIORITY_CORE = 0;
+    static final int LOW_PRIORITY_CORE = 3;
     private final Looker[] lookers = new Looker[LOOK_CORES.length];
     private int seq, shownSeq;
     private long lastShownAt;
