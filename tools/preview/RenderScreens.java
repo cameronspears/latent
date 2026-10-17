@@ -250,9 +250,9 @@ public class RenderScreens {
         render(s, fonts, out, "17b-develop-intro");
         s.probeStage = 2;
         s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
-        s.probeDetail = new String[] { "6000x4000, canvas 6080 -> 6000", "verified up to 2048 KB per transfer",
-                "2480 ms", "2390 ms, -90 ms", "2210 ms, -270 ms", "2300 ms, -180 ms", "every develop identical, source untouched",
-                "remembers lookups (4K memory), 270 ms faster a photo" };
+        s.probeDetail = new String[] { "DSC04811.JPG, then DSC04810.JPG", "verified up to 2048 KB per transfer", "decode 576, image 445, develop 2240 ms",
+                "yes: decode 560, image 440 ms", "1750 ms, DSC04812.JPG", "both in 1880 ms, one after the other 2750",
+                "identical, byte for byte", "yes: about 870 ms a frame to gain" };
         render(s, fonts, out, "17c-develop-results");
 
         s = state();

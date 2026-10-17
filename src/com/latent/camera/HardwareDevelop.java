@@ -288,7 +288,60 @@ final class HardwareDevelop {
     }
 
     /** What a develop holds of Sony's: released when it ends, unless a call never answered. */
-    private static final class Held { Object src, half, full, proc; }
+    static final class Held {
+        Object src, half, full, proc;
+
+        /** Everything held given back to Sony (never after a call that didn't answer: Sony may still use it). */
+        void release() {
+            for (Object x : new Object[] { half, src, proc, full }) if (x != null) try { call(x, "release"); } catch (Throwable ignored) { }
+            half = src = proc = full = null;
+        }
+    }
+
+    // ------------------------------------------------------------------------------ for the Develop test's save check
+
+    /** A photo decoded and given an output image, as a develop does (see openImages). Caller holds SONY. */
+    int open(File original, Held o, int[] sg, int[] dg) throws Exception { return openImages(original, o, sg, dg, null); }
+
+    /**
+     * Sony's encoder saves image into the camera roll, as a develop does (Extra Fine, or Fine where refused).
+     * 0 = saved, else the encoder's code. Throws Stuck if it never answers. Safe to call from another thread
+     * while the caller holds SONY: that is what the save check tries.
+     */
+    int save(Object image) throws Exception {
+        int code = export(image, mediaId, extraFine ? "EXTRAFINE" : "FINE");
+        if (code == -2 && extraFine) { extraFine = false; code = export(image, mediaId, "FINE"); }
+        return code;
+    }
+
+    /** The photos on the card now (to see which one a save added). */
+    Set<String> photoPaths() {
+        Set<String> out = new HashSet<String>();
+        for (File f : Library.photos(card)) out.add(f.getPath());
+        return out;
+    }
+
+    /** The photo a save added since 'before' (waited for up to 10 s), or null. */
+    File newPhoto(Set<String> before) throws InterruptedException {
+        for (int i = 0; i < 40; i++) {
+            if (i > 0) Thread.sleep(250);
+            for (File f : Library.photos(card)) if (!before.contains(f.getPath())) return f;
+        }
+        return null;
+    }
+
+    /** Whether f is in Sony's catalogue (shows in playback), asked for up to 2 s. */
+    boolean inCatalogue(File f) throws Exception {
+        for (int i = 0; i < 8; i++) {
+            if (i > 0) Thread.sleep(250);
+            Probe.Row row = Probe.find(Probe.query(cr, uri), f);
+            if (row != null && row.data != null) return true;
+        }
+        return false;
+    }
+
+    /** A Sony call never answered: leave the hardware alone until Latent restarts. */
+    static void markHung() { hung = true; }
 
     /**
      * The first half of a develop, under SONY: the photo's catalogue entry, its hardware decode (o.src)

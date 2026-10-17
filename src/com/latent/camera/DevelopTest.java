@@ -6,48 +6,50 @@ import android.content.SharedPreferences;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.text.SimpleDateFormat;
-import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
- * Times the darkroom's develop on this camera, one idea at a time, and keeps a faster way only if it
- * gives exactly the same picture. Your newest photo is decoded and given an output image exactly as
- * the darkroom does; then it is developed into that image several times, today's way and the way
- * being tried taking turns, and after each develop every picture byte of the output is hashed. Nothing
- * is saved: no new photo, the original only read. Log: LATENT/DEVTEST.TXT, written before every step
- * that touches the camera's image memory, so a hang still leaves a record.
+ * The darkroom's speed, tried on this camera one idea at a time (docs/DEVELOP-SPEED.md). Log:
+ * LATENT/DEVTEST.TXT, written before every step that asks something of the camera's hardware, so a hang
+ * still leaves a record.
  *
  * Ideas so far: v0.38 transfer size (no gain, 2 MB kept: P_BLOCK); v0.39 film files read without sscanf
- * (-324 ms a new film; always on since v0.42.0). v0.39.1 also showed the look is now the limit: Latent's
- * thread waited ~20 ms a develop for the helpers on cores 1 and 2, each busy ~4.5 s. v0.41.0's third
- * helper on core 0 was dropped untried: core 0 is the camera's (v0.42.2).
- * This version's idea (v0.43.0): each look thread remembers its recent per-pair lookups (brightness, Cb,
- * Cr -> the tetrahedron's result), so a colour met again costs one small read instead of four table
- * nodes and the arithmetic. On the test photos a 4K-entry memory finds 38-71% of the lookups left after
- * the previous-pair reuse; on a Mac that was -12% to +15% by photo, so the camera decides, at three sizes.
- * A remembered entry is exactly what the lookup gives: every develop is hashed all the same.
+ * (always on since v0.42.0); v0.41 a helper on core 0 (dropped untried: the camera's core); v0.43 a lookup
+ * memory per look thread (2863 -> 2225 ms, identical: 1K kept, MEMO_DEFAULT / P_MEMO).
+ *
+ * This version's question (v0.44.0): can the camera save one photo while it decodes the next? Sony's
+ * save is now the largest piece of a frame (~1.75 s of Latent waiting for the encoder). If the next
+ * frame's decode and output image (~1 s) could run meanwhile, each frame would be ~1 s shorter. Nothing
+ * says Sony's decoder, scaler and encoder may run at once, or that its memory holds a third full image,
+ * so the check goes step by step and stops at the first refusal:
+ *  1. one photo decoded, given an output image and developed, as the darkroom does;
+ *  2. with that output still held, the next photo decoded and given its own: is there room for both?
+ *     (one call after another, nothing at the same time);
+ *  3. the first saved on its own, timed;
+ *  4. the first developed again, and saved while the next is decoded on this thread: both must work;
+ *  5. the two saved photos compared byte for byte.
+ * It saves two photos (kept off every roll; delete them in playback if you like) and changes nothing in
+ * the darkroom: the answer decides what to build next.
  */
 final class DevelopTest {
-    static final String[] STEPS = { "Test picture", "Memory check", "Today's (no memory)", "1K memory", "4K memory", "16K memory",
-            "Same picture", "Darkroom" };
-    static final int S_PICTURE = 0, S_MEMORY = 1, S_FIRST = 2, S_SAME = 6, S_RESULT = 7;
+    static final String[] STEPS = { "Photos", "Memory check", "First photo ready", "Room for two", "Save alone", "Save while decoding",
+            "Same photo saved", "Answer" };
+    static final int S_PHOTOS = 0, S_MEMORY = 1, S_READY = 2, S_ROOM = 3, S_ALONE = 4, S_OVERLAP = 5, S_SAME = 6, S_ANSWER = 7;
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
-    /** The ways timed, today's first: lookup memory per thread, 2^bits entries (0 = none). */
-    static final int[] WAYS = { 0, 10, 12, 14 };
-    static final int ROUNDS = 3;
-    /** A way is only kept when its median develop is this much faster than today's (ms, and per cent). */
-    static final int MIN_GAIN_MS = 120, MIN_GAIN_PCT = 3;
     /** The darkroom's transfer size, as v0.38's test chose it (HardwareDevelop.DARKROOM_BLOCK until then). */
     static final String P_BLOCK = "developBlock";
-    /** Lookup memory per look thread, 2^bits entries (0 = none), as this test chooses. */
+    /** Lookup memory per look thread, 2^bits entries (0 = none), as v0.43's test chose. */
     static final String P_MEMO = "pairMemo";
     /**
-     * Until a run of this test says otherwise: 1K entries, as v0.43.0's run chose (2863 -> 2225 ms, every
+     * Until a run of the test says otherwise: 1K entries, as v0.43.0's run chose (2863 -> 2225 ms, every
      * develop identical). A default in code, because a camera crash can lose a pref (v0.41.0 lost fastCube).
      */
     static final int MEMO_DEFAULT = 10;
+    /** Longest the save and the decode beside it may take together before the check calls it stuck. */
+    static final long OVERLAP_LIMIT_MS = 120000;
 
     private final Context ctx;
     private final File card;
@@ -62,8 +64,8 @@ final class DevelopTest {
         this.ctx = ctx; this.card = card; this.stock = stock; this.prefs = prefs; this.threads = threads; this.version = version; this.out = out;
     }
 
-    /** The step under way: a failure is shown there. */
-    private int current = S_PICTURE;
+    /** The step under way: a failure, and HardwareDevelop's own progress, are shown there. */
+    private volatile int current = S_PHOTOS;
 
     private void begin(int i, String detail) {
         current = i;
@@ -91,154 +93,192 @@ final class DevelopTest {
         log.append(line).append("\r\n");
     }
 
+    /** Stops the check at a step that didn't work (already reported). */
+    private static final class Stop extends Exception {
+        Stop() { super("stopped"); }
+    }
+
     String run() {
         log.append("\r\n").append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()))
-                .append(" Latent ").append(version).append(" develop test\r\n");
-        // HardwareDevelop's own steps land on this test's first two
+                .append(" Latent ").append(version).append(" develop test: can the camera save while it decodes?\r\n");
+        // HardwareDevelop's own steps show under whichever of this check's steps is under way
         Probe.Listener hwSteps = new Probe.Listener() {
             public void step(int i, int status, String detail) {
                 if (i == HardwareDevelop.S_MEMORY) out.step(S_MEMORY, status, detail);
-                else if (i == HardwareDevelop.S_PHOTO || i == HardwareDevelop.S_DECODE || i == HardwareDevelop.S_IMAGE)
-                    out.step(S_PICTURE, status == OK ? RUN : status, detail);
+                else if (status == FAIL) out.step(current, FAIL, detail);
+                else out.step(current, RUN, detail);
             }
         };
         final HardwareDevelop hw = new HardwareDevelop(ctx, card, log, hwSteps);
+        HardwareDevelop.Held a = new HardwareDevelop.Held(), again = new HardwareDevelop.Held(), b = new HardwareDevelop.Held();
+        boolean stuck = false, locked = false;
         try {
             List<File> photos = Library.photos(card);
-            if (photos.isEmpty()) { report(S_PICTURE, FAIL, "no photo on the card"); return finish(); }
-            final File photo = photos.get(0);
-            final int[] p = new int[FilmCore.COUNT];
+            if (photos.size() < 2) { report(S_PHOTOS, FAIL, "needs two photos on the card"); return finish(); }
+            File first = photos.get(0), next = photos.get(1);
+            int[] p = new int[FilmCore.COUNT];
             p[FilmCore.HIGHLIGHT] = stock.highlight; p[FilmCore.SHADOW] = stock.shadow;
             p[FilmCore.GRAIN] = stock.grain; p[FilmCore.GRAIN_SIZE] = stock.grainSize;
-            p[FilmCore.QUALITY] = 95; p[FilmCore.SEED] = 1; p[FilmCore.THREADS] = threads;   // the darkroom's threads
-            int variant = prefs.getInt("lookVariant", 0);
-            FilmCore.setVariant(variant);   // the inner loop the darkroom uses
-            FilmCore.setFastCube(true);   // and its way of reading film files
-            final int block = prefs.getInt(P_BLOCK, HardwareDevelop.DARKROOM_BLOCK);
-            note("photo " + photo.getName() + ", film " + stock.name + ", loop " + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, variant))]
-                    + ", block " + block / 1024 + " KB"
-                    + ", " + threads + " threads, lookup memory now " + memoName(prefs.getInt(P_MEMO, MEMO_DEFAULT)));
-            note(FilmCore.cores().replace("\n", "\r\n").trim());   // how busy each core is with nothing of ours running
+            p[FilmCore.QUALITY] = 95; p[FilmCore.SEED] = 1; p[FilmCore.THREADS] = threads;
+            FilmCore.setVariant(prefs.getInt("lookVariant", 0));   // exactly as the darkroom develops
+            FilmCore.setFastCube(true);
+            FilmCore.setPairMemo(prefs.getInt(P_MEMO, MEMO_DEFAULT));
+            int block = prefs.getInt(P_BLOCK, HardwareDevelop.DARKROOM_BLOCK);
+            String lut = stock.lut.getPath();
+            note("first " + first.getName() + ", next " + next.getName() + ", film " + stock.name + ", " + threads + " threads, block "
+                    + block / 1024 + " KB, lookup memory " + prefs.getInt(P_MEMO, MEMO_DEFAULT) + " bits");
+            report(S_PHOTOS, OK, first.getName() + ", then " + next.getName());
 
             begin(S_MEMORY, "checking…");
             save();
             hw.prepare(true, block);
 
-            begin(S_PICTURE, "decoding " + photo.getName() + "…");
-            note("decoding " + photo.getName() + " and making the output image");
+            HardwareDevelop.SONY.lock();   // the darkroom's filing stays out of the camera's way meanwhile
+            locked = true;
+
+            // 1. the first photo, ready to save, exactly as in the darkroom
+            begin(S_READY, "decoding " + first.getName() + "…");
+            note("decoding " + first.getName() + ", making its output image, developing it");
             save();
-            hw.bench(photo, new HardwareDevelop.Bench() {
-                public void run(int src, int[] sg, int full, int[] dg) throws Exception {
-                    measure(src, sg, full, dg, block, stock.lut.getPath(), p);
+            int[] sga = new int[8], dga = new int[8];
+            hw.open(first, a, sga, dga);
+            long decodeA = hw.ms[HardwareDevelop.T_DECODE], imageA = hw.ms[HardwareDevelop.T_IMAGE];
+            long developA = develop(a, sga, dga, block, lut, p);
+            report(S_READY, OK, "decode " + decodeA + ", image " + imageA + ", develop " + developA + " ms");
+
+            // 2. room for two: the next photo decoded and given its output while the first's output is held
+            begin(S_ROOM, "decoding " + next.getName() + "…");
+            note("decoding " + next.getName() + " and making its output image while " + first.getName() + "'s output is held (one call at a time)");
+            save();
+            int[] sgb = new int[8], dgb = new int[8];
+            try {
+                hw.open(next, b, sgb, dgb);
+            } catch (HardwareDevelop.Failed e) {
+                report(S_ROOM, FAIL, "no: " + e.getMessage());
+                report(S_ANSWER, INFO, "the camera can't hold a second photo beside a finished one: no overlap");
+                throw new Stop();
+            }
+            long decodeB = hw.ms[HardwareDevelop.T_DECODE], imageB = hw.ms[HardwareDevelop.T_IMAGE];
+            report(S_ROOM, OK, "yes: decode " + decodeB + ", image " + imageB + " ms");
+            note("releasing " + next.getName() + "'s images");
+            save();
+            b.release();
+
+            // 3. the first saved on its own: the baseline
+            begin(S_ALONE, "saving…");
+            note("saving " + first.getName() + "'s develop on its own");
+            save();
+            Set<String> before = hw.photoPaths();
+            long t = System.currentTimeMillis();
+            int code = hw.save(a.full);
+            long saveAlone = System.currentTimeMillis() - t;
+            if (code != 0) { report(S_ALONE, FAIL, "Sony's encoder answered " + code); throw new Stop(); }
+            File print1 = hw.newPhoto(before);
+            if (print1 != null) Library.ignore(card, print1);
+            note("  saved in " + saveAlone + " ms as " + (print1 == null ? "(not found)" : print1.getName()));
+            a.release();
+            report(S_ALONE, print1 != null ? OK : FAIL, saveAlone + " ms" + (print1 != null ? ", " + print1.getName() : ", but no new photo appeared"));
+            if (print1 == null) throw new Stop();
+
+            // 4. the same develop again, saved while the next photo is decoded beside it
+            begin(S_OVERLAP, "developing " + first.getName() + " again…");
+            note("decoding and developing " + first.getName() + " again");
+            save();
+            int[] sg2 = new int[8], dg2 = new int[8];
+            hw.open(first, again, sg2, dg2);
+            develop(again, sg2, dg2, block, lut, p);
+            begin(S_OVERLAP, "saving while decoding…");
+            note("saving it while " + next.getName() + " is decoded and given its output image at the same time");
+            save();
+            before = hw.photoPaths();
+            final Object image = again.full;
+            final int[] saveCode = { Integer.MIN_VALUE };
+            final long[] saveMs = { 0 };
+            final Throwable[] saveError = { null };
+            Thread saver = new Thread(new Runnable() {
+                public void run() {
+                    long t0 = System.currentTimeMillis();
+                    try { saveCode[0] = hw.save(image); } catch (Throwable e) { saveError[0] = e; }
+                    saveMs[0] = System.currentTimeMillis() - t0;
                 }
-            });
+            }, "save-check");
+            long w0 = System.currentTimeMillis();
+            saver.start();
+            Throwable decodeError = null;
+            long decodeMs = 0, imageMs = 0;
+            try {
+                hw.open(next, b, sgb, dgb);
+                decodeMs = hw.ms[HardwareDevelop.T_DECODE];
+                imageMs = hw.ms[HardwareDevelop.T_IMAGE];
+            } catch (HardwareDevelop.Stuck e) {
+                throw e;
+            } catch (Throwable e) {
+                decodeError = e;
+            }
+            saver.join(OVERLAP_LIMIT_MS);
+            if (saver.isAlive() || saveError[0] instanceof HardwareDevelop.Stuck) throw new HardwareDevelop.Stuck();
+            long wall = System.currentTimeMillis() - w0;
+            File print2 = saveCode[0] == 0 ? hw.newPhoto(before) : null;
+            if (print2 != null) Library.ignore(card, print2);
+            boolean catalogued = print2 != null && hw.inCatalogue(print2);
+            note("  save " + saveMs[0] + " ms (code " + saveCode[0] + (saveError[0] != null ? ", " + Probe.why(saveError[0]) : "") + ") as "
+                    + (print2 == null ? "(not found)" : print2.getName() + (catalogued ? ", catalogued" : ", NOT catalogued"))
+                    + "; decode " + decodeMs + " + image " + imageMs + " ms" + (decodeError != null ? " (" + Probe.why(decodeError) + ")" : "")
+                    + "; " + wall + " ms in all");
+            boolean overlapOk = saveError[0] == null && saveCode[0] == 0 && catalogued && decodeError == null;
+            if (!overlapOk) {
+                report(S_OVERLAP, FAIL, decodeError != null ? "decode refused while saving: " + Probe.why(decodeError)
+                        : "save failed while decoding: " + (saveError[0] != null ? Probe.why(saveError[0]) : "code " + saveCode[0] + (print2 != null && !catalogued ? ", not catalogued" : "")));
+                report(S_ANSWER, INFO, "the camera can't save and decode at once: no overlap");
+                throw new Stop();
+            }
+            long sequential = saveAlone + decodeB + imageB;
+            report(S_OVERLAP, OK, "both in " + wall + " ms, one after the other " + sequential);   // the parts are in the log
+
+            // 5. the same photo saved both times?
+            current = S_SAME;
+            long c1 = HardwareDevelop.crc(print1), c2 = HardwareDevelop.crc(print2);
+            boolean same = c1 == c2 && print1.length() == print2.length();
+            note("  " + print1.getName() + " " + print1.length() + " bytes crc " + Long.toHexString(c1) + ", " + print2.getName() + " "
+                    + print2.length() + " bytes crc " + Long.toHexString(c2));
+            report(S_SAME, same ? OK : INFO, same ? "identical, byte for byte" : "they differ (" + print1.length() + " / " + print2.length() + " bytes)");
+
+            long gain = sequential - wall;
+            report(S_ANSWER, OK, "yes: about " + gain + " ms a frame to gain" + (same ? "" : "; check why the files differ"));
+        } catch (Stop e) {
+            // reported at the step that stopped it
+        } catch (HardwareDevelop.Stuck e) {
+            stuck = true;
+            HardwareDevelop.markHung();
+            note("no answer from the camera in time: everything left as it is");
+            out.step(current, FAIL, "no answer from the camera. If it doesn't recover, turn it off (or remove the battery).");
         } catch (Throwable e) {
-            if (!(e instanceof HardwareDevelop.Stuck) && !(e instanceof HardwareDevelop.Failed)) {
+            if (!(e instanceof HardwareDevelop.Failed)) {
                 note("stopped: " + Probe.why(e));
                 out.step(current, FAIL, Probe.why(e));
             }
         } finally {
-            FilmCore.setPairMemo(prefs.getInt(P_MEMO, MEMO_DEFAULT));   // whatever happened, as the darkroom will develop
+            if (!stuck) { a.release(); again.release(); b.release(); }   // a call that never answered: leave it all to the camera
+            if (locked) HardwareDevelop.SONY.unlock();
         }
         return finish();
     }
 
-    /** Everything timed on the two images, while HardwareDevelop holds them. */
-    private void measure(int src, int[] sg, int full, int[] dg, int block, String lut, int[] p) throws Exception {
-        report(S_PICTURE, OK, sg[0] + "x" + sg[1] + ", canvas " + sg[2] + " -> " + dg[2]);
-        note("geometry src " + Arrays.toString(sg) + " dst " + Arrays.toString(dg));
-
-        // the source, hashed before and after: the develops only ever read it
-        long[] h = new long[2];
-        note("hashing the source");
-        save();
-        if (SonyMemory.hash(src, sg, block, h) != 0) throw new IllegalStateException("hash: " + SonyMemory.lastError());
-        long srcHash = h[0];
-        note("  source " + Long.toHexString(srcHash) + " in " + h[1] / 1000 + " ms");
-        if (SonyMemory.hash(full, dg, block, h) != 0) throw new IllegalStateException("hash: " + SonyMemory.lastError());
-        long blank = h[0];
-        note("  output before developing " + Long.toHexString(blank) + " in " + h[1] / 1000 + " ms");
-
-        // the develops: each way in turn, ROUNDS times, each hashed
-        int ways = WAYS.length;
-        long[][] ms = new long[ways][ROUNDS];
-        int[][] ran = new int[ways][ROUNDS];
-        long[] hash = new long[ways];
-        boolean[] same = new boolean[ways];
-        int[] t = new int[FilmCore.T_COUNT];
-        String refused = "";
-        Arrays.fill(same, true);
-        out.step(S_SAME, RUN, "checking each develop…");
-        for (int r = 0; r < ROUNDS; r++) {
-            for (int b = 0; b < ways; b++) {
-                begin(S_FIRST + b, "round " + (r + 1) + " of " + ROUNDS + "…");
-                note("round " + (r + 1) + ": developing with " + memoName(WAYS[b]));
-                save();
-                FilmCore.setPairMemo(WAYS[b]);
-                long t0 = System.currentTimeMillis();
-                int rc;
-                CpuGate.busy(true);
-                try {
-                    rc = SonyMemory.develop(src, sg, full, dg, block, lut, p, null);
-                } finally {
-                    CpuGate.busy(false);
-                }
-                ms[b][r] = System.currentTimeMillis() - t0;
-                if (rc != 0) throw new IllegalStateException("develop: " + SonyMemory.lastError());
-                FilmCore.timing(t);
-                ran[b][r] = t[FilmCore.T_THREADS];
-                String why = FilmCore.helperNote();
-                if (why.length() > 0) refused = why;
-                if (SonyMemory.hash(full, dg, block, h) != 0) throw new IllegalStateException("hash: " + SonyMemory.lastError());
-                note("  " + ms[b][r] + " ms: setup " + t[FilmCore.T_SETUP] + ", read " + t[FilmCore.T_READ] + ", look " + t[FilmCore.T_LOOK]
-                        + " (this thread waited " + t[FilmCore.T_WAIT] + " for the helpers, looked " + t[FilmCore.T_ROWS] + " of " + sg[1] + " rows), write "
-                        + t[FilmCore.T_WRITE] + ", cpu " + t[FilmCore.T_CPU] + " + helpers " + t[FilmCore.T_HCPU] + ", ran on " + t[FilmCore.T_THREADS] + " threads"
-                        + (why.length() > 0 ? " (" + why + ")" : "") + "; output " + Long.toHexString(h[0]));
-                if (r == 0) hash[b] = h[0];   // today's way, round 1, is the picture every other develop must match
-                if (h[0] != hash[0] || h[0] == blank || h[0] != hash[b]) same[b] = false;
-                out.step(S_FIRST + b, same[b] ? RUN : FAIL, ms[b][r] + " ms" + (same[b] ? "" : ", PICTURE DIFFERS"));
-            }
+    /** The look into the output image from its source, as the darkroom develops; the source released after. Returns ms. */
+    private long develop(HardwareDevelop.Held o, int[] sg, int[] dg, int block, String lut, int[] p) throws Exception {
+        long t = System.currentTimeMillis();
+        int rc;
+        CpuGate.busy(true);
+        try {
+            rc = SonyMemory.develop(SonyMemory.handle(o.src), sg, SonyMemory.handle(o.full), dg, block, lut, p, null);
+        } finally {
+            CpuGate.busy(false);
         }
-        current = S_SAME;
-        note("hashing the source again");
-        save();
-        if (SonyMemory.hash(src, sg, block, h) != 0) throw new IllegalStateException("hash: " + SonyMemory.lastError());
-        boolean untouched = h[0] == srcHash;
-        note("  source " + Long.toHexString(h[0]) + (untouched ? " (unchanged)" : " (CHANGED)"));
-
-        // medians, and the verdict
-        long[] median = new long[ways];
-        for (int b = 0; b < ways; b++) {
-            long[] sorted = ms[b].clone();
-            Arrays.sort(sorted);
-            median[b] = sorted[ROUNDS / 2];
-            String vs = b == 0 ? "" : ", " + signed(median[b] - median[0]) + " ms";
-            report(S_FIRST + b, same[b] ? OK : FAIL, median[b] + " ms" + vs + (same[b] ? "" : ", PICTURE DIFFERS"));
-            note("  " + memoName(WAYS[b]) + ": " + Arrays.toString(ms[b]) + " ms, median " + median[b] + "; ran on " + Arrays.toString(ran[b]) + " threads"
-                    + (refused.length() > 0 ? " (" + refused + ")" : ""));
-        }
-        boolean allSame = untouched;
-        for (int b = 0; b < ways; b++) if (!same[b]) allSame = false;
-        report(S_SAME, allSame ? OK : FAIL, allSame ? "every develop identical, source untouched"
-                : !untouched ? "THE SOURCE CHANGED" : !same[0] ? "today's way disagreed with itself" : "a memory gave another picture");
-
-        int best = 0;
-        if (untouched && same[0]) {
-            for (int b = 1; b < ways; b++) {
-                if (!same[b]) continue;
-                long gain = median[0] - median[b];
-                if (gain >= MIN_GAIN_MS && gain * 100 >= median[0] * MIN_GAIN_PCT && median[b] < median[best]) best = b;
-            }
-        }
-        prefs.edit().putInt(P_MEMO, WAYS[best]).commit();
-        FilmCore.setPairMemo(WAYS[best]);   // as the darkroom will develop from now on
-        report(S_RESULT, OK, best == 0 ? "no lookup memory (nothing clearly faster)"
-                : "remembers lookups (" + memoName(WAYS[best]) + "), " + (median[0] - median[best]) + " ms faster a photo");
+        if (rc != 0) throw new IllegalStateException("develop: " + SonyMemory.lastError());
+        HardwareDevelop.call(o.src, "release");
+        o.src = null;
+        return System.currentTimeMillis() - t;
     }
-
-    private static String memoName(int bits) { return bits == 0 ? "no memory" : (1 << bits) / 1024 + "K memory"; }
-
-    private static String signed(long v) { return v > 0 ? "+" + v : "" + v; }
 
     private String finish() {
         save();
