@@ -87,6 +87,7 @@ typedef struct fl_frame_ctx fl_frame_ctx;
 #define FL_F_LEVEL 1
 #define FL_F_HIST 2
 #define FL_F_TEMPORAL 4
+#define FL_F_REFERENCE (1 << 30)   /* host test builds only (FL_FRAME_REFERENCE): v0.44.1's composer, to compare with */
 #define FL_FMT_565 0
 #define FL_FMT_4444 1
 #define FL_NO_READING (-999999)
