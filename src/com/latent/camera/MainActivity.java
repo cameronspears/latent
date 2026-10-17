@@ -1342,7 +1342,7 @@ public class MainActivity extends Activity {
                 // developing into the camera roll needs the catalogue and a verified memory path
                 FilmCore.setVariant(prefs.getInt("lookVariant", 0));   // the inner loop the speed test chose
                 FilmCore.setFastCube(true);   // film files read Latent's way: identical on the camera, row for row, for every film (v0.39.1)
-                FilmCore.setPairMemo(prefs.getInt(DevelopTest.P_MEMO, 0));   // lookups remembered, if the Develop test chose it
+                FilmCore.setPairMemo(prefs.getInt(DevelopTest.P_MEMO, DevelopTest.MEMO_DEFAULT));   // lookups remembered (1K unless the Develop test says otherwise)
                 StringBuilder hl = new StringBuilder();
                 HardwareDevelop h = new HardwareDevelop(MainActivity.this, card, hl, null);
                 try {
@@ -1515,7 +1515,7 @@ public class MainActivity extends Activity {
                                 + " loop=" + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, prefs.getInt("lookVariant", 0)))]
                                 + " rows=" + (SonyMemory.lastDirect() ? "direct" : "gathered") + " block=" + HardwareDevelop.block() / 1024 + "K"
                                 + " threads=" + h.look[FilmCore.T_THREADS] + (FilmCore.helperNote().length() > 0 ? " (" + FilmCore.helperNote() + ")" : "")
-                                + draws + " memo=" + prefs.getInt(DevelopTest.P_MEMO, 0), System.currentTimeMillis() - t0);
+                                + draws + " memo=" + prefs.getInt(DevelopTest.P_MEMO, DevelopTest.MEMO_DEFAULT), System.currentTimeMillis() - t0);
                     } catch (Throwable e) {
                         hw = null;
                         devLog(src.getName() + ": camera roll develop failed (" + Probe.why(e) + "); developing in software");

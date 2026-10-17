@@ -43,6 +43,11 @@ final class DevelopTest {
     static final String P_BLOCK = "developBlock";
     /** Lookup memory per look thread, 2^bits entries (0 = none), as this test chooses. */
     static final String P_MEMO = "pairMemo";
+    /**
+     * Until a run of this test says otherwise: 1K entries, as v0.43.0's run chose (2863 -> 2225 ms, every
+     * develop identical). A default in code, because a camera crash can lose a pref (v0.41.0 lost fastCube).
+     */
+    static final int MEMO_DEFAULT = 10;
 
     private final Context ctx;
     private final File card;
@@ -112,7 +117,7 @@ final class DevelopTest {
             final int block = prefs.getInt(P_BLOCK, HardwareDevelop.DARKROOM_BLOCK);
             note("photo " + photo.getName() + ", film " + stock.name + ", loop " + FilmCore.VARIANTS[Math.max(0, Math.min(FilmCore.VARIANTS.length - 1, variant))]
                     + ", block " + block / 1024 + " KB"
-                    + ", " + threads + " threads, lookup memory now " + memoName(prefs.getInt(P_MEMO, 0)));
+                    + ", " + threads + " threads, lookup memory now " + memoName(prefs.getInt(P_MEMO, MEMO_DEFAULT)));
             note(FilmCore.cores().replace("\n", "\r\n").trim());   // how busy each core is with nothing of ours running
 
             begin(S_MEMORY, "checking…");
@@ -133,7 +138,7 @@ final class DevelopTest {
                 out.step(current, FAIL, Probe.why(e));
             }
         } finally {
-            FilmCore.setPairMemo(prefs.getInt(P_MEMO, 0));   // whatever happened, as the darkroom will develop
+            FilmCore.setPairMemo(prefs.getInt(P_MEMO, MEMO_DEFAULT));   // whatever happened, as the darkroom will develop
         }
         return finish();
     }
