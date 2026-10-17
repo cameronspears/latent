@@ -805,7 +805,7 @@ final class Ui {
 
     static final String[] SCREEN_PLAN = {
             "Puts a test picture the size of the viewfinder's on the screen 40 times, as fast as it goes, with the screen in its 16-bit mode as while shooting. No camera.",
-            "Four ways: today's (Latent's screen), Latent's screen asking for a 16-bit window, a 16-bit surface of its own, and that surface drawn from a thread of its own.",
+            "Five ways: today's (Latent's screen), asking for a 16-bit window, a 16-bit surface of its own, that surface drawn from a thread, and a quarter-size surface the screen stretches.",
             "Notes the fastest; the viewfinder uses it from a later version. The screen flickers with the test picture while it runs.",
     };
     static final String SCREEN_FOOTER = "About fifteen seconds. MENU stops it. Results go to LATENT/SCREEN.TXT.";

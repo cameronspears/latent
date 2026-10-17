@@ -140,10 +140,12 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      * cores 1 and 2 sit almost idle), each with its own composer (FilmCore.frame): frames go to whichever is
      * free, so two are made at once. v0.37.0 had one, on core 2: 2.7 frames a second.
      */
-    static final int[] LOOK_CORES = { 2, 1, 0 };
+    static final int[] LOOK_CORES = { 2, 1 };
     /**
-     * Core 0 is the camera's own (35% busy while shooting, v0.39.1): its look thread runs at background
-     * priority, so it only ever takes time the camera leaves, and only gets a frame when 2 and 1 are busy.
+     * Never core 0: it is the camera's own. v0.41-0.42 ran a third look thread there (background priority)
+     * and the overlay's (normal priority); in a demo the camera's live view tore into green and pink lines and
+     * the camera restarted itself, a store took 3.5 s, not 0.5: its own video path starved. Kept for the
+     * record: no look thread is put there any more.
      */
     static final int LOW_PRIORITY_CORE = 0;
     private final Looker[] lookers = new Looker[LOOK_CORES.length];
@@ -873,7 +875,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     // ---- Latent's type over the picture: drawn once when it changes (not every frame), laid into each frame natively
 
     private final ExecutorService overlayer = Executors.newSingleThreadExecutor();
-    static final int OVERLAY_CORE = 0;
+    static final int OVERLAY_CORE = 1;   // with a look thread, never the camera's core 0 (see LOOK_CORES)
     private boolean overlayPinned;
     private final Object overlayLock = new Object();
     private String overlayKey = "";
@@ -908,7 +910,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             synchronized (overlayLock) { s = overlayWanted; overlayWanted = null; }
             final int w = liveW, h = liveH;
             if (s == null || closed || w <= 0 || h <= 0) return;   // a later one was already made
-            if (!overlayPinned) {   // off the screen's core (3, the busiest): on 0, ahead of the look thread there
+            if (!overlayPinned) {   // off the screen's core (3, the busiest), onto a look thread's (1), never the camera's (0)
                 overlayPinned = true;
                 note("overlay thread: " + (FilmCore.pinCore(OVERLAY_CORE) == 0 ? "core " + OVERLAY_CORE : "Latent's core (" + FilmCore.lastError() + ")"));
             }

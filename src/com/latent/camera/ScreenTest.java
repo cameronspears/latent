@@ -27,16 +27,20 @@ import java.io.FileOutputStream;
  *  2. The same after asking for a 16-bit window (v0.39.2 asked; the copy didn't get cheaper).
  *  3. A 16-bit surface of its own on top (a SurfaceView), drawn on the UI thread.
  *  4. That surface drawn from a thread of its own: the look threads could put frames up themselves.
+ *  5. A quarter-size surface (half each way) the screen stretches to the picture's area: if the camera's
+ *     display hardware does the stretch, each frame is a quarter of the pixels to make and copy.
  *
  * The fastest is noted (pref screenPath); the viewfinder uses it from a later version, after this test.
  * Log: LATENT/SCREEN.TXT.
  */
 final class ScreenTest {
-    static final String[] STEPS = { "Test picture", "Today's screen", "16-bit window", "16-bit surface", "Surface from a thread", "Fastest" };
+    static final String[] STEPS = { "Test picture", "Today's screen", "16-bit window", "16-bit surface", "Surface from a thread",
+            "Quarter size, scaled", "Fastest" };
     static final int OK = Probe.OK, FAIL = Probe.FAIL, RUN = Probe.RUN, INFO = Probe.INFO;
     static final int FRAMES = 40;
     static final String P_PATH = "screenPath";
-    static final String[] PATHS = { "today's screen", "a 16-bit window", "a 16-bit surface", "a 16-bit surface from a thread" };
+    static final String[] PATHS = { "today's screen", "a 16-bit window", "a 16-bit surface", "a 16-bit surface from a thread",
+            "a quarter-size surface the screen scales" };
 
     interface Host {
         FrameLayout root();
@@ -59,8 +63,8 @@ final class ScreenTest {
     private Bitmap pic;
     private Rect area;
     private volatile boolean stopped;
-    private final double[] fps = new double[4];
-    private final double[] drawMs = new double[4];
+    private final double[] fps = new double[5];
+    private final double[] drawMs = new double[5];
 
     ScreenTest(Activity activity, File card, SharedPreferences prefs, Probe.Listener out, Host host) {
         this.activity = activity; this.card = card; this.prefs = prefs; this.out = out; this.host = host;
@@ -189,12 +193,12 @@ final class ScreenTest {
             });
             host.root().addView(sv, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.FILL_PARENT, FrameLayout.LayoutParams.FILL_PARENT));
             ui.postDelayed(new Runnable() {
-                public void run() { if (!made[0]) { report(3, FAIL, "no surface in 3 s"); report(4, INFO, "not tried"); done(); } }
+                public void run() { if (!made[0]) { report(3, FAIL, "no surface in 3 s"); report(4, INFO, "not tried"); scaledPath(); } }
             }, 3000);
         } catch (Throwable e) {
             report(3, FAIL, Probe.why(e));
             report(4, INFO, "not tried");
-            done();
+            scaledPath();
         }
     }
 
@@ -205,11 +209,11 @@ final class ScreenTest {
         if (n == 0) started = t;
         try {
             frame = n;
-            if (!surfaceFrame()) { report(3, FAIL, "the surface couldn't be locked"); report(4, INFO, "not tried"); done(); return; }
+            if (!surfaceFrame()) { report(3, FAIL, "the surface couldn't be locked"); report(4, INFO, "not tried"); scaledPath(); return; }
         } catch (Throwable e) {
             report(3, FAIL, Probe.why(e));
             report(4, INFO, "not tried");
-            done();
+            scaledPath();
             return;
         }
         drawn += SystemClock.uptimeMillis() - t;
@@ -242,7 +246,7 @@ final class ScreenTest {
                 ui.post(new Runnable() {
                     public void run() {
                         if (why != null) report(4, FAIL, why); else result(4, 3, frames, ms, drawn);
-                        done();
+                        scaledPath();
                     }
                 });
             }
@@ -258,14 +262,89 @@ final class ScreenTest {
         return true;
     }
 
-    private void done() {
+    // ---- 5: a quarter-size surface, stretched to the picture's area by the screen
+
+    private SurfaceView small;
+    private Bitmap smallPic;
+
+    private void scaledPath() {
         if (sv != null) { try { host.root().removeView(sv); } catch (Throwable ignored) { } sv = null; }
+        if (stopped) { done(); return; }
+        out.step(5, RUN, "making the surface…");
+        try {
+            final int sw = area.width() / 2, sh = area.height() / 2;
+            smallPic = Bitmap.createScaledBitmap(pic, sw, sh, true).copy(Bitmap.Config.RGB_565, false);
+            small = new SurfaceView(activity);
+            small.setZOrderOnTop(true);
+            small.getHolder().setFormat(PixelFormat.RGB_565);
+            small.getHolder().setFixedSize(sw, sh);   // the buffer a quarter of the area; the screen stretches it
+            final boolean[] made = { false };
+            small.getHolder().addCallback(new SurfaceHolder.Callback() {
+                public void surfaceCreated(SurfaceHolder holder) {
+                    if (made[0]) return;
+                    made[0] = true;
+                    new Thread(new Runnable() {
+                        public void run() {
+                            long st = SystemClock.uptimeMillis(), dr = 0;
+                            int n = 0;
+                            String err = null;
+                            try {
+                                SurfaceHolder h = small.getHolder();
+                                for (; n < FRAMES && !stopped; n++) {
+                                    long t = SystemClock.uptimeMillis();
+                                    Canvas c = h.lockCanvas();
+                                    if (c == null) { err = "the surface couldn't be locked"; break; }
+                                    try {
+                                        c.drawBitmap(smallPic, 0, 0, null);
+                                        c.drawText("1/125  F5.6  ISO 400  " + n, 15, sh - 15, type);
+                                    } finally { h.unlockCanvasAndPost(c); }
+                                    dr += SystemClock.uptimeMillis() - t;
+                                }
+                            } catch (Throwable e) {
+                                err = Probe.why(e);
+                            }
+                            final long ms = SystemClock.uptimeMillis() - st, drawn = dr;
+                            final int frames = n;
+                            final String why = err;
+                            ui.postDelayed(new Runnable() {   // left up a moment: how a stretched frame looks
+                                public void run() {
+                                    if (why != null) report(5, FAIL, why); else result(5, 4, frames, ms, drawn);
+                                    done();
+                                }
+                            }, 1500);
+                        }
+                    }, "screen test small").start();
+                }
+                public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) { }
+                public void surfaceDestroyed(SurfaceHolder holder) { }
+            });
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(area.width(), area.height());
+            lp.leftMargin = area.left;
+            lp.gravity = android.view.Gravity.LEFT | android.view.Gravity.TOP;
+            host.root().addView(small, lp);
+            ui.postDelayed(new Runnable() {
+                public void run() { if (!made[0]) { report(5, FAIL, "no surface in 3 s"); done(); } }
+            }, 3000);
+        } catch (Throwable e) {
+            report(5, FAIL, Probe.why(e));
+            done();
+        }
+    }
+
+    private boolean doneOnce;
+
+    private void done() {
+        if (doneOnce) return;
+        doneOnce = true;
+        if (sv != null) { try { host.root().removeView(sv); } catch (Throwable ignored) { } sv = null; }
+        if (small != null) { try { host.root().removeView(small); } catch (Throwable ignored) { } small = null; }
+        if (smallPic != null) { smallPic.recycle(); smallPic = null; }
         int best = 0;
-        for (int i = 1; i < 4; i++) if (fps[i] > fps[best] * 1.1) best = i;   // a clear win only
+        for (int i = 1; i < fps.length; i++) if (fps[i] > fps[best] * 1.1) best = i;   // a clear win only
         if (fps[best] > 0) {
             prefs.edit().putInt(P_PATH, best).commit();
-            report(5, OK, PATHS[best] + String.format(java.util.Locale.US, ", %.1f frames a second (today %.1f)", fps[best], fps[0]));
-        } else report(5, INFO, "nothing measured");
+            report(6, OK, PATHS[best] + String.format(java.util.Locale.US, ", %.1f frames a second (today %.1f)", fps[best], fps[0]));
+        } else report(6, INFO, "nothing measured");
         finish();
     }
 
