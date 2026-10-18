@@ -126,9 +126,18 @@ public class JniTest {
         short[] a = new short[ow * oh], b = new short[ow * oh];
         FilmCore.setOverlay(null, 0, 0);
         int rc = FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_LEVEL | FilmCore.F_HIST, 1, a, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
-        int sum = 0;
-        for (int i = 0; i < 64; i++) sum += info[5 + i];
-        check(rc == 0 && info[0] == 320 && info[1] > 200 && sum == info[0] * info[1], "composed: " + info[0] + "x" + info[1] + " frame, histogram whole " + FilmCore.lastError());
+        int sum = 0, mean = 0;
+        for (int i = 0; i < 64; i++) { sum += info[5 + i]; mean += i * info[5 + i]; }
+        check(rc == 0 && info[0] == 320 && info[1] > 200 && sum == ((info[0] + 1) / 2) * ((info[1] + 1) / 2),
+                "composed: " + info[0] + "x" + info[1] + " frame, histogram of every other pixel of every other row " + FilmCore.lastError());
+        {   // the histogram is of the picture with the look: a film's highlight setting moves it
+            int[] hp = p.clone(), info3 = new int[FilmCore.FI_COUNT];
+            hp[FilmCore.HIGHLIGHT] = 4; hp[FilmCore.SHADOW] = -4;
+            FilmCore.frame(c, jpeg, jpeg.length, lut, hp, FilmCore.F_HIST, 1, new short[ow * oh], null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info3, tm);
+            int brighter = 0;
+            for (int i = 0; i < 64; i++) brighter += i * info3[5 + i];
+            check(brighter > mean, "the histogram shows the look: brighter highlights, brighter histogram (" + mean / sum + " -> " + brighter / sum + ")");
+        }
         check(info[2] != FilmCore.NO_READING && info[FilmCore.FI_OVERLAY] == 0, "level read, no overlay laid in");
         boolean opaque = true;
         for (short v : a) if ((v & 15) != 15) { opaque = false; break; }
@@ -141,8 +150,13 @@ public class JniTest {
         double ma = 0, mr = 0;
         for (int i = 0; i < ow * oh; i++) { ma += (a[i] >> 12 & 15) + (a[i] >> 8 & 15) + (a[i] >> 4 & 15); mr += (ref[i] >> 12 & 15) + (ref[i] >> 8 & 15) + (ref[i] >> 4 & 15); }
         check(Math.abs(ma - mr) / (ow * oh * 3) < 0.25, "as bright as the 32-bit look: " + String.format("%.2f vs %.2f", ma / (ow * oh * 3), mr / (ow * oh * 3)));
+        // without the level the frame is decoded as Y'CbCr and looked up in the film's Y'CbCr table (v0.45.0)
         rc = FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 1, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
-        check(rc == 0 && info[2] == FilmCore.NO_READING && java.util.Arrays.equals(a, b), "no level asked: none read, the same picture");
+        int changed = 0;
+        for (int i = 0; i < ow * oh; i++) { int[] la = levels(a[i], FilmCore.FMT_4444), lb = levels(b[i], FilmCore.FMT_4444); for (int k = 0; k < 3; k++) if (la[k] != lb[k]) changed++; }
+        check(rc == 0 && info[2] == FilmCore.NO_READING && changed < ow * oh * 3 * 0.06, "no level asked: none read, decoded as Y'CbCr, "
+                + String.format("%.1f%%", changed * 100.0 / (ow * oh * 3)) + " of 4-bit values changed (RGB's within 6%)");
+        System.arraycopy(b, 0, a, 0, a.length);
         FilmCore.frame(c, null, 0, lut, p, 0, 1, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
         check(java.util.Arrays.equals(a, b), "the last frame again (no JPEG): the same picture");
         FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL, 2, a, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
@@ -205,6 +219,76 @@ public class JniTest {
             check(gap && type && faded && rest, "a fade row: a clear gap shows the picture exactly, type exactly its colour, the rest faded ("
                     + gap + type + faded + rest + ")");
         }
+        {   // type in colours off the 4-bit grid (v0.44's ink, an amber) is solid: one 4-bit colour across, on a fade and off it
+            int[] tv = new int[ow * oh];
+            for (int y = 0; y < 64; y++) for (int x = 0; x < ow; x++) tv[y * ow + x] = 0x99000000;
+            for (int y = 20; y < 44; y++) for (int x = 40; x < 140; x++) tv[y * ow + x] = 0xFFF4F1EA;
+            for (int y = 200; y < 230; y++) for (int x = 300; x < 400; x++) tv[y * ow + x] = 0xFFFFAA33;
+            FilmCore.setOverlay(tv, ow, oh);
+            short[] t1 = new short[ow * oh];
+            FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL, 5, t1, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
+            boolean inkSolid = true, amberSolid = true;
+            for (int y = 20; y < 44; y++) for (int x = 40; x < 140; x++) if (t1[y * ow + x] != t1[20 * ow + 40]) inkSolid = false;
+            for (int y = 200; y < 230; y++) for (int x = 300; x < 400; x++) if (t1[y * ow + x] != t1[200 * ow + 300]) amberSolid = false;
+            int ink = t1[20 * ow + 40] & 0xFFFF, amber = t1[200 * ow + 300] & 0xFFFF;
+            check(inkSolid && amberSolid && ink == 0xEEEF && amber == 0xFA3F, "opaque type off the 4-bit grid: solid, the nearest 4-bit colour (ink "
+                    + Integer.toHexString(ink) + ", amber " + Integer.toHexString(amber) + ")");
+        }
+        {   // against v0.44.1's composer (built into the host library, tools/frame_ref.h): the same frame, the same dither
+            byte[] small = cameraSize(jpeg);
+            int[][] ovls = { null, ov, fadeRow(ow, oh) };
+            String[] what = { "no overlay", "type and a half-black band", "a fade row with a gap and type" };
+            for (int k = 0; k < ovls.length; k++) {
+                FilmCore.setOverlay(ovls[k], ow, oh);
+                for (byte[] j : new byte[][] { jpeg, small }) for (int fmt = 0; fmt < 2; fmt++) {
+                    short[] now = new short[ow * oh], was = new short[ow * oh];
+                    int[] s1 = fmt == FilmCore.FMT_4444 ? sh : null;
+                    int r1 = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_TEMPORAL | FilmCore.F_LEVEL, 2, now, null, ow, oh, 1500, fmt, s1, 320, 240, info, tm);
+                    int r2 = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_TEMPORAL | REFERENCE, 2, was, null, ow, oh, 1500, fmt, s1, 320, 240, info, tm);
+                    double[] v = versus(now, was, fmt);
+                    check(r1 == 0 && r2 == 0 && v[0] >= 0.90 && v[1] <= 1 && Math.abs(v[2]) <= 0.02,
+                            String.format("as v0.44.1 composed it (%s, %s, %s): %.1f%% identical, at most %d level apart, mean %+.4f levels %s",
+                                    what[k], j == small ? "320 px frame" : "preview", fmt == FilmCore.FMT_4444 ? "4444" : "565", v[0] * 100, (int) v[1], v[2], FilmCore.lastError()));
+                }
+            }
+            FilmCore.setOverlay(ov, ow, oh);
+        }
+        {   // a still scene (v0.45.0): the frame's signature, and F_STILL stopping after the decode when it matches
+            byte[] still = cameraSize(jpeg, 0, 0), moved = cameraSize(jpeg, 12, 0), noisy = cameraSize(jpeg, 0, 3);
+            FilmCore.setStillRef(null, 0);
+            short[] s1 = new short[ow * oh];
+            rc = FilmCore.frame(c, still, still.length, lut, p, FilmCore.F_STILL, 4, s1, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
+            int[] sig = java.util.Arrays.copyOfRange(info, FilmCore.FI_SIG, FilmCore.FI_SIG + FilmCore.FI_SIG_N);
+            int lo = 255, hi = 0;
+            for (int v : sig) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+            check(rc == 0 && lo >= 0 && hi <= 255 && hi > lo, "no still scene yet: F_STILL composes, the signature written (" + lo + ".." + hi + ")");
+            FilmCore.setStillRef(sig, 4);
+            short[] mark = new short[ow * oh];
+            java.util.Arrays.fill(mark, (short) 0x1234);
+            short[] s2 = mark.clone();
+            int[] info2 = new int[FilmCore.FI_COUNT];
+            rc = FilmCore.frame(c, still, still.length, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            check(rc == 1 && java.util.Arrays.equals(s2, mark) && info2[0] == info[0] && info2[1] == info[1]
+                    && java.util.Arrays.equals(java.util.Arrays.copyOfRange(info2, FilmCore.FI_SIG, FilmCore.FI_SIG + FilmCore.FI_SIG_N), sig),
+                    "the same frame again with F_STILL: 1, the screen untouched, size and signature given (rc " + rc + ")");
+            s2 = mark.clone();
+            rc = FilmCore.frame(c, noisy, noisy.length, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            int most = 0;
+            for (int k = 0; k < FilmCore.FI_SIG_N; k++) most = Math.max(most, Math.abs(info2[FilmCore.FI_SIG + k] - sig[k]));
+            check(rc == 1 && java.util.Arrays.equals(s2, mark), "a little noise: still (cells at most " + most + " apart)");
+            s2 = mark.clone();
+            rc = FilmCore.frame(c, moved, moved.length, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            most = 0;
+            for (int k = 0; k < FilmCore.FI_SIG_N; k++) most = Math.max(most, Math.abs(info2[FilmCore.FI_SIG + k] - sig[k]));
+            check(rc == 0 && !java.util.Arrays.equals(s2, mark), "the camera turned a little (12 px): composed (cells up to " + most + " apart)");
+            s2 = mark.clone();
+            rc = FilmCore.frame(c, null, 0, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            check(rc == 0 && !java.util.Arrays.equals(s2, mark), "the last frame again (no JPEG) ignores F_STILL: composed");
+            FilmCore.setStillRef(null, 0);
+            s2 = mark.clone();
+            rc = FilmCore.frame(c, still, still.length, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            check(rc == 0 && !java.util.Arrays.equals(s2, mark), "the still scene forgotten: composed");
+        }
         check(FilmCore.setOverlay(new int[10], 2, 5) > gen && FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 2, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm) == 0
                 && info[FilmCore.FI_OVERLAY] == 0, "an overlay of another size isn't laid in");
         check(FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 2, null, new Object(), ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info, tm) == -2, "no Android bitmaps here: says so");
@@ -241,7 +325,8 @@ public class JniTest {
         for (Thread t : th) t.join();
         check(ok[0] && ok[1], "two composers on two threads, overlays swapped meanwhile: every picture right");
         String pr = FilmCore.probe(null);
-        check(pr.contains("multiply-adds") && pr.contains("MB/s"), "the speed probe: " + pr);
+        check(pr.contains("multiply-adds") && pr.contains("MB/s") && pr.matches(".*256 KB: \\d+/\\d+/\\d+/\\d+/\\d+/\\d+ ns$") && !pr.contains("\n"),
+                "the speed probe, one line: " + pr);
         System.out.println("  composer times (Mac): decode " + tm[0] + ", read " + tm[1] + ", look " + tm[2] + ", compose " + tm[3] + " ms");
         FilmCore.setOverlay(null, 0, 0);
         FilmCore.frameFree(c);
@@ -343,6 +428,72 @@ public class JniTest {
         }
         for (Thread t : th) t.join();
         check(ok[0] && ok[1] && ok[2] && previews, "three composers changing films on three threads, previews, reads ahead and forgets on a fourth: every picture exact");
+    }
+
+    /** FL_F_REFERENCE: v0.44.1's composer instead (host builds only, tools/frame_ref.h). */
+    static final int REFERENCE = 1 << 30;
+
+    /** now against was, 4-bit levels: the share of pixels identical, the largest channel difference, the mean difference. */
+    static double[] versus(short[] now, short[] was, int fmt) {
+        int same = 0, max = 0;
+        long sum = 0;
+        for (int i = 0; i < now.length; i++) {
+            int[] a = levels(now[i], fmt), b = levels(was[i], fmt);
+            boolean eq = true;
+            for (int k = 0; k < 3; k++) { int d = a[k] - b[k]; sum += d; if (d != 0) eq = false; max = Math.max(max, Math.abs(d)); }
+            if (eq) same++;
+        }
+        return new double[] { (double) same / now.length, max, (double) sum / (3.0 * now.length) };
+    }
+
+    static int[] levels(short v, int fmt) {
+        int u = v & 0xFFFF;
+        return fmt == FilmCore.FMT_4444 ? new int[] { u >> 12 & 15, u >> 8 & 15, u >> 4 & 15 } : new int[] { u >> 12, u >> 7 & 15, u >> 1 & 15 };
+    }
+
+    /** Fades as the viewfinder's are (one colour across a row), a row with a clear gap and opaque type, and ink type. */
+    static int[] fadeRow(int ow, int oh) {
+        int[] fv = new int[ow * oh];
+        for (int y = 0; y < 64; y++) for (int x = 0; x < ow; x++) fv[y * ow + x] = (0xB0 - y * 2) << 24 | 0x0C0C08;
+        for (int x = 0; x < ow; x++) fv[300 * ow + x] = 0x60000000;
+        for (int x = 100; x < 110; x++) fv[300 * ow + x] = 0;
+        for (int x = 200; x < 210; x++) fv[300 * ow + x] = 0xFFFFFFFF;
+        for (int y = 30; y < 50; y++) for (int x = 380; x < 420; x++) fv[y * ow + x] = 0xFFF4F1EA;
+        for (int y = 30; y < 50; y++) fv[y * ow + 379] = 0x80F4F1EA;
+        return fv;
+    }
+
+    /** The frame re-encoded as the camera sends them: 320 px wide, small and fairly compressed. */
+    static byte[] cameraSize(byte[] jpeg) throws java.io.IOException { return cameraSize(jpeg, -1, 0); }
+
+    /** ... or (dx >= 0) a little narrower a view, dx pixels further right, with noise of up to +-noise a channel. */
+    static byte[] cameraSize(byte[] jpeg, int dx, int noise) throws java.io.IOException {
+        java.awt.image.BufferedImage src = javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(jpeg));
+        java.awt.image.BufferedImage dst = new java.awt.image.BufferedImage(320, 216, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = dst.createGraphics();
+        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        if (dx < 0) g.drawImage(src, 0, 0, 320, 216, null);
+        else g.drawImage(src, -12 - dx, 0, 344, 216, null);
+        g.dispose();
+        if (noise > 0) {
+            java.util.Random rnd = new java.util.Random(7);
+            for (int y = 0; y < 216; y++) for (int x = 0; x < 320; x++) {
+                int v = dst.getRGB(x, y), o = 0;
+                for (int k = 0; k < 24; k += 8) { int ch = Math.max(0, Math.min(255, (v >> k & 255) + rnd.nextInt(2 * noise + 1) - noise)); o |= ch << k; }
+                dst.setRGB(x, y, o);
+            }
+        }
+        javax.imageio.ImageWriter w = javax.imageio.ImageIO.getImageWritersByFormatName("jpeg").next();
+        javax.imageio.ImageWriteParam wp = w.getDefaultWriteParam();
+        wp.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+        wp.setCompressionQuality(0.6f);
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        javax.imageio.stream.ImageOutputStream io = javax.imageio.ImageIO.createImageOutputStream(bo);
+        w.setOutput(io);
+        w.write(null, new javax.imageio.IIOImage(dst, null, null), wp);
+        io.close();
+        w.dispose();
+        return bo.toByteArray();
     }
 
     static byte[] read(String path) {

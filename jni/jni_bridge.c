@@ -196,10 +196,10 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_frame(JNIEnv *env, jclass
                        jbitmap ? (unsigned short *)pixels : (unsigned short *)out, ow, oh, stride, aspect1000, format,
                        shifts, max_w, max_h, info, tm, err, sizeof err);
     if (pixels) bm_unlock(env, jbitmap);
-    if (out) (*env)->ReleaseShortArrayElements(env, jout, out, 0);
+    if (out) (*env)->ReleaseShortArrayElements(env, jout, out, rc == 1 ? JNI_ABORT : 0);   /* a still frame wrote nothing */
     if (jpeg) (*env)->ReleaseByteArrayElements(env, jjpeg, jpeg, JNI_ABORT);
     if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
-    if (rc == 0) {
+    if (rc >= 0) {
         (*env)->SetIntArrayRegion(env, jinfo, 0, FL_FRAME_INFO, (const jint *)info);
         if (jtm) (*env)->SetIntArrayRegion(env, jtm, 0, FL_FRAME_TIMES, (const jint *)tm);
     } else snprintf(g_err, sizeof g_err, "%s", err);
@@ -217,6 +217,14 @@ JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_probe(JNIEnv *env, jcl
     fl_probe((unsigned char *)pixels, bytes, rep, sizeof rep);
     if (pixels) bm_unlock(env, jbitmap);
     return (*env)->NewStringUTF(env, rep);
+}
+
+JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_setStillRef(JNIEnv *env, jclass cls, jintArray jsig, jint threshold) {
+    int sig[FL_FI_SIG_N];
+    (void)cls;
+    if (!jsig || (*env)->GetArrayLength(env, jsig) < FL_FI_SIG_N) { fl_set_still_ref(NULL, 0); return; }
+    (*env)->GetIntArrayRegion(env, jsig, 0, FL_FI_SIG_N, (jint *)sig);
+    fl_set_still_ref(sig, threshold);
 }
 
 JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_setOverlay(JNIEnv *env, jclass cls, jintArray jargb, jint w, jint h) {

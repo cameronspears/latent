@@ -74,37 +74,51 @@ int fl_level(const unsigned char *rgb, int w, int h, int *out);
  * shifts[0..3] (red, green, blue, alpha; fully opaque). Returns 0, or -1 on bad sizes. */
 int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int ow, int oh, int aspect1000, const int *shifts);
 
-/* The viewfinder's frame composer (v0.38.0): one live JPEG to the screen's 16-bit picture in one go.
- * A context per thread (its buffers and film). fl_frame decodes (fitted inside max_w x max_h), reads the
- * level (flags & FL_F_LEVEL) and histogram (FL_F_HIST), applies the look, then for each of ow x oh screen
- * pixels (rows stride pixels apart): bilinear stretch of the centre aspect1000 crop, the overlay
- * (fl_set_overlay) where it shows, blue-noise dither to 4 bits a channel (moving with seq when
- * FL_F_TEMPORAL), packed as format: FL_FMT_565 (opaque RGB565 holding the 4-bit values exactly) or
- * FL_FMT_4444 (nibbles at shifts[0..3]). jpeg NULL: the last frame again (the overlay changed).
- * info[FL_FRAME_INFO]: 0, 1 frame size; 2..4 level (FL_NO_READING when not read); 5..68 histogram;
- * FL_FI_OVERLAY the overlay generation laid in (0: none). tm[FL_FRAME_TIMES]: ms per stage. */
+/* The viewfinder's frame composer (v0.38.0; one pass a screen row since v0.45.0): one live JPEG to the screen's
+ * 16-bit picture in one go. A context per thread (its buffers and film). fl_frame decodes (fitted inside
+ * max_w x max_h) as Y'CbCr, or as RGB when the level is asked (FL_F_LEVEL reads RGB) or there is no film, writes
+ * the frame's signature (FL_FI_SIG) and stops there when FL_F_STILL finds the scene still (returns 1, nothing
+ * written), applies the look (a table indexed by Y'CbCr, or the RGB one), reads the histogram of the looked
+ * picture (FL_F_HIST: 64 bins, every other pixel of every other row), then for each of ow x oh screen pixels
+ * (rows stride pixels apart): bilinear stretch of the centre aspect1000 crop, the overlay (fl_set_overlay)
+ * where it shows (opaque pixels at the nearest 4-bit colour, solid), blue-noise dither to 4 bits a channel
+ * (moving with seq when FL_F_TEMPORAL), packed as format: FL_FMT_565 (opaque RGB565 holding the 4-bit values
+ * exactly) or FL_FMT_4444 (nibbles at shifts[0..3]). jpeg NULL: the last frame again (the overlay changed;
+ * FL_F_STILL ignored). info[FL_FRAME_INFO]: 0, 1 frame size; 2..4 level (FL_NO_READING when not read); 5..68
+ * histogram; FL_FI_OVERLAY the overlay generation laid in (0: none); FL_FI_SIG.. the signature.
+ * tm[FL_FRAME_TIMES]: ms per stage. 0, 1 (still), or -1. */
 typedef struct fl_frame_ctx fl_frame_ctx;
 #define FL_F_LEVEL 1
 #define FL_F_HIST 2
 #define FL_F_TEMPORAL 4
+#define FL_F_STILL 8   /* after decoding, stop (return 1) when the signature is within the still scene's (fl_set_still_ref) */
+#define FL_F_REFERENCE (1 << 30)   /* host test builds only (FL_FRAME_REFERENCE): v0.44.1's composer, to compare with */
 #define FL_FMT_565 0
 #define FL_FMT_4444 1
 #define FL_NO_READING (-999999)
 #define FL_FI_OVERLAY 69
-#define FL_FRAME_INFO 70
+#define FL_FI_SIG 70      /* the decoded frame's signature: mean brightness (0..255) of FL_FI_SIG_W x FL_FI_SIG_H cells, row by row */
+#define FL_FI_SIG_W 8
+#define FL_FI_SIG_H 6
+#define FL_FI_SIG_N 48
+#define FL_FRAME_INFO 118
 #define FL_TM_DECODE 0
 #define FL_TM_READ 1
 #define FL_TM_LOOK 2
 #define FL_TM_COMPOSE 3
-#define FL_TM_BLEND 4     /* of compose: rows blended and the overlay laid in (estimated from every eighth row) */
-#define FL_TM_DITHER 5    /* of compose: dithered and packed (likewise); the rest of compose is stretching */
+#define FL_TM_BLEND 4     /* of compose: the rows blended, faded, dithered and packed, one pass (from every eighth row) */
+#define FL_TM_DITHER 5    /* of compose: the overlay's own pixels, the type (likewise); the rest of compose is stretching */
 #define FL_FRAME_TIMES 6
 fl_frame_ctx *fl_frame_new(void);
 void fl_frame_free(fl_frame_ctx *c);
 int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
              int flags, int seq, unsigned short *out, int ow, int oh, int stride, int aspect1000, int format,
              const int *shifts, int max_w, int max_h, int *info, int *tm, char *err, int errlen);
-/* This core's and its memory's speed, as a line of text for the log; px: a screen bitmap's pixels to fill too, or NULL. */
+/* The still scene FL_F_STILL compares with: sig (FL_FI_SIG_N cells, as fl_frame writes them), and how far a cell may
+ * move (0..255) and still count as still; sig NULL forgets it. Any thread (locked). */
+void fl_set_still_ref(const int *sig, int threshold);
+/* This core's and its memory's speed, as a line of text for the log (ending with a load chased through 8..256 KB:
+ * the caches); px: a screen bitmap's pixels to fill too, or NULL. */
 int fl_probe(unsigned char *px, int bytes, char *out, int len);
 
 /* The overlay for every frame from now on: argb (as Android's getPixels gives it, not premultiplied),

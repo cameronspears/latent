@@ -118,6 +118,11 @@ final class FilmCore {
     static native int pinCore(int core);
 
     // ---- the viewfinder's frame composer (v0.38.0): one live JPEG to the screen's 16-bit picture in one go
+    /**
+     * F_LEVEL: read the level (the frame is then decoded as RGB; otherwise as Y'CbCr, a third quicker, through
+     * the film's Y'CbCr table). F_HIST: the histogram of the picture with the look, as it will develop (every
+     * other pixel of every other row). F_TEMPORAL: the dither moves with seq.
+     */
     static final int F_LEVEL = 1, F_HIST = 2, F_TEMPORAL = 4;
     /**
      * F_STILL: after decoding, compare the frame's signature (info[FI_SIG..], FI_SIG_N cells of mean
@@ -128,6 +133,11 @@ final class FilmCore {
     static final int F_STILL = 8;
     static final int FMT_565 = 0, FMT_4444 = 1;
     static final int NO_READING = -999999, FI_OVERLAY = 69, FI_SIG = 70, FI_SIG_N = 48, FI_COUNT = 118;
+    /**
+     * frame()'s ms per stage: decode, read (the level), look, compose; of compose (from every eighth row), TM_BLEND
+     * the rows in one pass (blend, fades, dither, packing: v0.45.0) and TM_DITHER the overlay's own pixels (the
+     * type); the rest of compose is stretching.
+     */
     static final int TM_DECODE = 0, TM_READ = 1, TM_LOOK = 2, TM_COMPOSE = 3, TM_BLEND = 4, TM_DITHER = 5, TM_COUNT = 6;
 
     /** A composer for one thread (its buffers and its film); 0 if there's no memory. */
@@ -135,20 +145,24 @@ final class FilmCore {
     static native void frameFree(long ctx);
 
     /**
-     * One frame: jpeg decoded (fitted inside maxW x maxH), the level and histogram read when flags ask,
-     * the look, then for each of ow x oh screen pixels the 3:2 (aspect1000) crop stretched, the overlay
-     * laid in, dithered (blue noise, moving with seq under F_TEMPORAL) to 4 bits a channel in format
-     * (FMT_565 opaque, or FMT_4444 with shifts). Written into bitmap (an android.graphics.Bitmap, ow x oh, that format) when given,
-     * else into out. jpeg null: the last frame again, with the overlay as it is now. info[FI_COUNT]: frame
-     * size, level (NO_READING when not read), histogram, FI_OVERLAY the overlay generation laid in; tm
-     * [TM_COUNT] ms per stage. Returns 0, 1 (F_STILL and the scene is still: nothing written), -1 (lastError),
-     * or -2 when bitmaps can't be written here.
+     * One frame: jpeg decoded (fitted inside maxW x maxH), its signature written, the level read when flags ask,
+     * the look, its histogram when asked, then for each of ow x oh screen pixels the 3:2 (aspect1000) crop
+     * stretched, the overlay laid in (opaque type at the nearest 4-bit colour, solid), dithered (blue noise,
+     * moving with seq under F_TEMPORAL) to 4 bits a channel in format (FMT_565 opaque, or FMT_4444 with shifts),
+     * one pass a row. Written into bitmap (an android.graphics.Bitmap, ow x oh, that format) when given, else
+     * into out. jpeg null: the last frame again, with the overlay as it is now (F_STILL ignored). info[FI_COUNT]:
+     * frame size, level (NO_READING when not read), histogram, FI_OVERLAY the overlay generation laid in, the
+     * signature at FI_SIG; tm[TM_COUNT] ms per stage. Returns 0, 1 (F_STILL and the scene is still: nothing
+     * written; size, signature and TM_DECODE given), -1 (lastError), or -2 when bitmaps can't be written here.
      */
     static native int frame(long ctx, byte[] jpeg, int len, String lutPath, int[] params, int flags, int seq,
                             short[] out, Object bitmap, int ow, int oh, int aspect1000, int format,
                             int[] shifts, int maxW, int maxH, int[] info, int[] tm);
 
-    /** This core's and its memory's speed, as a line for the log; bitmap (an android.graphics.Bitmap) is filled too, or null. */
+    /**
+     * This core's and its memory's speed, as a line for the log, ending with a load chased through 8..256 KB (the
+     * caches: where it slows); bitmap (an android.graphics.Bitmap) is filled too, or null.
+     */
     static native String probe(Object bitmap);
 
     /**
