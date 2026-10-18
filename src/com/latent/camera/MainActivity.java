@@ -204,6 +204,9 @@ public class MainActivity extends Activity {
         resumed = false;
         ui.removeCallbacks(shootWhenSettled);   // left some other way: don't jump to shooting later
         shootPending = false;
+        shootAfterFrame = false;   // nor shoot, or load and shoot, once the frame in hand is done
+        loadAfter = false;
+        shootAfterLoad = false;
         final String census = unmappedLine();   // the buttons pressed this visit that Latent doesn't use
         final Runnable keysLog = new Runnable() { public void run() { logKeys(); if (census != null) devLog(census); } };
         worker.execute(keysLog);
@@ -610,6 +613,11 @@ public class MainActivity extends Activity {
     }
 
     private void goShoot() {
+        if (!resumed) {   // left meanwhile (the camera's own mode may be in front): never open the camera behind it
+            shootAfterFrame = false;
+            shootPending = false;
+            return;
+        }
         if (developing != null && devQuiet) {   // the photo in hand finishes first (a frame half-written is wasted)
             paused = true;
             shootAfterFrame = true;
@@ -1187,6 +1195,7 @@ public class MainActivity extends Activity {
                         devLogAll(nl);
                         msg = stock.name + " loaded" + (why == null ? "  ·  camera set to neutral" : ". Camera " + why);
                     } else {
+                        neutralTried = false;   // so the next card read in front applies it for this roll
                         devLog("load film: " + made.label() + " loaded with Latent away; the camera is set neutral on the next open");
                         msg = stock.name + " loaded";
                     }
@@ -1308,6 +1317,7 @@ public class MainActivity extends Activity {
         if (!quiet) heroGen++;
         devViewOf = null;   // the roll asked about afresh (frames may have developed on an earlier visit)
         developing = r;
+        developNow = false;   // the restart's 'at once' is spent: a waiting roll after this waits its 4 s untouched
         paused = false;
         devFailed = 0;
         failed.clear();
@@ -1503,6 +1513,7 @@ public class MainActivity extends Activity {
             // press it waits on, and the frame in hand took longer than its 4 s). So it waits for the next open.
             boolean waiting = !devQuiet && waitingRoll(r), held = waiting && resumed && !shootAfterFrame;
             if (held) waitingHeld = true;
+            else if (!devQuiet && resumed && !shootAfterFrame) lastPressAt = SystemClock.uptimeMillis();   // MENU here: a waiting roll waits 4 s from now
             stopDevelop(devQuiet ? null : held ? "Paused. It carries on the next time you open Latent."
                     : waiting ? "Paused" : "Paused. Press the centre button to carry on.");
             return;

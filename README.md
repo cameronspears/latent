@@ -117,6 +117,8 @@ redraws it once a second. Any key, or anything moving, and it's back to full rat
 - **A roll changed part-way** (Change film on a roll of 12, 24 or 36) keeps the frames shot so
   far, and they develop the same way: in the red darkroom once the buttons have been left alone
   for 4 seconds, never over Photos. Photos then opens on that roll.
+- A frame that can't be developed (a damaged original, a full card) is tried once each time you
+  open Latent, and Photos says how many couldn't be. Its original stays in the camera roll.
 - A develop after you've opened the viewfinder starts with a restart of Latent (a few seconds on a
   red screen): the camera's image memory comes back only then.
 
