@@ -8,6 +8,7 @@ SETTINGS=(
   "--lut assets/luts/CUBANNEG.CUB --grain 6 --size 2 --hl -2 --sh 1"
   "--lut assets/luts/PORTRA4W.CUB --grain 0"
   "--grain 4 --hl 3 --size 3"
+  "--lut assets/luts/PAINTRLY.CUB --grain 5 --size 4"
 )
 same=0 diff=0
 for img in "$@"; do

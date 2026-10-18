@@ -239,9 +239,12 @@ the block develop's do, and none can be on core 0:
   (CPU under 1.3x wall time) keeps the fallback on one thread, on core 3. Safe; only slower.
 - The software line in `TIMING.TXT` has `ran=N` after `threads=`, and why a thread stayed out (as the
   hardware line's `threads=` does), e.g. `ran=3 (core 2 refused (errno 22))`.
-- Every develop identical to v0.45.0's (`compare-builds.sh`, 24 of 24 at 1 and 3 threads and 12 of 12
-  at 4; LAKE.JPG is progressive and refused by both), `threads-test.sh` (39 develops with cores
-  refused), `sanitize-test.sh`, `cache-test.sh`, `sony-test.sh`. No Sony or camera calls.
+- Every develop identical to the build without it (on its own branch, v0.45.0's: `compare-builds.sh`, 24
+  of 24 at 1 and 3 threads and 12 of 12 at 4; LAKE.JPG is progressive and refused by both),
+  `threads-test.sh` (39 develops with cores refused), `sanitize-test.sh`, `cache-test.sh`,
+  `sony-test.sh`. No Sony or camera calls. Merged onto v0.46.0 with the first frame's prewarm: every
+  develop identical to v0.46.0's (`compare-builds.sh` against 438a790's fltool, 32 of 32 with
+  Painterly's paper; against v0.45.0 the grain differs, as v0.46.0 meant), `threads-test.sh` 52 of 52.
 
 ## Camera facts learned the hard way
 
