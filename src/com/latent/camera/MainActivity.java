@@ -488,6 +488,7 @@ public class MainActivity extends Activity {
     }
 
     private void openSettings() {
+        cancelShoot();
         mode = SETTINGS;
         List<String[]> rows = settingsRows();
         settingsSel = Math.max(1, Math.min(settingsSel, rows.size() - 1));
@@ -579,6 +580,14 @@ public class MainActivity extends Activity {
         long since = NeutralSettings.sinceLastWrite();
         if (loading || refreshing > 0 || filing || since < 0 || since >= SHOOT_SETTLE_MS) return 0;
         return (int) ((SHOOT_SETTLE_MS - since + 999) / 1000);
+    }
+
+    /** A shoot waiting for the camera to settle is dropped: you went somewhere else (the menu, Photos) instead. */
+    private void cancelShoot() {
+        if (!shootPending) return;
+        shootPending = false;
+        ui.removeCallbacks(shootWhenSettled);
+        ui.removeCallbacks(settleTick);
     }
 
     private void goShoot() {
@@ -1806,6 +1815,7 @@ public class MainActivity extends Activity {
      * then the screen shows only its title. Nothing in Photos develops or ends a roll. UI thread.
      */
     private void openPhotos(final Roll onRoll, int from) {
+        cancelShoot();   // a half-press still waiting to shoot doesn't open the viewfinder over Photos
         closePhotos();   // anything of an earlier visit goes first
         mode = SHEET;
         photosFrom = from;

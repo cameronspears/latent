@@ -686,14 +686,16 @@ final class Ui {
      * opens something, "" is a heading. "Why not" is empty when the row can act now; otherwise the row is grey
      * and the footer says why (Hasselblad). The roll's two actions when they apply, then the photos: nothing to
      * set (v0.45.0: what the settings and the camera checks settled is how Latent works now). "This roll" heads
-     * the list only over a row of the roll's (a roll developing has none: then it is Latent's, as with no roll).
+     * the roll's rows only when it has some (a roll developing has none); Photos, which is every roll, has its own.
      */
     static List<String[]> menuRows(Menu m) {
         List<String[]> rows = new ArrayList<String[]>();
-        boolean rollRows = m.roll && (m.developNow || m.changeFilm);
-        rows.add(new String[] { rollRows ? "This roll" : "Latent", "", "", "" });
-        if (m.roll && m.developNow) rows.add(new String[] { "Develop now", "\u203a", "develop", "" });
-        if (m.roll && m.changeFilm) rows.add(new String[] { "Change film", "\u203a", "change", "" });
+        if (m.roll && (m.developNow || m.changeFilm)) {
+            rows.add(new String[] { "This roll", "", "", "" });
+            if (m.developNow) rows.add(new String[] { "Develop now", "\u203a", "develop", "" });
+            if (m.changeFilm) rows.add(new String[] { "Change film", "\u203a", "change", "" });
+        }
+        rows.add(new String[] { "All rolls", "", "", "" });
         rows.add(new String[] { "Photos", "\u203a", "photos", m.photos ? "" : "No photos yet. Developed photos appear here." });
         return rows;
     }
