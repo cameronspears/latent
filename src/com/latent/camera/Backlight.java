@@ -3,8 +3,9 @@ package com.latent.camera;
 /**
  * The backlight, the largest share of the camera's power while a screen is up (the panel is a backlit
  * LCD: Latent's black saves nothing, only the light does). This works out the level the screen wants
- * now and which presses only wake it; MainActivity (and Relaunch) set the level through the window's
- * screenBrightness and ask again at next(). Pure logic, tested on the Mac (tests/RollTest).
+ * now and which presses only wake it; MainActivity (and Relaunch, the darkroom's light only) set the level
+ * through the window's screenBrightness and ask again at next(). Pure logic, tested on the Mac (tests/LogicTest,
+ * run by tools/roll-test.sh).
  *
  *   working   the darkroom: the darkroom's light. A turn of the wheel or an arrow in the darkroom brightens
  *             it for PEEK_MS, as an always-on display wakes when it's touched, then it goes down again.

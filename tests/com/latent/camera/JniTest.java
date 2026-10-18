@@ -1,12 +1,26 @@
 package com.latent.camera;
 
-/** Host test: drives the real JNI bridge (built as a macOS library) exactly as the app does. */
+/**
+ * Host test: drives the real JNI bridge (built as a macOS library) exactly as the app does.
+ *
+ *   JniTest IN.JPG OUTDIR LUT                  the camera's build: everything
+ *   JniTest IN.JPG OUTDIR LUT one-threshold    a library built with FL_DITHER_GREEN 0: the composer against
+ *                                              v0.44.1's, pixel for pixel
+ */
 public class JniTest {
     public static void main(String[] a) throws Exception {
         String in = a[0], outDir = a[1], lut = a[2];
         int[] p = new int[FilmCore.COUNT];
         p[FilmCore.HIGHLIGHT] = -2; p[FilmCore.SHADOW] = 1; p[FilmCore.GRAIN] = 5;
         p[FilmCore.GRAIN_SIZE] = 2; p[FilmCore.QUALITY] = 95; p[FilmCore.SEED] = 42; p[FilmCore.THREADS] = 4;
+        if (a.length > 3 && a[3].equals("one-threshold")) {
+            check(FilmCore.makePreview(in, outDir + "/PRV1.JPG") == 0, "a screen-size frame to compose " + FilmCore.lastError());
+            long c = FilmCore.frameNew();
+            versusV0441(c, read(outDir + "/PRV1.JPG"), lut, p, true);
+            FilmCore.frameFree(c);
+            System.out.println("JNI OK (one threshold, against v0.44.1)");
+            return;
+        }
         final int[] calls = new int[2];
         int rc = FilmCore.process(in, outDir + "/FLA04491.JPG", lut, outDir + "/PRV04491.JPG", p, new FilmCore.Progress() {
             public void onProgress(int pct) { calls[0]++; calls[1] = pct; }
@@ -100,9 +114,7 @@ public class JniTest {
         check(same, "565 and 4444 carry the same picture");
 
         // the overlay: opaque white in a box, half-black over a band, nothing elsewhere
-        int[] ov = new int[ow * oh];
-        for (int y = 100; y < 140; y++) for (int x = 200; x < 300; x++) ov[y * ow + x] = 0xFFFFFFFF;
-        for (int y = 0; y < 20; y++) for (int x = 0; x < ow; x++) ov[y * ow + x] = 0x80000000;
+        final int[] ov = boxOverlay(ow, oh);
         int gen = FilmCore.setOverlay(ov, ow, oh);
         check(gen > 0, "overlay set (generation " + gen + ")");
         FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL, 2, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
@@ -150,25 +162,8 @@ public class JniTest {
             check(inkSolid && amberSolid && ink == 0xEEEF && amber == 0xFA3F, "opaque type off the 4-bit grid: solid, the nearest 4-bit colour (ink "
                     + Integer.toHexString(ink) + ", amber " + Integer.toHexString(amber) + ")");
         }
-        {   // against v0.44.1's composer (built into the host library, tools/frame_ref.h): the same frame, the same dither
-            byte[] small = cameraSize(jpeg);
-            int[][] ovls = { null, ov, fadeRow(ow, oh) };
-            String[] what = { "no overlay", "type and a half-black band", "a fade row with a gap and type" };
-            for (int k = 0; k < ovls.length; k++) {
-                FilmCore.setOverlay(ovls[k], ow, oh);
-                for (byte[] j : new byte[][] { jpeg, small }) for (int fmt = 0; fmt < 2; fmt++) {
-                    short[] now = new short[ow * oh], was = new short[ow * oh];
-                    int[] s1 = fmt == FilmCore.FMT_4444 ? sh : null;
-                    int r1 = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_TEMPORAL | RGB, 2, now, null, ow, oh, 1500, fmt, s1, 320, 240, info, tm);
-                    int r2 = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_TEMPORAL | REFERENCE, 2, was, null, ow, oh, 1500, fmt, s1, 320, 240, info, tm);
-                    double[] v = versus(now, was, fmt);
-                    check(r1 == 0 && r2 == 0 && v[0] >= 0.90 && v[1] <= 1 && Math.abs(v[2]) <= 0.02,
-                            String.format("as v0.44.1 composed it (%s, %s, %s): %.1f%% identical, at most %d level apart, mean %+.4f levels %s",
-                                    what[k], j == small ? "320 px frame" : "preview", fmt == FilmCore.FMT_4444 ? "4444" : "565", v[0] * 100, (int) v[1], v[2], FilmCore.lastError()));
-                }
-            }
-            FilmCore.setOverlay(ov, ow, oh);
-        }
+        versusV0441(c, jpeg, lut, p, false);
+        FilmCore.setOverlay(ov, ow, oh);
         {   // a still scene (v0.45.0): the frame's signature, and F_STILL stopping after the decode when it matches
             byte[] still = cameraSize(jpeg, 0, 0), moved = cameraSize(jpeg, 12, 0), noisy = cameraSize(jpeg, 0, 3);
             FilmCore.setStillRef(null, 0);
@@ -344,6 +339,83 @@ public class JniTest {
         }
         for (Thread t : th) t.join();
         check(ok[0] && ok[1] && ok[2] && previews, "three composers changing films on three threads, previews, reads ahead and forgets on a fourth: every picture exact");
+        threadErrors(photo, lut, p);
+    }
+
+    /**
+     * Each thread's own last error: three threads failing in different ways at once (a missing film read ahead, a
+     * preview into too small a buffer, a frame with no buffers), each reading lastError() right after. Until
+     * v0.45.0 they shared one buffer, and a thread could read another's failure.
+     */
+    static void threadErrors(final String photo, final String lut, final int[] p) throws Exception {
+        final int rounds = 400;
+        final int[] wrong = new int[3];
+        final String[] seen = new String[3];
+        Thread[] th = new Thread[3];
+        for (int k = 0; k < 3; k++) {
+            final int kk = k;
+            th[k] = new Thread() {
+                public void run() {
+                    long c = kk == 2 ? FilmCore.frameNew() : 0;
+                    for (int n = 0; n < rounds; n++) {
+                        String want;
+                        if (kk == 0) { FilmCore.cacheLut(lut + ".missing" + n); want = ".missing" + n; }
+                        else if (kk == 1) { FilmCore.preview(photo, lut, p, FilmCore.PREVIEW_FIT, new int[4], 432, 288, new int[2]); want = "bad preview buffer"; }
+                        else { FilmCore.frame(c, null, 0, lut, p, 0, n, null, null, 540, 480, 1500, FilmCore.FMT_565, null, 320, 240, new int[FilmCore.FI_COUNT], null); want = "bad frame buffers"; }
+                        String e = FilmCore.lastError();
+                        if (!e.contains(want) || (kk == 0 && !e.endsWith(want))) { wrong[kk]++; seen[kk] = e; }
+                    }
+                    if (c != 0) FilmCore.frameFree(c);
+                }
+            };
+        }
+        for (Thread t : th) t.start();
+        for (Thread t : th) t.join();
+        check(wrong[0] + wrong[1] + wrong[2] == 0, "three threads failing at once, " + rounds + " times each: each reads its own error"
+                + (wrong[0] + wrong[1] + wrong[2] > 0 ? " (wrong: " + java.util.Arrays.toString(wrong) + ", e.g. " + seen[0] + " / " + seen[1] + " / " + seen[2] + ")" : ""));
+        final String[] fresh = new String[1];
+        Thread t = new Thread() { public void run() { fresh[0] = FilmCore.lastError(); } };
+        t.start();
+        t.join();
+        check(fresh[0].isEmpty(), "a thread that hasn't failed has no error (\"" + fresh[0] + "\")");
+    }
+
+    /**
+     * Against v0.44.1's composer (built into the host library, tools/frame_ref.h): the same frame, the same blue
+     * noise. Today's dither gives green the opposite threshold (FL_DITHER_GREEN, the camera's build since v0.45.0),
+     * so its pictures stay within a level of v0.44.1's with the same mean, but not pixel for pixel; bitLevel (a
+     * library built with FL_DITHER_GREEN 0, one threshold as v0.44.1's) also wants 90% of pixels identical.
+     */
+    static void versusV0441(long c, byte[] jpeg, String lut, int[] p, boolean bitLevel) throws Exception {
+        final int ow = 540, oh = 480;
+        final int[] sh = { 12, 8, 4, 0 };
+        int[] info = new int[FilmCore.FI_COUNT], tm = new int[FilmCore.TM_COUNT];
+        byte[] small = cameraSize(jpeg);
+        int[][] ovls = { null, boxOverlay(ow, oh), fadeRow(ow, oh) };
+        String[] what = { "no overlay", "type and a half-black band", "a fade row with a gap and type" };
+        for (int k = 0; k < ovls.length; k++) {
+            FilmCore.setOverlay(ovls[k], ow, oh);
+            for (byte[] j : new byte[][] { jpeg, small }) for (int fmt = 0; fmt < 2; fmt++) {
+                short[] now = new short[ow * oh], was = new short[ow * oh];
+                int[] s1 = fmt == FilmCore.FMT_4444 ? sh : null;
+                int r1 = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_TEMPORAL | RGB, 2, now, null, ow, oh, 1500, fmt, s1, 320, 240, info, tm);
+                int r2 = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_TEMPORAL | REFERENCE, 2, was, null, ow, oh, 1500, fmt, s1, 320, 240, info, tm);
+                double[] v = versus(now, was, fmt);
+                check(r1 == 0 && r2 == 0 && (!bitLevel || v[0] >= 0.90) && v[1] <= 1 && Math.abs(v[2]) <= 0.02,
+                        String.format("as v0.44.1 composed it (%s, %s, %s, %s): %.1f%% identical, at most %d level apart, mean %+.4f levels %s",
+                                what[k], j == small ? "320 px frame" : "preview", fmt == FilmCore.FMT_4444 ? "4444" : "565",
+                                bitLevel ? "one threshold" : "as the camera dithers", v[0] * 100, (int) v[1], v[2], FilmCore.lastError()));
+            }
+        }
+        FilmCore.setOverlay(null, 0, 0);
+    }
+
+    /** Opaque white in a box, half-black over a band at the top, nothing elsewhere. */
+    static int[] boxOverlay(int ow, int oh) {
+        int[] ov = new int[ow * oh];
+        for (int y = 100; y < 140; y++) for (int x = 200; x < 300; x++) ov[y * ow + x] = 0xFFFFFFFF;
+        for (int y = 0; y < 20; y++) for (int x = 0; x < ow; x++) ov[y * ow + x] = 0x80000000;
+        return ov;
     }
 
     /** FL_F_REFERENCE: v0.44.1's composer instead (host builds only, tools/frame_ref.h). */

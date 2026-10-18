@@ -7,6 +7,10 @@
  *
  * --bench: Mac timings of each stage, today's composer against v0.44.1's (ratios only: the camera is ~70x slower
  * and ranks ARM code differently; tools/asm-budget.sh counts its instructions). --render: PPMs of composed frames.
+ *
+ * Built as the camera's (green's opposite dither threshold, FL_DITHER_GREEN 1), the composer is held within a level
+ * of v0.44.1's with the same mean, and its dither's brightness noise below one threshold's; built with
+ * -DFL_DITHER_GREEN=0 (one threshold, as v0.44.1's), pixel for pixel too. tools/frame-test.sh runs both.
  */
 #define FL_FRAME_REFERENCE 1
 #include "../jni/filmcore.c"
@@ -113,6 +117,19 @@ static void versus(const unsigned short *a, const unsigned short *b, int n, doub
         s += eq;
     }
     *same = (double)s / n; *maxd = m; *mean = (double)sum / (3.0 * n);
+}
+
+/* How many of a's channel values are more than one level from b's; changed[k] counts those that differ at all in
+ * channel k (red, green, blue). */
+static long beyond_one(const unsigned short *a, const unsigned short *b, int n, long *changed) {
+    int i, k;
+    long far = 0;
+    for (i = 0; i < n; i++) {
+        int la[3], lb[3];
+        lv(a[i], la); lv(b[i], lb);
+        for (k = 0; k < 3; k++) { int d = abs(la[k] - lb[k]); if (d > 1) far++; if (d && changed) changed[k]++; }
+    }
+    return far;
 }
 
 /* An overlay like the viewfinder's: fades over the top and bottom bands, ink type, a translucent edge. */
@@ -279,6 +296,7 @@ static void test_versus_reference(frame_jpg *fr, int nfr) {
     unsigned int *ov = viewfinder_overlay();
     int info[FL_FRAME_INFO], tm[FL_FRAME_TIMES], i, f, o, worst_max = 0;
     double worst_same = 1, worst_mean = 0;
+    long far = 0, all = 0;
     char err[256];
     for (o = 0; o < 2; o++) {
         fl_set_overlay(o ? ov : NULL, OW, OH);
@@ -291,15 +309,24 @@ static void test_versus_reference(frame_jpg *fr, int nfr) {
                 continue;
             }
             versus(a, b, OW * OH, &same, &maxd, &mean);
+            far += beyond_one(a, b, OW * OH, NULL);
+            all += 3L * OW * OH;
             if (getenv("FT_VERBOSE")) printf("    %s %d %d: %.1f%% %+.4f\n", fr[i].name, f, o, same * 100, mean);
             if (same < worst_same) worst_same = same;
             if (maxd > worst_max) worst_max = maxd;
             if (fabs(mean) > fabs(worst_mean)) worst_mean = mean;
         }
     }
-    check(worst_same >= 0.90 && worst_max <= 1 && fabs(worst_mean) <= 0.02,
-          "the composer against v0.44.1's, %d frames x %d films, with and without an overlay (the same decode): at worst %.1f%% identical, %d level apart, mean %+.4f levels",
-          nfr, NFILMS, worst_same * 100, worst_max, worst_mean);
+    if (!FL_DITHER_GREEN)   /* one threshold, as v0.44.1's: nearly every pixel the same, none a level further */
+        check(worst_same >= 0.90 && worst_max <= 1 && fabs(worst_mean) <= 0.02,
+              "the composer against v0.44.1's (one threshold, as v0.44.1's), %d frames x %d films, with and without an overlay (the same decode): "
+              "at worst %.1f%% identical, %d level apart, mean %+.4f levels", nfr, NFILMS, worst_same * 100, worst_max, worst_mean);
+    else   /* the camera's: green's threshold moves green a level here and there (test_green_dither), on top of the
+            * composer's own rounding against v0.44.1's (a level, rarely): the same mean, a few in a million two apart */
+        check(worst_max <= 2 && far * 100000L <= all && fabs(worst_mean) <= 0.02,
+              "the composer against v0.44.1's (green's threshold opposite, as the camera's), %d frames x %d films, with and without an overlay "
+              "(the same decode): mean %+.4f levels, within a level but %ld of %ld values (two there; %.1f%% of pixels identical)",
+              nfr, NFILMS, worst_mean, far, all, worst_same * 100);
     fl_set_overlay(NULL, 0, 0);
     fl_frame_free(c);
     free(a); free(b); free(ov);
@@ -418,7 +445,7 @@ static void render(const char *dir, const char *name, const unsigned short *o) {
 }
 
 /* Composed frames for judging by eye (tools/frame-test.sh --render DIR): v0.44.1's, today's, and today's with the
- * options that are off (sharpening at two strengths; built with FL_DITHER_GREEN 1, green's opposite threshold).
+ * options that are off (sharpening at two strengths; built with FL_DITHER_GREEN 0, one threshold as v0.44.1's).
  * No overlay: the picture alone. */
 /* A flat mid-grey and a ramp, as a camera frame: for the dither's own noise. */
 static int test_card(frame_jpg *out) {
@@ -466,6 +493,71 @@ static void dither_noise(const unsigned short *o, double *luma, double *chroma) 
     *chroma = sqrt(cs / (3.0 * n));
 }
 
+/* ---- the dither's own noise on the test card's flat greys (no film, no overlay), four frames' dither (the blue noise
+ * moved under F_TEMPORAL): green's opposite threshold (the camera's) against one threshold for all three, and one
+ * threshold against v0.44.1's (the same blue noise). Green's opposite trades brightness noise for faint colour */
+static void test_dither_noise(void) {
+    fl_frame_ctx *c = fl_frame_new();
+    unsigned short *a = (unsigned short *)malloc(sizeof(unsigned short) * OW * OH);
+    int info[FL_FRAME_INFO], tm[FL_FRAME_TIMES], seq, k, ok = 1;
+    double l[3] = { 0, 0, 0 }, ch[3] = { 0, 0, 0 };   /* green's opposite, one threshold, v0.44.1's */
+    char err[256];
+    frame_jpg card;
+    test_card(&card);
+    fl_set_overlay(NULL, 0, 0);
+    for (seq = 1; seq <= 4; seq++) for (k = 0; k < 3; k++) {
+        double l1, c1;
+        g_dither_green = k == 0;
+        if (fl_frame(c, card.jpg, card.len, NULL, PARAMS, FL_F_TEMPORAL | (k == 2 ? FL_F_REFERENCE : FL_F_RGB), seq, a, OW, OH, OW, 1500, FL_FMT_4444, SH,
+                     320, 240, info, tm, err, sizeof err)) { ok = 0; continue; }
+        dither_noise(a, &l1, &c1);
+        l[k] += l1 / 4; ch[k] += c1 / 4;
+    }
+    g_dither_green = FL_DITHER_GREEN;
+    check(ok && l[0] < l[1] * 0.8 && fabs(l[1] - l[2]) <= l[2] * 0.05,
+          "the dither on flat greys: brightness noise %.3f levels with green's threshold opposite (the camera's), %.3f with one threshold (%.0f%% of it; "
+          "v0.44.1's %.3f), colour %.3f against %.3f", l[0], l[1], 100 * l[0] / (l[1] > 0 ? l[1] : 1), l[2], ch[0], ch[1]);
+    free(card.jpg);
+    free(a);
+    fl_frame_free(c);
+}
+
+/* ---- green's opposite threshold on its own: every frame through every film, with and without the viewfinder's
+ * overlay, the camera's dither against one threshold's in the same composer. Red and blue untouched, green within a
+ * level everywhere, the same mean; the overlay's opaque type exactly as it was (solid: no threshold moves it) */
+static void test_green_dither(frame_jpg *fr, int nfr) {
+    fl_frame_ctx *c = fl_frame_new();
+    unsigned short *a = (unsigned short *)malloc(sizeof(unsigned short) * OW * OH), *b = (unsigned short *)malloc(sizeof(unsigned short) * OW * OH);
+    unsigned int *ov = viewfinder_overlay();
+    int info[FL_FRAME_INFO], tm[FL_FRAME_TIMES], i, f, o, k, worst_max = 0, type_same = 1;
+    long changed[3] = { 0, 0, 0 }, far = 0;
+    double worst_mean = 0;
+    char err[256];
+    for (o = 0; o < 2; o++) {
+        fl_set_overlay(o ? ov : NULL, OW, OH);
+        for (i = 0; i < nfr; i++) for (f = 0; f < NFILMS; f++) {
+            double same, mean;
+            int maxd;
+            g_dither_green = 1;
+            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], PARAMS, FL_F_TEMPORAL, 5, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)) { check(0, "compose: %s", err); continue; }
+            g_dither_green = 0;
+            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], PARAMS, FL_F_TEMPORAL, 5, b, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)) { check(0, "compose: %s", err); continue; }
+            versus(a, b, OW * OH, &same, &maxd, &mean);
+            far += beyond_one(a, b, OW * OH, changed);
+            if (maxd > worst_max) worst_max = maxd;
+            if (fabs(mean) > fabs(worst_mean)) worst_mean = mean;
+            if (o) for (k = 0; k < OW * OH; k++) if ((ov[k] >> 24) == 255 && a[k] != b[k]) type_same = 0;
+        }
+    }
+    g_dither_green = FL_DITHER_GREEN;
+    check(!changed[0] && !changed[2] && worst_max <= 1 && !far && fabs(worst_mean) <= 0.02 && type_same,
+          "green's opposite threshold alone (%d frames x %d films, with and without an overlay): red and blue untouched, green within %d level everywhere "
+          "(%ld values moved), mean %+.4f levels; opaque type exactly as before", nfr, NFILMS, worst_max, changed[1], worst_mean);
+    fl_set_overlay(NULL, 0, 0);
+    fl_frame_free(c);
+    free(a); free(b); free(ov);
+}
+
 static void renders(const char *dir, frame_jpg *fr, int nfr) {
     static const int SHARP[2] = { 4, 8 };
     fl_frame_ctx *c = fl_frame_new();
@@ -481,15 +573,15 @@ static void renders(const char *dir, frame_jpg *fr, int nfr) {
         dither_noise(a, &l, &ch);
         printf("  the dither on flat greys (%s): brightness noise %.3f levels, colour %.3f\n",
                FL_DITHER_GREEN ? "green's threshold opposite" : "one threshold", l, ch);
-        render(dir, FL_DITHER_GREEN ? "CARD-d-dither-green" : "CARD-b-now", a);
+        render(dir, FL_DITHER_GREEN ? "CARD-b-now" : "CARD-d-one-threshold", a);
         free(card.jpg);
     }
-#if FL_DITHER_GREEN
+#if !FL_DITHER_GREEN
     for (i = 0; i < nfr; i++) {   /* this build only draws the other dither */
         char base[64];
         snprintf(base, sizeof base, "%.*s", (int)(strchr(fr[i].name, '.') ? strchr(fr[i].name, '.') - fr[i].name : (long)strlen(fr[i].name)), fr[i].name);
         fl_frame(c, fr[i].jpg, fr[i].len, FILMS[3], PARAMS, 0, 1, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
-        snprintf(name, sizeof name, "%s-d-dither-green", base); render(dir, name, a);
+        snprintf(name, sizeof name, "%s-d-one-threshold", base); render(dir, name, a);
     }
     nfr = 0;
 #endif
@@ -543,6 +635,8 @@ int main(int argc, char **argv) {
     test_versus_reference(fr, nfr);
     test_still(fr, nfr);
     test_odd_sizes(&fr[0]);
+    test_green_dither(fr, nfr);
+    test_dither_noise();
     if (do_bench) bench(fr, nfr);
     if (dir) renders(dir, fr, nfr);
     for (i = 0; i < nfr; i++) free(fr[i].jpg);

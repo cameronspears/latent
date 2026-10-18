@@ -65,6 +65,13 @@ final class Ui {
      * the grid is on, so the overlay thread renders, clears and reads back just those two bands.
      */
     static final int OVL_TOP_END = 64, OVL_BOTTOM_START = 384;
+    /**
+     * The bottom fade's row of full strength (its peak alpha from here down): 16 px under the exposure line's
+     * baseline, so its 22 px figures are on the fade's dark part. To the band's foot (480) they read at 2.8:1 over
+     * a white picture, under the 3:1 floor; from 464, 3.7:1. The fade rows are one colour across, so the composer
+     * lays them in by arithmetic: no type pixels more.
+     */
+    static final int FADE_FULL = 464;
 
     static void draw(Gfx g, UiState s) {
         boolean vf = s.mode == UiState.PHOTO;
@@ -259,9 +266,10 @@ final class Ui {
      * composer blends just those rows, and the rest of the picture is the look alone.
      */
     private static void photoType(Gfx g, UiState s, UiState.Film f, int accent, float ix, float iw, float ir) {
-        // soft fades top and bottom, within the bands, so the type reads over any picture
+        // soft fades top and bottom, within the bands, so the type reads over any picture; the bottom one at its
+        // full by FADE_FULL, so the exposure line sits in its dark part (3:1 even over white: RenderScreens checks)
         for (int y = 0; y < OVL_TOP_END; y += 2) g.rect(ix, y, iw, 2, fade(0x78, 1 - (y + 1) / (float) OVL_TOP_END));
-        for (int y = OVL_BOTTOM_START; y < H; y += 2) g.rect(ix, y, iw, 2, fade(0xB8, (y + 1 - OVL_BOTTOM_START) / (float) (H - OVL_BOTTOM_START)));
+        for (int y = OVL_BOTTOM_START; y < H; y += 2) g.rect(ix, y, iw, 2, fade(0xB8, (y + 1 - OVL_BOTTOM_START) / (float) (FADE_FULL - OVL_BOTTOM_START)));
         if (s.grid) {   // thirds (vertical lines on whole dots)
             for (int i = 1; i < 3; i++) {
                 g.rect(vx(s, ix + iw * i / 3), 0, vw(s, 1), H, 0x38FFFFFF);
@@ -350,16 +358,21 @@ final class Ui {
 
     /**
      * What Latent's own window shows in the viewfinder (PART_WINDOW: the side bars, and what is drawn in
-     * them): when this is unchanged, the window isn't drawn again. Every input sideBars reads (RenderScreens
-     * checks that two states with one key draw the same window).
+     * them): when this is unchanged, the window isn't drawn again. Every input sideBars reads, and only as it
+     * reads it: focus is in it only as the AF light's colour, so a half-press without the light leaves the window
+     * be (RenderScreens checks that two states with one key draw the same window, and that focus steps keep it).
      */
     static String windowKey(UiState s) {
         UiState.Film f = look(s);
         StringBuilder k = new StringBuilder(64);
-        k.append(s.mode).append('|').append(s.width).append('|').append(s.clean).append('|')
-                .append(s.afMode).append('|').append(s.afArea).append('|').append(s.shotsLeft).append('|').append(s.afLamp)
-                .append(s.afState).append('|').append(s.evEdit).append(s.ev).append('|').append(f == null ? INK : f.accent).append('|')
-                .append(s.developing > 0).append('|').append(s.fatal);
+        k.append(s.mode).append('|').append(s.width).append('|').append(s.fatal).append('|').append(s.clean).append('|');
+        if (!s.clean) k.append(s.afMode).append('|').append(s.afArea).append('|');
+        if (s.evEdit) {   // the right bar is the exposure scale: its value, in the film's colour off 0
+            k.append("ev ").append(s.ev).append('|').append(s.ev != 0 && f != null ? f.accent : INK);
+        } else {
+            if (!s.clean) k.append(s.shotsLeft).append('|');
+            k.append(s.afLamp ? (s.afState == 1 ? "lamp lit" : "lamp") : "").append('|').append(s.developing > 0);
+        }
         return k.toString();
     }
 
@@ -444,9 +457,9 @@ final class Ui {
         x += sw + 22;
         if (s.aperture.length() > 0) g.text(s.aperture, x + aw, y, Gfx.MEDIUM, T_READOUT, INK, Gfx.RIGHT, 0);
         x += aw + 22;
-        if (s.iso.length() > 0) {
+        if (s.iso.length() > 0) {   // its label in INK too: over a picture INK2 at 13 px fell to 2.4:1 by a white fence
             String label = s.isoAuto ? "ISO A" : "ISO";
-            g.text(label, x + lw - 6, y - 1, Gfx.MEDIUM, T_LABEL, INK2, Gfx.RIGHT, 80);
+            g.text(label, x + lw - 6, y - 1, Gfx.MEDIUM, T_LABEL, INK, Gfx.RIGHT, 80);
             g.text(s.iso, x + lw, y, Gfx.MEDIUM, T_READOUT, INK, Gfx.LEFT, 0);
         }
         return x + lw + iw;
@@ -588,25 +601,53 @@ final class Ui {
     private static void lookCard(Gfx g, UiState s, UiState.Film f) {
         String tag = s.cardNote.length() > 0 ? s.cardNote : f.tagline;
         String sub = (f.iso.length() > 0 ? "ISO " + f.iso : "") + (tag.length() > 0 ? (f.iso.length() > 0 ? "  \u00b7  " : "") + tag : "");
-        float tw = Math.max(Math.max(g.textWidth(f.title, Gfx.DISPLAY, T_DISPLAY, -10), g.textWidth(sub, Gfx.REGULAR, T_SECOND, 0)), s.looks.size() * 34f) + 72;
-        tw = Math.min(tw, H * 1.5f - 2 * INSET);
+        float max = H * 1.5f - 2 * INSET;   // the card's widest: the picture, inset
+        int shown = canisterWindow(s.looks.size(), s.lookSel, max - 72)[1];
+        float tw = Math.max(Math.max(g.textWidth(f.title, Gfx.DISPLAY, T_DISPLAY, -10), g.textWidth(sub, Gfx.REGULAR, T_SECOND, 0)), shown * CAN_PITCH) + 72;
+        tw = Math.min(tw, max);
         float x = s.width / 2 - tw / 2, y = 150;
         g.roundRect(x, y, tw, 168, 24, PLATE);
         g.text(f.title, s.width / 2, y + 72, Gfx.DISPLAY, T_DISPLAY, INK, Gfx.CENTER, -10);
         if (sub.length() > 0) g.text(sub, s.width / 2, y + 102, Gfx.REGULAR, T_SECOND, INK2, Gfx.CENTER, 0);
-        canisterRow(g, s.looks, s.lookSel, s.width / 2, y + 128);
+        canisterRow(g, s.looks, s.lookSel, s.width / 2, y + 128, max - 72);
     }
 
-    /** Every film's canister in a row, centred at cx, the chosen one raised and underlined in its colour. */
-    private static void canisterRow(Gfx g, List<UiState.Film> films, int sel, float cx, float y) {
-        float cw = 34, cx0 = cx - (films.size() - 1) * cw / 2;
-        for (int i = 0; i < films.size(); i++) {
+    /** The canister row's pitch, and the most it shows at once: a few more looks on the card and it scrolls. */
+    static final float CAN_PITCH = 34;
+    static final int CAN_MAX = 9;
+
+    /**
+     * Which canisters a row of n shows, at most CAN_MAX and as many as fit in maxW (a plate CAN_PITCH a canister
+     * and 8 more): {first, count}. The chosen one in the middle where the row's ends allow, so the row moves under
+     * it as a film strip through a gate.
+     */
+    static int[] canisterWindow(int n, int sel, float maxW) {
+        int k = Math.max(1, Math.min(n, Math.min(CAN_MAX, (int) ((maxW - 8) / CAN_PITCH))));
+        int first = Math.max(0, Math.min(Math.max(0, Math.min(sel, n - 1)) - k / 2, n - k));
+        return new int[] { first, Math.min(k, n) };
+    }
+
+    /** The canister row's width (its plate's): what it shows, in maxW. */
+    static float canisterRowWidth(int n, int sel, float maxW) { return canisterWindow(n, sel, maxW)[1] * CAN_PITCH + 8; }
+
+    /**
+     * The films' canisters in a row, centred at cx and no wider than maxW (canisterWindow), the chosen one raised
+     * and underlined in its colour. Cut short, an end with more beyond it fades, as the strip runs on.
+     */
+    private static void canisterRow(Gfx g, List<UiState.Film> films, int sel, float cx, float y, float maxW) {
+        int n = films.size();
+        int[] w = canisterWindow(n, sel, maxW);
+        int first = w[0], k = w[1];
+        float cw = CAN_PITCH, cx0 = cx - (k - 1) * cw / 2;
+        for (int j = 0; j < k; j++) {
+            int i = first + j;
             UiState.Film o = films.get(i);
-            boolean on = i == sel;
-            float sw = on ? 18 : 13, sh = on ? 21 : 15, x = cx0 + i * cw - sw / 2, yy = y - (on ? 4 : 0);
-            g.roundRect(x, yy, sw, sh, 3, on ? o.body : (o.body & 0x00FFFFFF) | 0x99000000);
-            g.rect(x, yy + sh / 3, sw, sh / 3, on ? o.band : (o.band & 0x00FFFFFF) | 0x99000000);
-            if (on) g.roundRect(cx0 + i * cw - 8, yy + sh + 6, 16, 3, 1.5f, o.accent);
+            boolean on = i == sel, more = (j == 0 && first > 0) || (j == k - 1 && first + k < n);
+            int a = more ? 0x44000000 : 0x99000000;
+            float sw = on ? 18 : 13, sh = on ? 21 : 15, x = cx0 + j * cw - sw / 2, yy = y - (on ? 4 : 0);
+            g.roundRect(x, yy, sw, sh, 3, on ? o.body : (o.body & 0x00FFFFFF) | a);
+            g.rect(x, yy + sh / 3, sw, sh / 3, on ? o.band : (o.band & 0x00FFFFFF) | a);
+            if (on) g.roundRect(cx0 + j * cw - 8, yy + sh + 6, 16, 3, 1.5f, o.accent);
         }
     }
 
@@ -640,11 +681,13 @@ final class Ui {
      * The menu's rows, the same on the camera and in the previews: {label, value, action, why not}. Value "›"
      * opens something, "" is a heading. "Why not" is empty when the row can act now; otherwise the row is grey
      * and the footer says why (Hasselblad). The roll's two actions when they apply, then the photos: nothing to
-     * set (v0.45.0: what the settings and the camera checks settled is how Latent works now).
+     * set (v0.45.0: what the settings and the camera checks settled is how Latent works now). "This roll" heads
+     * the list only over a row of the roll's (a roll developing has none: then it is Latent's, as with no roll).
      */
     static List<String[]> menuRows(Menu m) {
         List<String[]> rows = new ArrayList<String[]>();
-        rows.add(new String[] { m.roll ? "This roll" : "Latent", "", "", "" });
+        boolean rollRows = m.roll && (m.developNow || m.changeFilm);
+        rows.add(new String[] { rollRows ? "This roll" : "Latent", "", "", "" });
         if (m.roll && m.developNow) rows.add(new String[] { "Develop now", "\u203a", "develop", "" });
         if (m.roll && m.changeFilm) rows.add(new String[] { "Change film", "\u203a", "change", "" });
         rows.add(new String[] { "Photos", "\u203a", "photos", m.photos ? "" : "No photos yet. Developed photos appear here." });
@@ -694,9 +737,9 @@ final class Ui {
     static final float ROW = 44, HEAD = 32;
 
     /**
-     * The menu: one plain list, the way the Settings app does it. Headings, switches, and rows that
-     * open. It scrolls to keep the chosen row in view, under a fixed title and footer; a row is drawn
-     * whole or not at all.
+     * The menu: one plain list, the way the Settings app does it. Headings and rows that open. It
+     * scrolls to keep the chosen row in view, under a fixed title and footer; a row is drawn whole or
+     * not at all, and a heading only with the row under it.
      */
     /** The menu's list: from MENU_TOP to MENU_BOTTOM, above a two-line footer. */
     static final float MENU_TOP = 72, MENU_BOTTOM = 412;
@@ -730,6 +773,7 @@ final class Ui {
             boolean head = r[1].length() == 0;
             float ry = top + ys[i] - scroll;
             if (ry < top - 0.5f || ry + (head ? HEAD : ROW) > bottom + 0.5f) continue;   // whole rows only
+            if (head && (i + 1 >= s.rows.size() || top + ys[i + 1] - scroll + ROW > bottom + 0.5f)) continue;   // never a heading alone
             if (head) {   // a heading
                 g.text(r[0].toUpperCase(java.util.Locale.US), L, ry + 22, Gfx.MEDIUM, T_LABEL, INK3, Gfx.LEFT, LABEL_TRACK);
                 continue;
@@ -857,11 +901,11 @@ final class Ui {
         }
 
         String head = s.cancelable ? "Change film" : "Choose film";
-        float hw = g.textWidth(head, Gfx.MEDIUM, T_SECOND, 0) + 28;
+        float hw = g.textWidth(head, Gfx.MEDIUM, T_SECOND, 0) + 28, bw = 0;
         g.roundRect(x0, 15, hw, 30, 15, GLASS);
         g.text(head, x0 + 14, 36, Gfx.MEDIUM, T_SECOND, INK, Gfx.LEFT, 0);
         if (s.battery >= 0) {
-            float bw = g.textWidth(s.battery + "%", Gfx.MEDIUM, 15, 0) + 32 + 28;
+            bw = g.textWidth(s.battery + "%", Gfx.MEDIUM, 15, 0) + 32 + 28;
             g.roundRect(x1 - bw, 15, bw, 30, 15, GLASS);
             battery2(g, s.battery, x1 - 14, 36);
         }
@@ -875,10 +919,12 @@ final class Ui {
             g.text("Your first photo will show each look.", s.width / 2, 200, Gfx.REGULAR, T_BODY, INK2, Gfx.CENTER, 0);
         }
 
-        // which film of how many: every film's canister, this one raised (the viewfinder's card has the same row)
-        float cw = s.films.size() * 34 + 8;
-        g.roundRect(s.width / 2 - cw / 2, 12, cw, 40, 20, GLASS);
-        canisterRow(g, s.films, s.filmSel, s.width / 2, 22);
+        // which film of how many: the films' canisters, this one raised (the viewfinder's card has the same row),
+        // in the space between the title's pill and the battery's, 8 px clear of each
+        float mid = s.width / 2, room = 2 * Math.min(mid - (x0 + hw + 8), (x1 - bw - 8) - mid);
+        float cw = canisterRowWidth(s.films.size(), s.filmSel, room);
+        g.roundRect(mid - cw / 2, 12, cw, 40, 20, GLASS);
+        canisterRow(g, s.films, s.filmSel, mid, 22, room);
 
         // the roll length: a segmented control on the right, its caption above it
         int n = s.lengthLabels.length;

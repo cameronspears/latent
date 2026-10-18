@@ -1,14 +1,42 @@
-/* JNI glue between com.latent.camera.FilmCore and filmcore.c. Calls are serialised by the Java
- * side (one worker thread), so the shared error buffer is safe. */
+/* JNI glue between com.latent.camera.FilmCore and filmcore.c. Any thread may call in, and several do at once
+ * (the worker, the viewfinder's look threads, its overlay thread and its film reader): each thread has its own
+ * last error, so FilmCore.lastError() tells the thread that asks why its own last call failed. */
 #include <dlfcn.h>
 #include <jni.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "filmcore.h"
 
-static char g_err[256];
+/* ---- each thread's last error: a pthread key, not __thread (Android 2.3's linker has no thread-local storage).
+ * A thread's buffer is made at its first call and freed when the thread ends. If it can't be made, the shared
+ * buffer stands in (as before v0.45.0: the last thread to write it wins). */
+#define ERR_LEN 256
+static pthread_key_t g_err_key;
+static pthread_once_t g_err_once = PTHREAD_ONCE_INIT;
+static int g_err_keyed;
+static char g_err_shared[ERR_LEN];
+
+static void err_key_make(void) { g_err_keyed = pthread_key_create(&g_err_key, free) == 0; }
+
+/* This thread's error buffer, ERR_LEN bytes. */
+static char *err_buf(void) {
+    char *b;
+    pthread_once(&g_err_once, err_key_make);
+    if (!g_err_keyed) return g_err_shared;
+    b = (char *)pthread_getspecific(g_err_key);
+    if (b) return b;
+    b = (char *)calloc(1, ERR_LEN);
+    if (!b) return g_err_shared;
+    if (pthread_setspecific(g_err_key, b) != 0) { free(b); return g_err_shared; }
+    return b;
+}
+
+/* This thread's error is now msg. */
+static void set_error(const char *msg) { snprintf(err_buf(), ERR_LEN, "%s", msg); }
 
 struct progress_ctx {
     JNIEnv *env;
@@ -32,10 +60,11 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_process(JNIEnv *env, jcla
     int params[FL_PARAM_COUNT];
     const char *in, *out, *lut = NULL, *preview = NULL;
     struct progress_ctx ctx;
+    char *err = err_buf();
     int rc;
     (void)cls;
-    g_err[0] = 0;
-    if (read_params(env, jparams, params) != 0) { strcpy(g_err, "bad parameters"); return -1; }
+    err[0] = 0;
+    if (read_params(env, jparams, params) != 0) { set_error("bad parameters"); return -1; }
     in = (*env)->GetStringUTFChars(env, jin, NULL);
     out = (*env)->GetStringUTFChars(env, jout, NULL);
     if (jlut) lut = (*env)->GetStringUTFChars(env, jlut, NULL);
@@ -48,7 +77,7 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_process(JNIEnv *env, jcla
         ctx.method = (*env)->GetMethodID(env, lc, "onProgress", "(I)V");
         (*env)->DeleteLocalRef(env, lc);
     }
-    rc = fl_process_file(in, out, lut, preview, params, on_progress, &ctx, g_err, sizeof g_err);
+    rc = fl_process_file(in, out, lut, preview, params, on_progress, &ctx, err, ERR_LEN);
     (*env)->ReleaseStringUTFChars(env, jin, in);
     (*env)->ReleaseStringUTFChars(env, jout, out);
     if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
@@ -58,12 +87,13 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_process(JNIEnv *env, jcla
 
 JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_makePreview(JNIEnv *env, jclass cls, jstring jin, jstring jout) {
     const char *in, *out;
+    char *err = err_buf();
     int rc;
     (void)cls;
-    g_err[0] = 0;
+    err[0] = 0;
     in = (*env)->GetStringUTFChars(env, jin, NULL);
     out = (*env)->GetStringUTFChars(env, jout, NULL);
-    rc = fl_make_preview(in, out, g_err, sizeof g_err);
+    rc = fl_make_preview(in, out, err, ERR_LEN);
     (*env)->ReleaseStringUTFChars(env, jin, in);
     (*env)->ReleaseStringUTFChars(env, jout, out);
     return rc;
@@ -74,18 +104,19 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_preview(JNIEnv *env, jcla
     int params[FL_PARAM_COUNT], wh[2] = { 0, 0 };
     const char *in, *lut = NULL;
     jint *px;
+    char *err = err_buf();
     int rc;
     (void)cls;
-    g_err[0] = 0;
-    if (read_params(env, jparams, params) != 0) { strcpy(g_err, "bad parameters"); return -1; }
+    err[0] = 0;
+    if (read_params(env, jparams, params) != 0) { set_error("bad parameters"); return -1; }
     if (!jpixels || (*env)->GetArrayLength(env, jpixels) < w * h || !jwh || (*env)->GetArrayLength(env, jwh) < 2) {
-        strcpy(g_err, "bad preview buffer");
+        set_error("bad preview buffer");
         return -1;
     }
     in = (*env)->GetStringUTFChars(env, jin, NULL);
     if (jlut) lut = (*env)->GetStringUTFChars(env, jlut, NULL);
     px = (*env)->GetIntArrayElements(env, jpixels, NULL);
-    rc = fl_preview(in, lut, params, mode, (unsigned int *)px, w, h, wh, g_err, sizeof g_err);
+    rc = fl_preview(in, lut, params, mode, (unsigned int *)px, w, h, wh, err, ERR_LEN);
     (*env)->ReleaseIntArrayElements(env, jpixels, px, 0);
     (*env)->ReleaseStringUTFChars(env, jin, in);
     if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
@@ -93,8 +124,8 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_preview(JNIEnv *env, jcla
     return rc;
 }
 
-/* ---- the viewfinder's frame composer: each look thread has its own context (frame calls run on two
- * threads at once, so errors go through a local buffer) */
+/* ---- the viewfinder's frame composer: each look thread has its own context (frame calls run on three
+ * threads at once; each thread's error is its own) */
 
 /* Android's bitmap pixels, written in place: libjnigraphics, opened when first asked for (not linked, so a
  * body without it still loads Latent; the frame then goes through a short[] and a copy). */
@@ -132,7 +163,7 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_frame(JNIEnv *env, jclass
         jstring jlut, jintArray jparams, jint flags, jint seq, jshortArray jout, jobject jbitmap, jint ow, jint oh,
         jint aspect1000, jint format, jintArray jshifts, jint max_w, jint max_h, jintArray jinfo, jintArray jtm) {
     int params[FL_PARAM_COUNT], info[FL_FRAME_INFO], tm[FL_FRAME_TIMES], shifts[4], rc, stride = ow;
-    char err[256];
+    char err[ERR_LEN];   /* this thread's error only on failure: a successful frame leaves its last one be */
     const char *lut = NULL;
     jbyte *jpeg = NULL;
     jshort *out = NULL;
@@ -146,7 +177,7 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_frame(JNIEnv *env, jclass
             || (jjpeg && (len <= 0 || (*env)->GetArrayLength(env, jjpeg) < len))
             || (format == FL_FMT_4444 && (!jshifts || (*env)->GetArrayLength(env, jshifts) < 4))
             || (!jbitmap && (!jout || (*env)->GetArrayLength(env, jout) < ow * oh))) {
-        strcpy(g_err, "bad frame buffers");
+        set_error("bad frame buffers");
         return -1;
     }
     if (format == FL_FMT_4444) (*env)->GetIntArrayRegion(env, jshifts, 0, 4, (jint *)shifts);
@@ -155,7 +186,7 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_frame(JNIEnv *env, jclass
         int want = format == FL_FMT_565 ? 4 : 7;   /* ANDROID_BITMAP_FORMAT_RGB_565, _RGBA_4444 */
         if (!bitmaps()) return -2;
         if (bm_info(env, jbitmap, &bi) != 0 || (int)bi.width != ow || (int)bi.height != oh || bi.format != want || (bi.stride & 1)) {
-            strcpy(g_err, "the screen bitmap doesn't match");
+            set_error("the screen bitmap doesn't match");
             return -1;
         }
         stride = (int)bi.stride / 2;
@@ -176,7 +207,7 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_frame(JNIEnv *env, jclass
     if (rc >= 0) {
         (*env)->SetIntArrayRegion(env, jinfo, 0, FL_FRAME_INFO, (const jint *)info);
         if (jtm) (*env)->SetIntArrayRegion(env, jtm, 0, FL_FRAME_TIMES, (const jint *)tm);
-    } else snprintf(g_err, sizeof g_err, "%s", err);
+    } else set_error(err);
     return rc;
 }
 
@@ -217,13 +248,14 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_pinCore(JNIEnv *env, jcla
     int e = 0;
     (void)env; (void)cls;
     if (fl_pin_core(core, &e) == 0) return 0;
-    snprintf(g_err, sizeof g_err, "core %d refused (errno %d)", core, e);
+    snprintf(err_buf(), ERR_LEN, "core %d refused (errno %d)", core, e);
     return -1;
 }
 
+/* The calling thread's last error ("" if it has had none). */
 JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_lastError(JNIEnv *env, jclass cls) {
     (void)cls;
-    return (*env)->NewStringUTF(env, g_err);
+    return (*env)->NewStringUTF(env, err_buf());
 }
 
 JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_timing(JNIEnv *env, jclass cls, jintArray jout) {
@@ -249,9 +281,9 @@ JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_forgetLut(JNIEnv *env, jc
     fl_forget_lut();
 }
 
-/* Any thread (the viewfinder's own, while the worker previews): its error goes through a local buffer first. */
+/* Any thread (the viewfinder's own, while the worker previews): its error, on failure only, is that thread's. */
 JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_cacheLut(JNIEnv *env, jclass cls, jstring jlut) {
-    char err[sizeof g_err];
+    char err[ERR_LEN];
     const char *lut;
     int rc;
     (void)cls;
@@ -261,7 +293,7 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_cacheLut(JNIEnv *env, jcl
     err[0] = 0;
     rc = fl_cache_lut(lut, err, sizeof err);
     (*env)->ReleaseStringUTFChars(env, jlut, lut);
-    if (rc != 0) snprintf(g_err, sizeof g_err, "%s", err);
+    if (rc != 0) set_error(err);
     return rc;
 }
 

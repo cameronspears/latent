@@ -52,7 +52,7 @@ final class FilmCore {
     /** Every cached film forgotten (and the decoded previews): the next look reads its file again (the host tests start cold). */
     static native void forgetLut();
 
-    /** Why the last call failed. */
+    /** Why this thread's last call failed (each thread has its own: several call in at once). */
     static native String lastError();
 
     /** The calling thread onto one core of the camera's four (Latent starts on core 3 only). 0, or -1 (lastError). */
@@ -76,9 +76,10 @@ final class FilmCore {
     /** frame()'s info: the frame's size (0, 1), its histogram (FI_HIST, 64 bins), the overlay laid in, the signature. */
     static final int FI_HIST = 5, FI_HIST_BINS = 64, FI_OVERLAY = 69, FI_SIG = 70, FI_SIG_N = 48, FI_COUNT = 118;
     /**
-     * frame()'s ms per stage: decode, read (the sharpening, when it's built in; the level until v0.45.0), look,
-     * compose; of compose (from every eighth row), TM_BLEND the rows in one pass (blend, fades, dither, packing:
-     * v0.45.0) and TM_DITHER the overlay's own pixels (the type); the rest of compose is stretching.
+     * frame()'s ms per stage: decode, read (the frame's signature, and the sharpening when it's built in; the level
+     * until v0.45.0), look, compose; of compose (from every eighth row), TM_BLEND the rows in one pass (blend, fades,
+     * dither, packing: v0.45.0) and TM_DITHER the overlay's own pixels (the type); the rest of compose is stretching.
+     * The viewfinder's stats line names them so (Viewfinder.STAGES).
      */
     static final int TM_DECODE = 0, TM_READ = 1, TM_LOOK = 2, TM_COMPOSE = 3, TM_BLEND = 4, TM_DITHER = 5, TM_COUNT = 6;
 
