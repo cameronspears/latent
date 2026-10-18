@@ -359,6 +359,7 @@ stops using the hardware until it is restarted.
   that Java apps get.
 - Re-renders the EXIF thumbnail into its original slot.
 - Writes `.TMP` and renames it, so a dead battery never leaves a half-written `.JPG`.
+- On the same cores: decoding and encoding on core 3, the look on cores 1 and 2. Never core 0.
 
 **Live view:** the camera sends small JPEG frames (320 px) alongside its own live view. Three
 threads, on cores 1, 2 and 3, each turn one into the screen's picture in one pass: decoded, the

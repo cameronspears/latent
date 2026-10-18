@@ -22,7 +22,7 @@
 #define FL_TIME_FINISH 3   /* ms thumbnail patch, flush, close, rename      */
 #define FL_TIME_TOTAL  4   /* wall time                                     */
 #define FL_TIME_CPU    5   /* CPU time summed over every thread             */
-#define FL_TIME_THREADS 6  /* threads the look ran on (block develop)       */
+#define FL_TIME_THREADS 6  /* threads it ran on (block develop: the look's; fl_process_file: with the writer) */
 #define FL_TIME_WAIT   7   /* block develop: ms this thread waited for the helpers after its share */
 #define FL_TIME_ROWS   8   /* block develop: rows this thread looked itself (the rest: helpers)    */
 #define FL_TIME_HCPU   9   /* block develop: CPU ms of the helpers together                        */
@@ -33,7 +33,9 @@
 typedef void (*fl_progress_fn)(void *ctx, int percent);
 
 /* Process a baseline JPEG file into a new JPEG file. lut_path may be NULL or "" for no LUT;
- * preview_path, if given, also gets a screen-size JPEG of the result.
+ * preview_path, if given, also gets a screen-size JPEG of the result. params[FL_PARAM_THREADS] 2+ runs the
+ * decoding here, the encoding on core 3 and the look on cores 1 (and 2) (never 0); without the writer on its
+ * core, or any look on its, it all runs here, the same picture.
  * Writes out_path + ".TMP" first, then renames, so a crash never leaves a half file under the
  * real name. Returns 0 on success; on failure fills err. */
 int fl_process_file(const char *in_path, const char *out_path, const char *lut_path,
@@ -140,7 +142,7 @@ int fl_cube_check(const char *path, int *ms, char *err, int errlen);
  * the caller waits on something else (Sony's decoder or encoder). Returns at once, always: asked for while another is
  * being made, it is made right after that one (only the latest asked for). The next block develop waits for both. */
 void fl_prewarm(const char *lut_path, const int *params);
-/* Threads the last fl_develop_blocks used; note gets why a helper didn't join, if one didn't. */
+/* Threads the last develop used (fl_develop_blocks or fl_process_file); note gets why one didn't join, if one didn't. */
 int fl_last_threads(char *note, int len);
 
 /* UYVY (Cb Y0 Cr Y1, full-range BT.601) <-> RGB for one row of w pixels (w even). */

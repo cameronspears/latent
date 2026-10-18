@@ -1096,9 +1096,85 @@ void fl_last_timing(int *out) { memcpy(out, g_timing, sizeof g_timing); }
 
 
 /* ------------------------------------------------------------------------------------------ */
+/* cores: a thread onto one core of the camera's four                                            */
+/*
+ * Sony's Dalvik starts Latent on core 3 alone (logcat: "Application process N: cpumask=0x8"; the Speed
+ * test: Cpus_allowed_list 3), and a new thread takes the cores of the thread that made it. That is only
+ * where Latent starts, not a fence: there is no cpuset, and the Speed test widened a thread to all four
+ * cores, was granted them, and its helper ran on core 0. So a thread that must keep off core 0 can't rely
+ * on where it was started: it says where it goes, and checks that it got there.
+ */
+
+#ifdef __linux__
+#include <sys/syscall.h>
+
+static int my_tid(void) { return (int)syscall(__NR_gettid); }
+#endif
+#include <sys/resource.h>
+
+int fl_pin_core(int core, int *err_no) {
+    *err_no = 0;
+    if (core < 0 || core > 31) { *err_no = EINVAL; return -1; }
+#ifdef __linux__
+    {
+        unsigned long want = 1UL << core, got = 0;
+        if (syscall(__NR_sched_setaffinity, my_tid(), sizeof want, &want) != 0) { *err_no = errno; return -1; }
+        if (syscall(__NR_sched_getaffinity, my_tid(), sizeof got, &got) < 0 || got != want) { *err_no = EPERM; return -1; }
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+/*
+ * The cores helpers may use, in order. Core 3 is Latent's own (where the camera starts it). Core 0 is
+ * the camera's and never Latent's: v0.42.0's live view put threads there and the camera's own video
+ * tore into lines and the camera restarted (its memory reads starved), so v0.41.0's idea of a third
+ * develop helper there was dropped untried.
+ */
+static const int HELPER_CORES[] = { 1, 2 };
+#define MAX_HELPERS 2
+#define HELPER_NICE 5   /* below the camera's own work: anything it needs on those cores comes first */
+#define LATENT_CORE 3   /* Latent's own, where the camera starts it (the screen's too) */
+
+static int g_last_threads = 1;          /* threads the last develop used (either kind) */
+static char g_helper_note[96];          /* why a thread didn't join it, if one didn't */
+
+/*
+ * This thread onto one core, checked: 0 only when the kernel reports exactly that core back, else -1 and
+ * why. A thread that isn't where it asked to be is wherever its maker's cores allow, which may take in the
+ * camera's core 0, so it mustn't work. nice > 0 then puts it below the camera's own work there. Off Linux
+ * (the Mac's tests) there is nothing to pin, but FL_REFUSE_CORES (a mask, e.g. 0x6) refuses those cores as
+ * a kernel might, so a thread that can't have its core is tested too.
+ */
+static int pin_checked(int core, int nice, char *why, int len) {
+#ifdef __linux__
+    unsigned long want = 1UL << core, got = 0;
+    if (syscall(__NR_sched_setaffinity, my_tid(), sizeof want, &want) != 0) {
+        snprintf(why, len, "core %d refused (errno %d)", core, errno);
+        return -1;
+    }
+    if (syscall(__NR_sched_getaffinity, my_tid(), sizeof got, &got) < 0 || got != want) {
+        snprintf(why, len, "core %d not granted (got %#lx)", core, got);
+        return -1;
+    }
+    if (nice > 0) setpriority(PRIO_PROCESS, my_tid(), nice);
+#else
+    const char *refuse = getenv("FL_REFUSE_CORES");
+    if (refuse && (strtoul(refuse, NULL, 0) >> core & 1)) {
+        snprintf(why, len, "core %d refused (FL_REFUSE_CORES)", core);
+        return -1;
+    }
+    (void)nice;
+#endif
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------ */
 /* full-resolution processing                                                                    */
 /*
- * Three stages run at once on the camera's four cores, connected by a ring of 16-row strips:
+ * Three stages run at once on three of the camera's cores, connected by a ring of 16-row strips:
  *
  *   calling thread   decode a strip (libjpeg), feed the thumbnail      FREE -> READ
  *   look workers     tone + LUT + grain on any decoded strip           READ -> DONE
@@ -1107,11 +1183,23 @@ void fl_last_timing(int *out) { memcpy(out, g_timing, sizeof g_timing); }
  * The calling thread does the decoding because the JNI progress callback must stay on it. Each
  * libjpeg object is only ever used by one thread at a time; an error in any stage sets 'abort'
  * and every stage stops at its next wait.
+ *
+ * The cores, as the block develop's: a look worker on each helper core (1, 2), below the camera's work
+ * there, and the writer on core 3 with the decoding. Never core 0, and every pin checked (pin_checked):
+ * unpinned, these threads took the calling thread's cores, core 3 alone only as long as nothing had
+ * widened it. A worker that can't have its core doesn't join; rows are independent, so the picture is the
+ * same whoever looked which strip. The writer can't simply stay out (the frame needs its encoding), and it
+ * goes on core 3 rather than a helper core: there it runs at Latent's own priority, where on core 1 it
+ * would share the camera's leftovers with a look worker at the helpers' lower one; core 3 is the core the
+ * camera gives Latent, so it is never refused short of something badly wrong; and the decoding and the
+ * encoding take turns on it, each running while the other waits on the card, leaving cores 1 and 2 to the
+ * look as in the block develop. With no writer on core 3, or no worker on its core, the others leave
+ * before the first strip and this thread does it all, as with one thread: the same picture.
  */
 
 #define STRIP_ROWS 16
 #define RING 8                    /* strips in flight: 8 x 16 rows x 6000 px x 3 = 2.3 MB */
-#define MAX_WORKERS 3
+#define MAX_WORKERS MAX_HELPERS   /* a look worker for each helper core */
 
 enum { S_FREE, S_READ, S_BUSY, S_DONE };
 
@@ -1120,7 +1208,15 @@ typedef struct {
     int state, seq, y0, rows;
 } fl_strip;
 
-typedef struct {
+typedef struct fl_pipe fl_pipe;
+
+typedef struct {                  /* one of the pipeline's threads: its core, and whether it has it */
+    fl_pipe *P;
+    int core, ok;
+    char why[96];
+} fl_seat;
+
+struct fl_pipe {
     pthread_mutex_t lock;
     pthread_cond_t changed;
     fl_strip strip[RING];
@@ -1135,7 +1231,25 @@ typedef struct {
     char werr[JMSG_LENGTH_MAX];
     long look_ms, write_ms;       /* busy (wall) time summed over threads */
     long cpu_ms;                  /* CPU time summed over all threads */
-} fl_pipe;
+    fl_seat seat[MAX_WORKERS + 1];   /* the writer's, then the look workers' */
+    int ready;                    /* threads that have said whether they have their core */
+    int leave;                    /* no pipeline after all: the others go, and the calling thread does it all */
+};
+
+/*
+ * A pipeline thread onto its core (nice > 0: below the camera's work there), then it says whether it got
+ * there; the calling thread hears from every one before the first strip. 1 if it has its core.
+ */
+static int pipe_seated(fl_seat *S, int nice) {
+    fl_pipe *P = S->P;
+    int ok = pin_checked(S->core, nice, S->why, sizeof S->why) == 0;
+    pthread_mutex_lock(&P->lock);
+    S->ok = ok;
+    P->ready++;
+    pthread_cond_broadcast(&P->changed);
+    pthread_mutex_unlock(&P->lock);
+    return ok;
+}
 
 static void pipe_fail(fl_pipe *P) {
     pthread_mutex_lock(&P->lock);
@@ -1153,22 +1267,24 @@ static void pipe_free(fl_pipe *P) {
 }
 
 static void *look_worker(void *arg) {
-    fl_pipe *P = (fl_pipe *)arg;
+    fl_seat *S = (fl_seat *)arg;
+    fl_pipe *P = S->P;
     long busy = 0;
+    if (!pipe_seated(S, HELPER_NICE)) return NULL;   /* not on its core: it doesn't join, and the others look its strips */
     for (;;) {
         fl_strip *s = NULL;
         int i, k;
         long t;
         pthread_mutex_lock(&P->lock);
         for (;;) {
-            if (P->abort) break;
+            if (P->abort || P->leave) break;
             for (i = 0; i < RING && !s; i++) if (P->strip[i].state == S_READ) s = &P->strip[i];
             if (s || P->read_done) break;
             pthread_cond_wait(&P->changed, &P->lock);
         }
         if (s) s->state = S_BUSY;
         pthread_mutex_unlock(&P->lock);
-        if (!s) break;            /* aborted, or nothing left to do */
+        if (!s) break;            /* aborted, no pipeline after all, or nothing left to do */
 
         t = now_ms();
         for (k = 0; k < s->rows; k++) {
@@ -1190,9 +1306,11 @@ static void *look_worker(void *arg) {
 }
 
 static void *writer(void *arg) {
-    fl_pipe *P = (fl_pipe *)arg;
+    fl_seat *S = (fl_seat *)arg;
+    fl_pipe *P = S->P;
     volatile int seq = 0;
     volatile long busy = 0;
+    if (!pipe_seated(S, 0)) return NULL;   /* not on core 3: the encoder stays with the calling thread */
     if (setjmp(P->jc.jump)) {     /* encoder error (e.g. card full) */
         snprintf(P->werr, sizeof P->werr, "%s", P->jc.msg);
         pipe_fail(P);
@@ -1201,12 +1319,13 @@ static void *writer(void *arg) {
     while (seq < P->nstrips) {
         fl_strip *s = &P->strip[seq % RING];
         JSAMPROW rows[STRIP_ROWS];
-        int k;
+        int k, stop;
         long t;
         pthread_mutex_lock(&P->lock);
-        while (!P->abort && !(s->state == S_DONE && s->seq == seq)) pthread_cond_wait(&P->changed, &P->lock);
+        while (!P->abort && !P->leave && !(s->state == S_DONE && s->seq == seq)) pthread_cond_wait(&P->changed, &P->lock);
+        stop = P->abort || P->leave;   /* leave: before the first strip, the encoder untouched */
         pthread_mutex_unlock(&P->lock);
-        if (P->abort) return NULL;
+        if (stop) return NULL;
         for (k = 0; k < s->rows; k++) rows[k] = s->buf + (size_t)k * P->width * 3;
         t = now_ms();
         if (P->pv->sum) for (k = 0; k < s->rows; k++) thumb_row(P->pv, rows[k], s->y0 + k);
@@ -1249,10 +1368,13 @@ int fl_process_file(const char *in_path, const char *out_path, const char *lut_p
     int quality = params[FL_PARAM_QUALITY], workers = params[FL_PARAM_THREADS] - 2, last_pct = -1, i;
     volatile long t_read = 0;
     long t0 = now_ms(), cpu0 = cpu_ms(), t;
-    const int sequential = params[FL_PARAM_THREADS] <= 1;   /* everything on this thread, no pthreads */
+    int sequential = params[FL_PARAM_THREADS] <= 1;   /* everything on this thread: one asked for, or no pipeline after all */
+    int ran = 1;                  /* threads that developed it: this one, the writer and the look workers that joined */
     const char *dot = strrchr(out_path, '.'), *slash = strrchr(out_path, '/');
 
     memset(g_timing, 0, sizeof g_timing);
+    g_last_threads = 1;
+    g_helper_note[0] = 0;
     memset(&T, 0, sizeof T);
     memset(&PV, 0, sizeof PV);
     if (quality < 50 || quality > 100) quality = 95;
@@ -1342,13 +1464,34 @@ int fl_process_file(const char *in_path, const char *out_path, const char *lut_p
     }
     if (!sequential) {
         pthread_attr_t attr;
+        int looking = 0;
         c.err = &P->jc.pub;        /* from here on the encoder belongs to the writer thread */
         pthread_attr_init(&attr);
         pthread_attr_setstacksize(&attr, 256 * 1024);
-        if (pthread_create(&threads[nthreads], &attr, writer, P) == 0) nthreads++;
-        for (i = 0; i < workers; i++) if (pthread_create(&threads[nthreads], &attr, look_worker, P) == 0) nthreads++;
+        for (i = 0; i <= workers; i++) {   /* the writer on Latent's core, then a look worker on each helper core */
+            fl_seat *S = &P->seat[i];
+            S->P = P;
+            S->core = i == 0 ? LATENT_CORE : HELPER_CORES[i - 1];
+            if (pthread_create(&threads[nthreads], &attr, i == 0 ? writer : look_worker, S) == 0) nthreads++;
+            else snprintf(S->why, sizeof S->why, "no thread for core %d", S->core);
+        }
         pthread_attr_destroy(&attr);
-        if (nthreads < 2) { set_err(err, errlen, "cannot start worker threads"); goto fail; }
+        pthread_mutex_lock(&P->lock);
+        while (P->ready < nthreads) pthread_cond_wait(&P->changed, &P->lock);   /* each says whether it has its core */
+        for (i = 1; i <= workers; i++) looking += P->seat[i].ok;
+        if (!P->seat[0].ok || !looking) {   /* no writer on core 3, or no look on another core: nothing to gain */
+            P->leave = 1;
+            pthread_cond_broadcast(&P->changed);
+        }
+        pthread_mutex_unlock(&P->lock);
+        for (i = 0; i <= workers; i++) if (P->seat[i].why[0]) snprintf(g_helper_note, sizeof g_helper_note, "%s", P->seat[i].why);
+        if (P->leave) {            /* the others go before the first strip, and this thread does it all */
+            for (i = 0; i < nthreads; i++) pthread_join(threads[i], NULL);
+            nthreads = 0;
+            c.err = &jd.pub;       /* the encoder back with this thread, untouched */
+            sequential = 1;
+        } else ran = 2 + looking;
+        g_last_threads = ran;
     }
 
     /* this thread: decode */
@@ -1436,6 +1579,7 @@ int fl_process_file(const char *in_path, const char *out_path, const char *lut_p
     g_timing[FL_TIME_FINISH] = (int)(now_ms() - t);
     g_timing[FL_TIME_TOTAL] = (int)(now_ms() - t0);
     g_timing[FL_TIME_CPU] = (int)(P->cpu_ms + cpu_ms() - cpu0);
+    g_timing[FL_TIME_THREADS] = ran;
     pipe_free(P);
     free(thumb_jpg); thumb_free(&T); thumb_free(&PV);
     look_free(&L); grain_free(&G);
@@ -2872,9 +3016,6 @@ static int build_ycc_look(const fl_look *rgb, fl_look *Y, int grid) {
  * Y'CbCr table (ycc_pairs). The camera's Speed test timed it against three other ways (colour reuse, a
  * 4-short table, a smaller table) and kept it; since v0.45.0 it is the only one.
  */
-static int g_last_threads = 1;          /* threads the last block develop used */
-static char g_helper_note[96];          /* why a helper didn't join, if one didn't */
-
 typedef struct {
     fl_look L;                        /* the Y'CbCr table: 3 shorts per node */
     int ypos[256];                    /* brightness as a position in the table (x 256), as build_index places it */
@@ -3120,43 +3261,7 @@ done:
 }
 
 /* ------------------------------------------------------------------------------------------ */
-/* cores: a thread onto one core of the camera's four                                            */
-
-#ifdef __linux__
-#include <sys/syscall.h>
-
-static int my_tid(void) { return (int)syscall(__NR_gettid); }
-#endif
-
-int fl_pin_core(int core, int *err_no) {
-    *err_no = 0;
-    if (core < 0 || core > 31) { *err_no = EINVAL; return -1; }
-#ifdef __linux__
-    {
-        unsigned long want = 1UL << core, got = 0;
-        if (syscall(__NR_sched_setaffinity, my_tid(), sizeof want, &want) != 0) { *err_no = errno; return -1; }
-        if (syscall(__NR_sched_getaffinity, my_tid(), sizeof got, &got) < 0 || got != want) { *err_no = EPERM; return -1; }
-    }
-    return 0;
-#else
-    return 0;
-#endif
-}
-
-/* ------------------------------------------------------------------------------------------ */
 /* developing in blocks, with helper threads on other cores                                     */
-
-#include <sys/resource.h>
-
-/*
- * The cores helpers may use, in order. Core 3 is Latent's own (where the camera starts it). Core 0 is
- * the camera's and never Latent's: v0.42.0's live view put threads there and the camera's own video
- * tore into lines and the camera restarted (its memory reads starved), so v0.41.0's idea of a third
- * develop helper there was dropped untried.
- */
-static const int HELPER_CORES[] = { 1, 2 };
-#define MAX_HELPERS 2
-#define HELPER_NICE 5   /* below the camera's own work: anything it needs on those cores comes first */
 
 typedef struct {
     pthread_mutex_t mu;
@@ -3198,20 +3303,7 @@ static void *pool_helper(void *arg) {
     look_pool *P = h->P;
     int seen = 0;
     long cpu0 = cpu_ms();
-    h->ok = 1;
-#ifdef __linux__
-    {
-        unsigned long want = 1UL << h->core, got = 0;
-        if (syscall(__NR_sched_setaffinity, my_tid(), sizeof want, &want) != 0) {
-            snprintf(h->why, sizeof h->why, "core %d refused (errno %d)", h->core, errno);
-            h->ok = 0;
-        } else if (syscall(__NR_sched_getaffinity, my_tid(), sizeof got, &got) < 0 || got != want) {
-            snprintf(h->why, sizeof h->why, "core %d not granted (got %#lx)", h->core, got);
-            h->ok = 0;
-        }
-        if (h->ok) setpriority(PRIO_PROCESS, my_tid(), HELPER_NICE);
-    }
-#endif
+    h->ok = pin_checked(h->core, HELPER_NICE, h->why, sizeof h->why) == 0;
     pthread_mutex_lock(&P->mu);
     P->ready++;
     pthread_cond_broadcast(&P->done);
