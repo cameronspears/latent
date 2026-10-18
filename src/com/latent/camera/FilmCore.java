@@ -75,8 +75,8 @@ final class FilmCore {
 
     /**
      * The next develop's film (lutPath, highlight, shadow, grain, grain size from params) made ready on a
-     * thread of its own while this thread waits on something else: Sony's encoder. Returns at once; the
-     * next look waits for it if it isn't done. The picture is the same either way.
+     * thread of its own while this thread waits on something else: Sony's encoder. Returns at once (once an
+     * earlier one is done); the next develop waits for it if it isn't done. The picture is the same either way.
      */
     static native void prewarm(String lutPath, int[] params);
 
@@ -92,7 +92,7 @@ final class FilmCore {
      */
     static native void setPairMemo(int bits);
 
-    /** The cached film forgotten: the next develop reads its file from the card again. */
+    /** Every cached film forgotten (and the decoded previews): the next develop reads its file from the card again. */
     static native void forgetLut();
 
     /**

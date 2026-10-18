@@ -110,6 +110,7 @@ public class JniTest {
             check(FilmCore.to4444(edge, w, h, o, ow, oh, 0, sh) == 0 && (o[240 * ow] >> 12 & 15) == 0, "a crop to the pixels' own shape loses it (v0.36.1's bug)");
         }
         frameComposer(jpeg, lut, p);
+        sharedCaches(in, jpeg, lut, p);
         FilmCore.setVariant(1);
         FilmCore.setVariant(0);
         System.out.println("JNI OK");
@@ -244,6 +245,104 @@ public class JniTest {
         System.out.println("  composer times (Mac): decode " + tm[0] + ", read " + tm[1] + ", look " + tm[2] + ", compose " + tm[3] + " ms");
         FilmCore.setOverlay(null, 0, 0);
         FilmCore.frameFree(c);
+    }
+
+    /** The shared, locked caches (v0.45.0): several films kept at once, decoded previews reused, used from any thread. */
+    static void sharedCaches(final String photo, final byte[] jpeg, String lut, final int[] p) throws Exception {
+        java.io.File dir = new java.io.File(lut).getParentFile();
+        String[] names = { "NATURAL.CUB", "PORTRA4W.CUB", "CLASSNEG.CUB", "CUBANNEG.CUB", "TRIX400.CUB", "PARTY800.CUB" };
+        final String[] films = new String[names.length];
+        for (int i = 0; i < names.length; i++) films[i] = new java.io.File(dir, names[i]).getPath();
+        final int w = 420, h = 280, n = films.length;
+        int[] size = new int[2];
+        // each film read fresh from its file: the references
+        final int[][] fresh = new int[n][];
+        long tRead = 0, tKept = 0;
+        for (int i = 0; i < n; i++) {
+            FilmCore.forgetLut();
+            fresh[i] = new int[w * h];
+            long t = System.nanoTime();
+            check(FilmCore.preview(photo, films[i], p, FilmCore.PREVIEW_FIT, fresh[i], w, h, size) == 0, "preview in " + names[i] + " " + FilmCore.lastError());
+            tRead += System.nanoTime() - t;
+        }
+        FilmCore.forgetLut();
+        boolean read = true;
+        for (String f : films) read &= FilmCore.cacheLut(f) == 0;
+        check(read, "all six films read ahead (cacheLut) " + FilmCore.lastError());
+        boolean same = true;
+        for (int round = 0; round < 3; round++) for (int i = 0; i < n; i++) {
+            int[] px = new int[w * h];
+            long t = System.nanoTime();
+            FilmCore.preview(photo, films[(i * 5 + round) % n], p, FilmCore.PREVIEW_FIT, px, w, h, size);
+            tKept += System.nanoTime() - t;
+            if (!java.util.Arrays.equals(px, fresh[(i * 5 + round) % n])) same = false;
+        }
+        check(same, "six films kept at once, in rotation: every preview exactly as from a fresh read ("
+                + tRead / n / 1000000 + " ms a film read and decoded, " + tKept / (3 * n) / 1000000 + " ms kept)");
+        check(FilmCore.cacheLut(lut + ".missing") == -1 && FilmCore.lastError().contains("cannot open look"), "a missing film refused: " + FilmCore.lastError());
+        check(FilmCore.cacheLut(null) == 0, "no film: nothing to read");
+
+        // the decoded photo kept between previews: the hero's size and the samples' in turn, then the Lab's 100% view
+        int[] hero = new int[720 * 480], hero2 = new int[720 * 480], sample = new int[w * h];
+        check(FilmCore.preview(photo, films[1], p, FilmCore.PREVIEW_FIT, hero, 720, 480, size) == 0 && size[1] == 480, "the hero's size: " + size[0] + "x" + size[1]);
+        FilmCore.preview(photo, films[2], p, FilmCore.PREVIEW_FIT, sample, w, h, size);
+        FilmCore.preview(photo, films[1], p, FilmCore.PREVIEW_FIT, hero2, 720, 480, size);
+        check(java.util.Arrays.equals(hero, hero2) && java.util.Arrays.equals(sample, fresh[2]), "hero and samples in turn, each from the kept decode: the same pictures");
+        int[] gp = p.clone();
+        gp[FilmCore.GRAIN] = 7; gp[FilmCore.GRAIN_SIZE] = 2;
+        int[] c1 = new int[w * h], c2 = new int[w * h], c3 = new int[w * h], c4 = new int[w * h];
+        check(FilmCore.preview(photo, films[3], gp, FilmCore.PREVIEW_CROP, c1, w, h, size) == 0 && size[0] == w && size[1] == h, "the 100% view, only its crop decoded " + FilmCore.lastError());
+        int[] gp2 = gp.clone();
+        gp2[FilmCore.GRAIN] = 2; gp2[FilmCore.HIGHLIGHT] = 3;
+        FilmCore.preview(photo, films[4], gp2, FilmCore.PREVIEW_CROP, c2, w, h, size);
+        FilmCore.preview(photo, films[0], p, FilmCore.PREVIEW_FIT, sample, w, h, size);
+        FilmCore.preview(photo, films[3], gp, FilmCore.PREVIEW_CROP, c3, w, h, size);
+        check(!java.util.Arrays.equals(c1, c2) && java.util.Arrays.equals(c1, c3) && java.util.Arrays.equals(sample, fresh[0]),
+                "Lab changes re-run only the look: another film and grain differ, the first again exactly as before");
+        FilmCore.preview(photo, null, gp, FilmCore.PREVIEW_CROP, c4, w, h, size);
+        check(!java.util.Arrays.equals(c4, c1), "the crop without a film: a different picture");
+
+        // any thread: three composers changing films every other frame while this thread previews, reads ahead and forgets
+        final int ow = 540, oh = 480;
+        final int[] sh = { 12, 8, 4, 0 };
+        final short[][] want = new short[n][];
+        for (int i = 0; i < n; i++) {
+            long c = FilmCore.frameNew();
+            want[i] = new short[ow * oh];
+            check(FilmCore.frame(c, jpeg, jpeg.length, films[i], p, 0, 1, want[i], null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240,
+                    new int[FilmCore.FI_COUNT], null) == 0, "a frame in " + names[i] + " " + FilmCore.lastError());
+            FilmCore.frameFree(c);
+        }
+        FilmCore.setOverlay(null, 0, 0);
+        final boolean[] ok = { true, true, true };
+        Thread[] th = new Thread[3];
+        for (int k = 0; k < 3; k++) {
+            final int kk = k;
+            th[k] = new Thread() {
+                public void run() {
+                    long cc = FilmCore.frameNew();
+                    short[] o = new short[ow * oh];
+                    int[] in = new int[FilmCore.FI_COUNT];
+                    for (int f = 0; f < 24; f++) {
+                        int film = (f / 2 + kk * 2) % n;
+                        if (FilmCore.frame(cc, jpeg, jpeg.length, films[film], p, 0, 1, o, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, in, null) != 0
+                                || !java.util.Arrays.equals(o, want[film])) ok[kk] = false;
+                    }
+                    FilmCore.frameFree(cc);
+                }
+            };
+            th[k].start();
+        }
+        boolean previews = true;
+        for (int k = 0; k < 18; k++) {
+            int[] px = new int[w * h];
+            int film = (k * 5 + 1) % n;
+            if (FilmCore.preview(photo, films[film], p, FilmCore.PREVIEW_FIT, px, w, h, size) != 0 || !java.util.Arrays.equals(px, fresh[film])) previews = false;
+            if (k % 3 == 0) FilmCore.cacheLut(films[(film + 3) % n]);
+            if (k % 7 == 6) FilmCore.forgetLut();
+        }
+        for (Thread t : th) t.join();
+        check(ok[0] && ok[1] && ok[2] && previews, "three composers changing films on three threads, previews, reads ahead and forgets on a fourth: every picture exact");
     }
 
     static byte[] read(String path) {

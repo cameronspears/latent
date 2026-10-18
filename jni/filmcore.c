@@ -36,6 +36,7 @@
 #define THUMB_H 120
 #define PREVIEW_W 720             /* viewer previews: 3:2 at the screen's full 480 lines (the A5100's */
 #define PREVIEW_H 480             /* panel is 16:9, so a 3:2 photo fills its height)              */
+#define IO_BUFFER (256 * 1024)   /* big reads and writes: each one is a round trip through Sony's FUSE layer */
 
 /* ------------------------------------------------------------------------------------------ */
 /* errors                                                                                       */
@@ -80,6 +81,8 @@ typedef struct {
     int frac[256];            /* per input value: 0..256 position between base and base+1 */
     int offR[256], offG[256], offB[256];   /* per input value: offset of its base cell in data */
     int shared;               /* data belongs to the LUT cache, not to this look */
+    struct film_entry *film;  /* the film cache's entry data belongs to: a reference look_free gives back.
+                               * A copy of a look (struct assignment) shares it: free only one of them. */
 } fl_look;
 
 static double clamp01(double v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
@@ -188,7 +191,8 @@ static int fast_triple(const char *p, float *r, float *g, float *b) {
     return *p ? -1 : 0;
 }
 
-static int load_cube(fl_look *L, const char *path, char *err, int errlen) {
+/* fast: rows read by fast_triple where it can (g_fast_cube), else all by sscanf with the default stdio buffer */
+static int load_cube(fl_look *L, const char *path, int fast, char *err, int errlen) {
     FILE *f;
     char line[256];
     int n = 0, count = 0, total = 0;
@@ -197,7 +201,7 @@ static int load_cube(fl_look *L, const char *path, char *err, int errlen) {
     if (!path || !path[0]) return 0;
     f = fopen(path, "r");
     if (!f) { set_err(err, errlen, "cannot open look %s", path); return -1; }
-    if (g_fast_cube) setvbuf(f, NULL, _IOFBF, 64 * 1024);   /* the card read in 64 KB pieces, not 1 KB */
+    if (fast) setvbuf(f, NULL, _IOFBF, 64 * 1024);   /* the card read in 64 KB pieces, not 1 KB */
     while (fgets(line, sizeof line, f)) {
         char *p = line;
         float r, g, b;
@@ -213,7 +217,7 @@ static int load_cube(fl_look *L, const char *path, char *err, int errlen) {
         }
         if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) continue;   /* TITLE, DOMAIN_MIN ... */
         if (!L->data) continue;
-        if (((g_fast_cube && fast_triple(p, &r, &g, &b) == 0) || sscanf(p, "%f %f %f", &r, &g, &b) == 3) && count < total) {
+        if (((fast && fast_triple(p, &r, &g, &b) == 0) || sscanf(p, "%f %f %f", &r, &g, &b) == 3) && count < total) {
             L->data[count * 3 + 0] = (short)(clamp01(r) * 4080.0 + 0.5);
             L->data[count * 3 + 1] = (short)(clamp01(g) * 4080.0 + 0.5);
             L->data[count * 3 + 2] = (short)(clamp01(b) * 4080.0 + 0.5);
@@ -238,79 +242,190 @@ static int load_cube(fl_look *L, const char *path, char *err, int errlen) {
     return 0;
 }
 
-/* The last LUT read, kept for the life of the process: parsing a 33-point .cube (36,000 text lines)
- * took ~3 s per frame on the camera. Keyed by path, size and modification time, so an edited file
- * on the card is read again. Only the worker thread loads looks, so no locking is needed. */
-static struct { char path[512]; long size, mtime; int n; short *data; } g_lut;
+/*
+ * The films read so far, kept for the life of the process (v0.45.0; one film until then): reading a .cube
+ * (36,000 text lines) takes ~200 ms on the camera even with the fast reader, and the home screen's six
+ * samples, the hero, the Lab, the viewfinder's three look threads, the darkroom and its prewarm all ask
+ * for films, often for each other's. Up to FILM_SLOTS films (29.5 KB each at 17 points); when another
+ * comes, the least recently used is dropped. Keyed by path, size and modification time, so an edited file
+ * on the card is read again. Any thread: one mutex guards the table, and every look holds a reference to
+ * its film (look_free gives it back), so a film dropped from the table is freed only when the last look
+ * using it lets go. A film is read outside the lock; two threads that miss the same film at once both read
+ * it, and the second to finish takes the first one's (the same bytes) and frees its own.
+ */
+#define FILM_SLOTS 8
 
-static void warm_join(void);   /* the caches are only touched once a film being prepared (fl_prewarm) is ready */
+typedef struct film_entry {
+    char path[512];
+    long size, mtime;
+    int n;
+    short *data;
+    int refs;              /* looks holding it */
+    int listed;            /* in the table (0: dropped, freed with its last reference) */
+    unsigned long used;    /* when it was last asked for */
+} film_entry;
+
+static pthread_mutex_t g_film_mu = PTHREAD_MUTEX_INITIALIZER;
+static film_entry *g_films[FILM_SLOTS];
+static unsigned long g_film_clock;
+
+static void film_destroy(film_entry *e) { free(e->data); free(e); }
+
+/* Under g_film_mu: e leaves the table, and is freed now if no look holds it. */
+static void film_unlist(int slot) {
+    film_entry *e = g_films[slot];
+    g_films[slot] = NULL;
+    if (!e) return;
+    e->listed = 0;
+    if (e->refs == 0) film_destroy(e);
+}
+
+/* The film for this key, with a reference taken, or NULL. */
+static film_entry *film_find(const char *path, long size, long mtime) {
+    film_entry *found = NULL;
+    int i;
+    pthread_mutex_lock(&g_film_mu);
+    for (i = 0; i < FILM_SLOTS; i++) {
+        film_entry *e = g_films[i];
+        if (e && e->size == size && e->mtime == mtime && strcmp(e->path, path) == 0) {
+            e->refs++;
+            e->used = ++g_film_clock;
+            found = e;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_film_mu);
+    return found;
+}
+
+/*
+ * A film just read (data: n^3 x 3, malloc'd) handed to the table: the entry it is now in, with a reference
+ * for the caller. If another thread put the same film in meanwhile, that one is returned and data freed. NULL
+ * only when there's no memory for an entry: the caller then keeps data as its own.
+ */
+static film_entry *film_keep(const char *path, long size, long mtime, int n, short *data) {
+    film_entry *e = NULL, *spare;
+    int i, slot = -1;
+    if (strlen(path) >= sizeof e->path) return NULL;
+    spare = (film_entry *)calloc(1, sizeof *spare);   /* before the lock: nothing slow under it */
+    pthread_mutex_lock(&g_film_mu);
+    for (i = 0; i < FILM_SLOTS && !e; i++) {
+        film_entry *o = g_films[i];
+        if (!o || strcmp(o->path, path) != 0) continue;
+        if (o->size == size && o->mtime == mtime) e = o;   /* read by another thread meanwhile */
+        else film_unlist(i);                               /* the file has changed since: its old film goes */
+    }
+    if (e) {
+        e->refs++;
+        e->used = ++g_film_clock;
+    } else if (spare) {
+        for (i = 0; i < FILM_SLOTS; i++) {
+            if (!g_films[i]) { slot = i; break; }
+            if (slot < 0 || g_films[i]->used < g_films[slot]->used) slot = i;
+        }
+        film_unlist(slot);   /* an empty slot, or the least recently used film */
+        strcpy(spare->path, path);
+        spare->size = size;
+        spare->mtime = mtime;
+        spare->n = n;
+        spare->data = data;
+        spare->refs = 1;
+        spare->listed = 1;
+        spare->used = ++g_film_clock;
+        g_films[slot] = spare;
+        e = spare;
+        spare = NULL;
+        data = NULL;
+    }
+    pthread_mutex_unlock(&g_film_mu);
+    free(spare);
+    if (e) free(data);   /* NULL when it went into the table */
+    return e;
+}
+
+static void film_release(film_entry *e) {
+    pthread_mutex_lock(&g_film_mu);
+    if (--e->refs == 0 && !e->listed) film_destroy(e);
+    pthread_mutex_unlock(&g_film_mu);
+}
 
 static int look_init(fl_look *L, const char *lut_path, const int *params, char *err, int errlen) {
     struct stat st;
-    warm_join();
+    film_entry *e = NULL;
     memset(L, 0, sizeof *L);
     build_tone(L, params[FL_PARAM_HIGHLIGHT], params[FL_PARAM_SHADOW]);
-    if (lut_path && lut_path[0] && stat(lut_path, &st) == 0 && g_lut.data && strcmp(g_lut.path, lut_path) == 0
-            && g_lut.size == (long)st.st_size && g_lut.mtime == (long)st.st_mtime) {
-        L->n = g_lut.n;
-        L->data = g_lut.data;
+    if (lut_path && lut_path[0] && stat(lut_path, &st) == 0) e = film_find(lut_path, (long)st.st_size, (long)st.st_mtime);
+    if (!e) {
+        if (load_cube(L, lut_path, g_fast_cube, err, errlen) != 0) return -1;
+        if (L->data && stat(lut_path, &st) == 0) e = film_keep(lut_path, (long)st.st_size, (long)st.st_mtime, L->n, L->data);
+    }
+    if (e) {   /* the table's copy (when keeping it found another thread's, L's own was freed) */
+        L->n = e->n;
+        L->data = e->data;
+        L->film = e;
         L->shared = 1;
-    } else {
-        if (load_cube(L, lut_path, err, errlen) != 0) return -1;
-        if (L->data && strlen(lut_path) < sizeof g_lut.path && stat(lut_path, &st) == 0) {
-            free(g_lut.data);                    /* hand the new LUT to the cache */
-            strcpy(g_lut.path, lut_path);
-            g_lut.size = (long)st.st_size;
-            g_lut.mtime = (long)st.st_mtime;
-            g_lut.n = L->n;
-            g_lut.data = L->data;
-            L->shared = 1;
-        }
     }
     build_index(L);
     return 0;
 }
 
-static void look_free(fl_look *L) { if (!L->shared) free(L->data); L->data = NULL; }
+static void look_free(fl_look *L) {
+    if (L->film) film_release(L->film);
+    else if (!L->shared) free(L->data);
+    L->film = NULL;
+    L->data = NULL;
+}
 
 static long now_ms(void);
 
 void fl_set_fast_cube(int on) { g_fast_cube = on ? 1 : 0; }
 
-/* The last LUT read is forgotten: the next develop reads its look from the card again (the Develop test). */
+int fl_cache_lut(const char *lut_path, char *err, int errlen) {
+    static const int neutral[FL_PARAM_COUNT];
+    fl_look L;
+    if (look_init(&L, lut_path, neutral, err, errlen) != 0) return -1;
+    look_free(&L);   /* the film stays in the table */
+    return 0;
+}
+
+/* Every film read is forgotten, and what was made from them: the next develop reads its look from the card
+ * again (the Develop test). The decoded previews go too, so all the memory comes back. */
 static void ycc_forget(void);
+static void warm_wait(void);
+static void prev_forget(void);
 
 void fl_forget_lut(void) {
-    warm_join();
-    free(g_lut.data);
-    memset(&g_lut, 0, sizeof g_lut);
+    int i;
+    warm_wait();
+    pthread_mutex_lock(&g_film_mu);
+    for (i = 0; i < FILM_SLOTS; i++) film_unlist(i);   /* a look still using one keeps it until it lets go */
+    pthread_mutex_unlock(&g_film_mu);
     ycc_forget();
+    prev_forget();
 }
 
 int fl_cube_check(const char *path, int *ms, char *err, int errlen) {
     fl_look a, b;
-    int keep = g_fast_cube, same;
+    int same;
     long t;
     FILE *f;
     char line[256];
     memset(&a, 0, sizeof a);
     memset(&b, 0, sizeof b);
     ms[0] = ms[1] = ms[2] = ms[3] = 0;
-    g_fast_cube = 0;
     t = now_ms();
-    if (load_cube(&a, path, err, errlen) != 0) { g_fast_cube = keep; return -1; }
+    if (load_cube(&a, path, 0, err, errlen) != 0) return -1;
     ms[0] = (int)(now_ms() - t);
-    g_fast_cube = 1;
     t = now_ms();
-    if (load_cube(&b, path, err, errlen) != 0) { g_fast_cube = keep; free(a.data); return -1; }
+    if (load_cube(&b, path, 1, err, errlen) != 0) { free(a.data); return -1; }
     ms[1] = (int)(now_ms() - t);
-    g_fast_cube = keep;
     same = a.n == b.n && (a.n == 0 || memcmp(a.data, b.data, sizeof(short) * 3 * a.n * a.n * a.n) == 0);
     free(a.data);
     free(b.data);
     /* and every row's three floats, bit for bit, before any resampling could hide a difference */
     f = fopen(path, "r");
     if (!f) { set_err(err, errlen, "cannot open look %s", path); return -1; }
+    setvbuf(f, NULL, _IOFBF, IO_BUFFER);
     while (fgets(line, sizeof line, f)) {
         float r, g, bl, r2, g2, b2;
         int slow = sscanf(line, "%f %f %f", &r, &g, &bl) == 3;
@@ -384,16 +499,29 @@ static int lattice(int x, int y, unsigned int seed) {
 
 /* The noise tile depends only on the grain size, so it is built once per size and kept for the
  * life of the process (1 MB each): every preview and save after the first skips ~1M hashes and
- * divisions. Each photo still gets its own pattern from a random offset into the tile. */
+ * divisions. Each photo still gets its own pattern from a random offset into the tile. Any thread:
+ * a tile is built under g_tile_mu (so two threads never build one at once, with 4 MB of workings
+ * each) and never freed, so a tile once handed out stays good. */
 static signed char *g_tiles[4];
+static pthread_mutex_t g_tile_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static const signed char *grain_tile_make(int size);
 
 static const signed char *grain_tile(int size) {
+    const signed char *tile;
+    pthread_mutex_lock(&g_tile_mu);
+    tile = g_tiles[size] ? g_tiles[size] : grain_tile_make(size);
+    pthread_mutex_unlock(&g_tile_mu);
+    return tile;
+}
+
+/* Under g_tile_mu. */
+static const signed char *grain_tile_make(int size) {
     const unsigned int seed = 0x2545f491U;
     int *raw, x, y, v, cells, step, wrap;
     long long sumsq = 0;
     double stdv, scale;
     signed char *tile;
-    if (g_tiles[size]) return g_tiles[size];
     raw = (int *)malloc(sizeof(int) * TILE * TILE);
     tile = (signed char *)malloc(TILE * TILE);
     if (!raw || !tile) { free(raw); free(tile); return NULL; }
@@ -437,7 +565,6 @@ static const signed char *grain_tile(int size) {
 static int grain_init(fl_grain *G, const int *params, char *err, int errlen) {
     int strength = params[FL_PARAM_GRAIN], size = params[FL_PARAM_GRAINSIZE], v;
     unsigned int seed = hash32((unsigned int)params[FL_PARAM_SEED] + 0x9e3779b9U);
-    warm_join();
     memset(G, 0, sizeof *G);
     if (strength <= 0) return 0;
     if (strength > 10) strength = 10;
@@ -804,7 +931,6 @@ void fl_last_timing(int *out) { memcpy(out, g_timing, sizeof g_timing); }
  * Cortex-A5's FPU is slow, and turbo's integer paths are its most optimised C code. */
 #define ENCODE_DCT JDCT_ISLOW
 
-#define IO_BUFFER (256 * 1024)   /* big reads and writes: each one is a round trip through Sony's FUSE layer */
 
 /* ------------------------------------------------------------------------------------------ */
 /* full-resolution processing                                                                    */
@@ -1296,38 +1422,143 @@ static unsigned char *mpf_preview(FILE *f, unsigned long *len) {
     return out;
 }
 
-int fl_preview(const char *in_path, const char *lut_path, const int *params, int mode,
-               unsigned int *argb, int max_w, int max_h, int *out_wh, char *err, int errlen) {
+/*
+ * The neutral pictures the last previews were made from (v0.45.0): fl_preview's decode, before the look,
+ * kept so the next preview of the same photo at the same size only runs the look. The home screen shows one
+ * photo in seven films (the hero and six samples), and the Lab changes one film or setting at a time, so
+ * all but the first of those skip the card read and the decode. Keyed by the photo's path, size and
+ * modification time, the mode and the size asked for (which fix the decode's scale); PREVIEW_SLOTS kept
+ * (a 420x280 sample or Lab crop is 353 KB, the 720x480 hero 1 MB), the least recently used dropped. Any
+ * thread: g_prev_mu guards the table, and a preview holds a reference to the picture it reads, so one
+ * dropped meanwhile is freed when that preview is done.
+ */
+#define PREVIEW_SLOTS 2
+
+typedef struct preview_entry {
+    char path[512];
+    long size, mtime;
+    int mode, max_w, max_h;
+    int w, h, y0;              /* the picture's size, and (a crop) the photo's row it starts at */
+    unsigned char *rgb;        /* w x h, as decoded: no look */
+    int refs, listed;          /* previews reading it; in the table (0: freed with its last reference) */
+    unsigned long used;        /* when it was last asked for */
+} preview_entry;
+
+static pthread_mutex_t g_prev_mu = PTHREAD_MUTEX_INITIALIZER;
+static preview_entry *g_prevs[PREVIEW_SLOTS];
+static unsigned long g_prev_clock;
+
+static void prev_destroy(preview_entry *e) { free(e->rgb); free(e); }
+
+/* Under g_prev_mu. */
+static void prev_unlist(int slot) {
+    preview_entry *e = g_prevs[slot];
+    g_prevs[slot] = NULL;
+    if (!e) return;
+    e->listed = 0;
+    if (e->refs == 0) prev_destroy(e);
+}
+
+static preview_entry *prev_find(const preview_entry *key) {
+    preview_entry *found = NULL;
+    int i;
+    pthread_mutex_lock(&g_prev_mu);
+    for (i = 0; i < PREVIEW_SLOTS; i++) {
+        preview_entry *e = g_prevs[i];
+        if (e && e->size == key->size && e->mtime == key->mtime && e->mode == key->mode && e->max_w == key->max_w
+                && e->max_h == key->max_h && strcmp(e->path, key->path) == 0) {
+            e->refs++;
+            e->used = ++g_prev_clock;
+            found = e;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_prev_mu);
+    return found;
+}
+
+/* A picture just decoded (key's fields and rgb filled in) into the table: the entry it is now in, with a
+ * reference for the caller. If another thread put the same picture in meanwhile, that one is returned and
+ * key->rgb freed. NULL only when there's no memory for an entry: the caller then keeps key->rgb. */
+static preview_entry *prev_keep(const preview_entry *key) {
+    preview_entry *e = (preview_entry *)malloc(sizeof *e), *found = NULL;
+    int i, slot = -1;
+    if (!e) return NULL;
+    *e = *key;
+    e->refs = 1;
+    e->listed = 1;
+    pthread_mutex_lock(&g_prev_mu);
+    for (i = 0; i < PREVIEW_SLOTS; i++) {
+        preview_entry *o = g_prevs[i];
+        if (o && o->size == key->size && o->mtime == key->mtime && o->mode == key->mode && o->max_w == key->max_w
+                && o->max_h == key->max_h && strcmp(o->path, key->path) == 0) {
+            found = o;   /* decoded by another thread meanwhile */
+            found->refs++;
+            found->used = ++g_prev_clock;
+            break;
+        }
+    }
+    if (!found) {
+        for (i = 0; i < PREVIEW_SLOTS; i++) {
+            if (!g_prevs[i]) { slot = i; break; }
+            if (slot < 0 || g_prevs[i]->used < g_prevs[slot]->used) slot = i;
+        }
+        prev_unlist(slot);   /* an empty slot, or the least recently used picture */
+        e->used = ++g_prev_clock;
+        g_prevs[slot] = e;
+    }
+    pthread_mutex_unlock(&g_prev_mu);
+    if (found) { free(key->rgb); free(e); return found; }
+    return e;
+}
+
+static void prev_release(preview_entry *e) {
+    pthread_mutex_lock(&g_prev_mu);
+    if (--e->refs == 0 && !e->listed) prev_destroy(e);
+    pthread_mutex_unlock(&g_prev_mu);
+}
+
+/* Every decoded picture dropped (one a preview is reading goes when it is done). */
+static void prev_forget(void) {
+    int i;
+    pthread_mutex_lock(&g_prev_mu);
+    for (i = 0; i < PREVIEW_SLOTS; i++) prev_unlist(i);
+    pthread_mutex_unlock(&g_prev_mu);
+}
+
+/*
+ * The photo decoded for a preview, before any look, into *out (malloc'd, w x h RGB): mode 0 the whole frame
+ * (from the embedded preview when there is one) box-filtered to fit max_w x max_h; mode 1 the 100% crop of
+ * max_w x max_h around the centre, *py0 the photo's row it starts at. 0, or -1 (err).
+ */
+static int preview_decode(const char *in_path, int mode, int max_w, int max_h, unsigned char **out, int *pw, int *ph,
+                          int *py0, char *err, int errlen) {
     struct jpeg_decompress_struct d;
     struct fl_jerr je;
-    fl_look L;
-    fl_grain G;
     fl_thumb P;
     FILE *f;
     unsigned char *volatile row = NULL, *volatile mp = NULL, *volatile rgb = NULL;
     unsigned long mlen = 0;
-    int ow = 0, oh = 0, i;
+    int ow = 0, oh = 0, y0 = 0;
 
     memset(&P, 0, sizeof P);
-    if (look_init(&L, lut_path, params, err, errlen) != 0) return -1;
-    memset(&G, 0, sizeof G);
-    if (mode == 1 && grain_init(&G, params, err, errlen) != 0) { look_free(&L); return -1; }
     f = fopen(in_path, "rb");
-    if (!f) { set_err(err, errlen, "cannot open %s", in_path); look_free(&L); grain_free(&G); return -1; }
+    if (!f) { set_err(err, errlen, "cannot open %s", in_path); return -1; }
+    setvbuf(f, NULL, _IOFBF, IO_BUFFER);   /* the card read in big pieces (the default buffer is 1 KB here) */
     if (mode == 0) mp = mpf_preview(f, &mlen);
     rewind(f);
     fl_jerr_init(&je);
     d.err = &je.pub;
     if (setjmp(je.jump)) {
         set_err(err, errlen, "%s", je.msg);
-        jpeg_destroy_decompress(&d); fclose(f); free(row); free(mp); free(rgb); thumb_free(&P); look_free(&L); grain_free(&G);
+        jpeg_destroy_decompress(&d); fclose(f); free(row); free(mp); free(rgb); thumb_free(&P);
         return -1;
     }
     jpeg_create_decompress(&d);
     if (mp) jpeg_mem_src(&d, mp, mlen); else jpeg_stdio_src(&d, f);
     jpeg_read_header(&d, TRUE);
     if (check_source(&d, err, errlen) != 0) {
-        jpeg_destroy_decompress(&d); fclose(f); free(mp); look_free(&L); grain_free(&G);
+        jpeg_destroy_decompress(&d); fclose(f); free(mp);
         return -1;
     }
     d.out_color_space = JCS_RGB;
@@ -1354,37 +1585,107 @@ int fl_preview(const char *in_path, const char *lut_path, const int *params, int
         rgb = (unsigned char *)malloc((size_t)ow * oh * 3);
         if (!rgb) longjmp(je.jump, 1);
         thumb_rgb(&P, rgb);
-        for (i = 0; i < ow * oh; i++) {
-            look_apply(&L, rgb + i * 3);
-            argb[i] = to_argb(rgb + i * 3);
-        }
     } else {
-        /* 100% crop around the centre; rows above it are decoded and thrown away */
-        int x0, y0, y;
+        /*
+         * 100% crop around the centre. Only its own rows and columns are decoded (v0.45.0; every row above
+         * it was until then): libjpeg skips the rows above (entropy decoding alone) and decodes the columns
+         * from the iMCU at or left of the crop. One iMCU more on each side keeps the chroma upsampler's
+         * neighbours where a whole row has them (without the right one, pixels at the crop's right edge
+         * differed by up to 5 levels), so every pixel is exactly what decoding the whole row gives.
+         */
+        int x0, y, margin;
+        JDIMENSION cx, cw;
         jpeg_start_decompress(&d);
         ow = max_w < (int)d.output_width ? max_w : (int)d.output_width;
         oh = max_h < (int)d.output_height ? max_h : (int)d.output_height;
         x0 = ((int)d.output_width - ow) / 2;
         y0 = ((int)d.output_height - oh) / 2;
-        row = (unsigned char *)malloc(d.output_width * 3);
-        if (!row) longjmp(je.jump, 1);
-        while ((int)d.output_scanline < y0 + oh) {
+        margin = DCTSIZE * (d.max_h_samp_factor > 2 ? d.max_h_samp_factor : 2);
+        cx = (JDIMENSION)(x0 > margin ? x0 - margin : 0);
+        cw = (JDIMENSION)((x0 + ow + margin < (int)d.output_width ? x0 + ow + margin : (int)d.output_width) - (int)cx);
+        jpeg_crop_scanline(&d, &cx, &cw);   /* cx moves left to an iMCU boundary, cw grows to match */
+        row = (unsigned char *)malloc((size_t)cw * 3);
+        rgb = (unsigned char *)malloc((size_t)ow * oh * 3);
+        if (!row || !rgb) longjmp(je.jump, 1);
+        if ((int)jpeg_skip_scanlines(&d, (JDIMENSION)y0) != y0) longjmp(je.jump, 1);
+        for (y = 0; y < oh; y++) {
             JSAMPROW r = row;
-            y = d.output_scanline;
-            jpeg_read_scanlines(&d, &r, 1);
-            if (y >= y0) {
-                int x;
-                unsigned char *p = row + x0 * 3;
-                look_row(&L, &G, p, ow, y);
-                for (x = 0; x < ow; x++) argb[(y - y0) * ow + x] = to_argb(p + x * 3);
-            }
+            if (jpeg_read_scanlines(&d, &r, 1) != 1) longjmp(je.jump, 1);
+            memcpy(rgb + (size_t)y * ow * 3, row + (x0 - (int)cx) * 3, (size_t)ow * 3);
         }
         jpeg_abort_decompress(&d);
     }
     jpeg_destroy_decompress(&d);
     fclose(f);
-    free(row); free(mp); free(rgb);
+    free(row); free(mp);
     thumb_free(&P);
+    *out = rgb;
+    *pw = ow;
+    *ph = oh;
+    *py0 = y0;
+    return 0;
+}
+
+int fl_preview(const char *in_path, const char *lut_path, const int *params, int mode,
+               unsigned int *argb, int max_w, int max_h, int *out_wh, char *err, int errlen) {
+    struct stat st;
+    fl_look L;
+    fl_grain G;
+    preview_entry key, *e = NULL;
+    const unsigned char *src;
+    unsigned char *own = NULL;
+    int ow, oh, i, keyed;
+
+    if (look_init(&L, lut_path, params, err, errlen) != 0) return -1;
+    memset(&G, 0, sizeof G);
+    if (mode == 1 && grain_init(&G, params, err, errlen) != 0) { look_free(&L); return -1; }
+    memset(&key, 0, sizeof key);
+    keyed = strlen(in_path) < sizeof key.path && stat(in_path, &st) == 0;
+    if (keyed) {
+        strcpy(key.path, in_path);
+        key.size = (long)st.st_size;
+        key.mtime = (long)st.st_mtime;
+        key.mode = mode;
+        key.max_w = max_w;
+        key.max_h = max_h;
+        e = prev_find(&key);
+    }
+    if (!e) {
+        if (preview_decode(in_path, mode, max_w, max_h, &key.rgb, &key.w, &key.h, &key.y0, err, errlen) != 0) {
+            look_free(&L); grain_free(&G);
+            return -1;
+        }
+        if (!keyed || !(e = prev_keep(&key))) own = key.rgb;   /* not kept: this preview's alone */
+    }
+    if (e) { key.w = e->w; key.h = e->h; key.y0 = e->y0; }   /* set once, before it was listed; its pixels are held till prev_release */
+    src = e ? e->rgb : own;
+    ow = key.w;
+    oh = key.h;
+    if (mode == 0) {
+        for (i = 0; i < ow * oh; i++) {   /* the look on a copy of each pixel: the neutral picture stays as it is */
+            unsigned char px[3];
+            px[0] = src[i * 3]; px[1] = src[i * 3 + 1]; px[2] = src[i * 3 + 2];
+            look_apply(&L, px);
+            argb[i] = to_argb(px);
+        }
+    } else {
+        unsigned char *row = (unsigned char *)malloc((size_t)ow * 3);
+        int y, x;
+        if (!row) {
+            set_err(err, errlen, "out of memory");
+            if (e) prev_release(e);
+            free(own); look_free(&L); grain_free(&G);
+            return -1;
+        }
+        for (y = 0; y < oh; y++) {   /* each row with its grain, as the photo's own row key.y0 + y */
+            memcpy(row, src + (size_t)y * ow * 3, (size_t)ow * 3);
+            look_row(&L, &G, row, ow, key.y0 + y);
+            for (x = 0; x < ow; x++) argb[y * ow + x] = to_argb(row + x * 3);
+        }
+        free(row);
+    }
+    if (e) prev_release(e);
+    free(own);
     look_free(&L);
     grain_free(&G);
     out_wh[0] = ow;
@@ -1499,17 +1800,17 @@ int fl_level(const unsigned char *rgb, int w, int h, int *out) {
 /* The 4-bit value of 0..255 with an ordered-dither threshold t (0..15 of a 4-bit step): [t][v]. A table,
  * as the camera's core has no divide instruction (three a pixel, 260K pixels a frame, were half the look). */
 static unsigned char g_q4[16][256];
-static int g_q4_ready;
+static pthread_once_t g_q4_once = PTHREAD_ONCE_INIT;   /* made once, by whichever thread asks first */
 
-static void q4_init(void) {
+static void q4_make(void) {
     int t, v;
-    if (g_q4_ready) return;
     for (t = 0; t < 16; t++) {
         int off = (t * 255 + 128) / 16;
         for (v = 0; v < 256; v++) { int q = (v * 15 + off) / 255; g_q4[t][v] = (unsigned char)(q > 15 ? 15 : q); }
     }
-    g_q4_ready = 1;
 }
+
+static void q4_init(void) { pthread_once(&g_q4_once, q4_make); }
 
 /* One source row stretched across: per output column and channel, the two neighbours blended (0..65280). */
 static void stretch_row(const unsigned int *r, const int *xi, const int *xw, int ow, unsigned short *h) {
@@ -1587,8 +1888,10 @@ int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int o
 }
 
 /* The film for live view, kept between frames (a frame used to stat the LUT and build its tables each
- * time): its own copy of the LUT, so a develop's cache never pulls it away. One look thread only. */
+ * time): its own copy of the LUT, so a develop's cache never pulls it away. fl_live holds g_live_mu
+ * throughout, so frames from two threads take turns (only the Live look test still uses fl_live). */
 static struct { char path[512]; int highlight, shadow, ready; fl_look L; } g_live;
+static pthread_mutex_t g_live_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static const fl_look *live_look(const char *lut_path, const int *params, char *err, int errlen) {
     const char *p = lut_path ? lut_path : "";
@@ -1601,6 +1904,7 @@ static const fl_look *live_look(const char *lut_path, const int *params, char *e
     g_live.ready = 0;
     g_live.L = L;
     g_live.L.data = NULL;
+    g_live.L.film = NULL;   /* L's reference, given back below: the copy has its own table */
     if (L.data) {
         size_t bytes = sizeof(short) * 3 * (size_t)L.n * L.n * L.n;
         g_live.L.data = (short *)malloc(bytes);
@@ -1616,8 +1920,20 @@ static const fl_look *live_look(const char *lut_path, const int *params, char *e
     return &g_live.L;
 }
 
+static int live_frame(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
+                      unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen);
+
 int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
             unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen) {
+    int rc;
+    pthread_mutex_lock(&g_live_mu);
+    rc = live_frame(jpeg, len, lut_path, params, argb, max_w, max_h, info, err, errlen);
+    pthread_mutex_unlock(&g_live_mu);
+    return rc;
+}
+
+static int live_frame(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
+                      unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen) {
     struct jpeg_decompress_struct d;
     struct fl_jerr je;
     const fl_look *L;
@@ -2193,10 +2509,10 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
  */
 
 static int yc_r_cr[256], yc_g_cb[256], yc_g_cr[256], yc_b_cb[256];   /* 16.16 fixed point */
+static pthread_once_t g_yc_once = PTHREAD_ONCE_INIT;   /* made once, by whichever thread asks first */
 
-static void yc_tables(void) {
+static void yc_make(void) {
     int i;
-    if (yc_r_cr[0]) return;
     for (i = 0; i < 256; i++) {
         int c = i - 128;
         yc_r_cr[i] = (int)(1.402 * 65536 + 0.5) * c;
@@ -2205,6 +2521,8 @@ static void yc_tables(void) {
         yc_g_cr[i] = -(int)(0.714136 * 65536 + 0.5) * c;
     }
 }
+
+static void yc_tables(void) { pthread_once(&g_yc_once, yc_make); }
 
 static unsigned char clamp8(int v) { return (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v); }
 
@@ -2383,57 +2701,93 @@ static pair_memo *memo_new(void) {
     return m;
 }
 
-static inline void pairs_core(const ycc_look *Y, int packed, const fl_grain *G, unsigned char *u, int w, int y, pair_memo *memo) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+#error "pairs_core reads and writes a pixel pair as one little-endian word"
+#endif
+/* A pixel pair as one word, wherever it lies: may alias the bytes it is made of, and needn't be 4-byte aligned
+ * (one ldr / str on ARMv7, which reads unaligned words itself; bytes on the armeabi build). */
+typedef unsigned int pair_word __attribute__((may_alias, aligned(1)));
+
+/*
+ * v0.45.0, the same picture bit for bit, in fewer instructions: a pair is read and written as one word
+ * (pair_word); the last lookup's key and chroma stay packed in one register each, and of the lookup only
+ * what the next pairs need (slope, and acc - slope * ypos[m] + 2048, the same sum in another order); the
+ * loop runs on the pointer alone; and whatever it reads besides the pixels and the table is copied into
+ * locals first (a store through u may alias anything, so a field read through G or Y was read again after
+ * every pair). The row is also fetched ahead: this core doesn't prefetch for itself (sequential reads ran at
+ * ~60-70 MB/s in fl_probe), and the 2 MB block left the cache long ago, so each new 32-byte line used to
+ * stall the look; PLD (a hint, which never faults) asks for the line two ahead as each line begins.
+ */
+static inline __attribute__((always_inline)) void pairs_core(const ycc_look *Y, int packed, const fl_grain *G, unsigned char *u, int w,
+                                                             int y, pair_memo *memo) {
     const fl_look *L = &Y->L;
     const int st = packed ? 4 : 3, sg = L->n * st, sb = L->n * L->n * st;
     const short *data = packed ? Y->pad : L->data;
-    const int *ypos = Y->ypos;
+    const int *ypos = Y->ypos, *frac = L->frac;
+    const int *oR = packed ? Y->o4R : L->offR, *oG = packed ? Y->o4G : L->offG, *oB = packed ? Y->o4B : L->offB;
     const signed char *t = G->on ? G->tile + (((y + G->oy) & TILE_MASK) << TILE_BITS) : NULL;
-    int x, pm = -1, pcb = -1, pcr = -1, acc[3] = { 0, 0, 0 }, slope = 0, cb2 = 0, cr2 = 0;
+    const int *amp = G->amp;
     const int shift = 32 - g_memo_bits;   /* only read with a memo, which exists only while g_memo_bits is set */
-#define NODE(yy, b, r) (data + (packed ? Y->o4R[yy] + Y->o4G[b] + Y->o4B[r] : L->offR[yy] + L->offG[b] + L->offB[r]))
-    for (x = 0; x + 1 < w; x += 2, u += 4) {
-        int cb = u[0], y0 = u[1], cr = u[2], y1 = u[3], d = y0 - y1, o0, o1;
+    unsigned char *const end = u + (size_t)(w >> 1) * 4;
+    unsigned pkey = 0xffffffffu;          /* the last lookup's m << 16 | cb << 8 | cr (none has all ones) */
+    unsigned chroma = 0;                  /* and its Cb' | Cr' << 16, where they sit in the pair's word */
+    int base = 0, slope = 0, gx = G->ox;  /* gx: the grain tile's column for the pair's first pixel (x + ox) */
+#define NODE(yy, b, r) (data + oR[yy] + oG[b] + oB[r])
+    for (; u < end; u += 4, gx += 2) {
+        unsigned v;
+        int cb, y0, cr, y1, d, o0, o1;
+        if (!((uintptr_t)u & 31)) __builtin_prefetch(u + 64);
+        v = *(const pair_word *)u;   /* Cb | Y0 << 8 | Cr << 16 | Y1 << 24 */
+        cb = (int)(v & 255); y0 = (int)(v >> 8 & 255); cr = (int)(v >> 16 & 255); y1 = (int)(v >> 24);
+        d = y0 - y1;
         if (d > PAIR_SPLIT || d < -PAIR_SPLIT) {
             int a0[3], a1[3], s0, s1;
-            ycc_tetra(NODE(y0, cb, cr), st, sg, sb, L->frac[y0], L->frac[cb], L->frac[cr], a0, &s0);
-            ycc_tetra(NODE(y1, cb, cr), st, sg, sb, L->frac[y1], L->frac[cb], L->frac[cr], a1, &s1);
+            ycc_tetra(NODE(y0, cb, cr), st, sg, sb, frac[y0], frac[cb], frac[cr], a0, &s0);
+            ycc_tetra(NODE(y1, cb, cr), st, sg, sb, frac[y1], frac[cb], frac[cr], a1, &s1);
             o0 = (a0[0] + 2048) >> 12;
             o1 = (a1[0] + 2048) >> 12;
-            u[0] = (unsigned char)((a0[1] + a1[1] + 4096) >> 13);
-            u[2] = (unsigned char)((a0[2] + a1[2] + 4096) >> 13);
-            pm = -1;
+            v = (unsigned)((a0[1] + a1[1] + 4096) >> 13) | (unsigned)((a0[2] + a1[2] + 4096) >> 13) << 16;   /* 0..255 each */
+            pkey = 0xffffffffu;   /* the next pair looks up again */
         } else {
             int m = (y0 + y1 + 1) >> 1;
-            if (m != pm || cb != pcb || cr != pcr) {   /* neighbouring pairs often repeat */
-                unsigned key = (unsigned)m << 16 | (unsigned)cb << 8 | (unsigned)cr;
+            unsigned key = (unsigned)m << 16 | (unsigned)cb << 8 | (unsigned)cr;
+            if (key != pkey) {   /* neighbouring pairs often repeat */
                 pair_memo *e = memo ? memo + ((key * 2654435761u) >> shift) : NULL;
+                int acc0;
                 if (e && e->key == key) {
-                    acc[0] = e->acc; slope = e->slope; cb2 = e->cb; cr2 = e->cr;
+                    acc0 = e->acc; slope = e->slope; chroma = e->cb | (unsigned)e->cr << 16;
                 } else {
-                    ycc_tetra(NODE(m, cb, cr), st, sg, sb, L->frac[m], L->frac[cb], L->frac[cr], acc, &slope);
+                    int acc[3], cb2, cr2;
+                    ycc_tetra(NODE(m, cb, cr), st, sg, sb, frac[m], frac[cb], frac[cr], acc, &slope);
                     cb2 = (acc[1] + 2048) >> 12;   /* 0..255: the table's nodes are, and this is their weighted mean */
                     cr2 = (acc[2] + 2048) >> 12;
-                    if (e) { e->key = key; e->acc = acc[0]; e->slope = (short)slope; e->cb = (unsigned char)cb2; e->cr = (unsigned char)cr2; }
+                    acc0 = acc[0];
+                    chroma = (unsigned)cb2 | (unsigned)cr2 << 16;
+                    if (e) { e->key = key; e->acc = acc0; e->slope = (short)slope; e->cb = (unsigned char)cb2; e->cr = (unsigned char)cr2; }
                 }
-                pm = m; pcb = cb; pcr = cr;
+                base = acc0 - slope * ypos[m] + 2048;   /* far from overflowing: |acc| < 2^21, |slope * ypos| < 2^25 */
+                pkey = key;
             }
-            o0 = (acc[0] + slope * (ypos[y0] - ypos[m]) + 2048) >> 12;
-            o1 = (acc[0] + slope * (ypos[y1] - ypos[m]) + 2048) >> 12;
-            u[0] = (unsigned char)cb2;
-            u[2] = (unsigned char)cr2;
+            o0 = (base + slope * ypos[y0]) >> 12;   /* (acc + slope * (ypos[y0] - ypos[m]) + 2048) >> 12 */
+            o1 = (base + slope * ypos[y1]) >> 12;
+            v = chroma;
         }
         o0 = clamp255(o0);
         o1 = clamp255(o1);
-        if (t) add_grain(G, t, x, &o0, &o1);
-        u[1] = (unsigned char)o0;
-        u[3] = (unsigned char)o1;
+        if (t) {   /* grain on brightness, as add_grain */
+            o0 = clamp255(o0 + ((t[gx & TILE_MASK] * amp[o0]) >> 8));
+            o1 = clamp255(o1 + ((t[(gx + 1) & TILE_MASK] * amp[o1]) >> 8));
+        }
+        v |= (unsigned)o0 << 8 | (unsigned)o1 << 24;
+        *(pair_word *)u = v;
     }
 #undef NODE
 }
 
-static void ycc_pairs(const ycc_look *Y, const fl_grain *G, unsigned char *u, int w, int y, pair_memo *memo) { pairs_core(Y, 0, G, u, w, y, memo); }
-static void ycc_pairs_packed(const ycc_look *Y, const fl_grain *G, unsigned char *u, int w, int y, pair_memo *memo) { pairs_core(Y, 1, G, u, w, y, memo); }
+/* one copy of the loop for each table layout, each with its node size known (GCC left the 4-short one to a
+ * run-time choice once the loop changed), and only those two */
+__attribute__((noinline)) static void ycc_pairs(const ycc_look *Y, const fl_grain *G, unsigned char *u, int w, int y, pair_memo *memo) { pairs_core(Y, 0, G, u, w, y, memo); }
+__attribute__((noinline)) static void ycc_pairs_packed(const ycc_look *Y, const fl_grain *G, unsigned char *u, int w, int y, pair_memo *memo) { pairs_core(Y, 1, G, u, w, y, memo); }
 
 /*
  * Colour reuse: interpolate across colour (Cb, Cr) once on the two brightness planes either side,
@@ -2611,6 +2965,7 @@ static int decode_uyvy(const char *in_path, int scale, unsigned char **out, int 
     int w, h, y;
     f = fopen(in_path, "rb");
     if (!f) { set_err(err, len, "cannot open %s", in_path); return -1; }
+    setvbuf(f, NULL, _IOFBF, IO_BUFFER);   /* the card read in big pieces, not 1 KB at a time */
     fl_jerr_init(&je);
     d.err = &je.pub;
     if (setjmp(je.jump)) {
@@ -3022,12 +3377,35 @@ static void *pool_helper(void *arg) {
  * The look's tables, kept between develops: the last Y'CbCr table made, keyed by everything it is made
  * from (film file, its size and time, highlight, shadow, grid, layout). A develop with the same film
  * and settings uses it as is; and fl_prewarm makes the next frame's while the camera saves this one.
+ * Any thread: g_ycc_mu guards it, and a develop holds a reference to its table (ycc_put gives it back),
+ * so a table replaced meanwhile is freed only when the develop using it is done.
  */
-static struct { int used; char path[512]; long size, mtime; int hl, sh, grid, padded; ycc_look Y; } g_ycc;
+typedef struct {
+    char path[512];
+    long size, mtime;
+    int hl, sh, grid, padded;
+    int refs, listed;          /* develops holding it; in g_ycc (0: freed with its last reference) */
+    ycc_look Y;
+} ycc_entry;
+
+static pthread_mutex_t g_ycc_mu = PTHREAD_MUTEX_INITIALIZER;
+static ycc_entry *g_ycc;       /* the last table made, or NULL */
+
+static void ycc_destroy(ycc_entry *e) { ycc_free(&e->Y); free(e); }
+
+/* Under g_ycc_mu: the cached table goes (freed now if no develop holds it). */
+static void ycc_unlist(void) {
+    ycc_entry *e = g_ycc;
+    g_ycc = NULL;
+    if (!e) return;
+    e->listed = 0;
+    if (e->refs == 0) ycc_destroy(e);
+}
 
 static void ycc_forget(void) {
-    if (g_ycc.used) ycc_free(&g_ycc.Y);
-    memset(&g_ycc, 0, sizeof g_ycc);
+    pthread_mutex_lock(&g_ycc_mu);
+    ycc_unlist();
+    pthread_mutex_unlock(&g_ycc_mu);
 }
 
 /* The key of the table for this film and these settings into c (0), or -1 if it can't be keyed. */
@@ -3035,7 +3413,7 @@ static int ycc_key(const char *lut, const int *params, int grid, int padded, lon
     struct stat st;
     *size = *mtime = 0;
     if (lut && lut[0]) {
-        if (strlen(lut) >= sizeof g_ycc.path || stat(lut, &st) != 0) return -1;
+        if (strlen(lut) >= sizeof g_ycc->path || stat(lut, &st) != 0) return -1;
         *size = (long)st.st_size;
         *mtime = (long)st.st_mtime;
     }
@@ -3043,57 +3421,87 @@ static int ycc_key(const char *lut, const int *params, int grid, int padded, lon
     return 0;
 }
 
-static ycc_look *ycc_cached(const char *lut, const int *params, int grid, int padded) {
+/* The table made before for this film and these settings, with a reference taken, or NULL. */
+static ycc_entry *ycc_get(const char *lut, const int *params, int grid, int padded) {
     long size, mtime;
-    if (!g_ycc.used || ycc_key(lut, params, grid, padded, &size, &mtime) != 0) return NULL;
-    if (strcmp(g_ycc.path, lut ? lut : "") != 0 || g_ycc.size != size || g_ycc.mtime != mtime
-            || g_ycc.hl != params[FL_PARAM_HIGHLIGHT] || g_ycc.sh != params[FL_PARAM_SHADOW]
-            || g_ycc.grid != grid || g_ycc.padded != padded) return NULL;
-    return &g_ycc.Y;
+    ycc_entry *e;
+    if (ycc_key(lut, params, grid, padded, &size, &mtime) != 0) return NULL;
+    pthread_mutex_lock(&g_ycc_mu);
+    e = g_ycc;
+    if (e && (strcmp(e->path, lut ? lut : "") != 0 || e->size != size || e->mtime != mtime
+            || e->hl != params[FL_PARAM_HIGHLIGHT] || e->sh != params[FL_PARAM_SHADOW]
+            || e->grid != grid || e->padded != padded)) e = NULL;
+    if (e) e->refs++;
+    pthread_mutex_unlock(&g_ycc_mu);
+    return e;
 }
 
-/* Y (just made for this film and these settings) handed to the cache, which frees the one it held. */
-static ycc_look *ycc_keep(const char *lut, const int *params, int grid, int padded, ycc_look *Y) {
+static void ycc_put(ycc_entry *e) {
+    pthread_mutex_lock(&g_ycc_mu);
+    if (--e->refs == 0 && !e->listed) ycc_destroy(e);
+    pthread_mutex_unlock(&g_ycc_mu);
+}
+
+/*
+ * Y (just made for this film and these settings) handed to the cache in place of the one it held: its entry,
+ * with a reference for the caller. Unkeyed (a path too long, a file gone) it is the caller's alone, never
+ * matched, and goes with ycc_put. NULL (Y freed) when there's no memory for an entry.
+ */
+static ycc_entry *ycc_keep(const char *lut, const int *params, int grid, int padded, ycc_look *Y) {
     long size, mtime;
     int keyed = ycc_key(lut, params, grid, padded, &size, &mtime) == 0;
-    ycc_forget();
-    g_ycc.Y = *Y;
-    g_ycc.used = 1;
-    if (keyed) {   /* unkeyed (a path too long, a file gone): held for this develop, never matched */
-        strcpy(g_ycc.path, lut ? lut : "");
-        g_ycc.size = size; g_ycc.mtime = mtime;
-        g_ycc.hl = params[FL_PARAM_HIGHLIGHT]; g_ycc.sh = params[FL_PARAM_SHADOW];
-        g_ycc.grid = grid; g_ycc.padded = padded;
-    } else {
-        g_ycc.grid = -1;
-    }
-    return &g_ycc.Y;
+    ycc_entry *e = (ycc_entry *)calloc(1, sizeof *e);
+    if (!e) { ycc_free(Y); return NULL; }
+    e->Y = *Y;
+    e->refs = 1;
+    if (!keyed) return e;
+    strcpy(e->path, lut ? lut : "");
+    e->size = size; e->mtime = mtime;
+    e->hl = params[FL_PARAM_HIGHLIGHT]; e->sh = params[FL_PARAM_SHADOW];
+    e->grid = grid; e->padded = padded;
+    e->listed = 1;
+    pthread_mutex_lock(&g_ycc_mu);
+    ycc_unlist();
+    g_ycc = e;
+    pthread_mutex_unlock(&g_ycc_mu);
+    return e;
 }
 
 /*
  * The next frame's film made ready on a thread of its own (on core 1, below the camera's work) while
  * Latent waits for Sony's encoder to save this one (~1.75 s of mostly waiting, v0.42.0): its file read
- * into the LUT cache, its grain tile made, its Y'CbCr table made into g_ycc. The same functions make the
+ * into the film cache, its grain tile made, its Y'CbCr table made into g_ycc. The same functions make the
  * same tables a develop would, so the picture can't change; it only no longer waits for them (setup was
- * ~690 ms when the film changed). Everything that touches those caches waits for the thread first
- * (warm_join), so only one thread is ever in them.
+ * ~690 ms when the film changed). The caches are locked, so nothing else has to wait for it; a block
+ * develop does (warm_wait), to use the table it is making rather than make another, and so does the next
+ * fl_prewarm: one at a time.
  */
-static pthread_t g_warm_th;
-static int g_warm_running, g_warm_variant;
+static pthread_mutex_t g_warm_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_warm_cv = PTHREAD_COND_INITIALIZER;
+static int g_warm_running;     /* a prewarm thread is at work (detached; it clears this as it ends) */
+static int g_warm_variant;
 static char g_warm_lut[512];
 static int g_warm_params[FL_PARAM_COUNT];
 
-static void warm_join(void) {
-    if (!g_warm_running || pthread_equal(pthread_self(), g_warm_th)) return;
-    pthread_join(g_warm_th, NULL);
+static void warm_wait(void) {
+    pthread_mutex_lock(&g_warm_mu);
+    while (g_warm_running) pthread_cond_wait(&g_warm_cv, &g_warm_mu);
+    pthread_mutex_unlock(&g_warm_mu);
+}
+
+static void warm_done(void) {
+    pthread_mutex_lock(&g_warm_mu);
     g_warm_running = 0;
+    pthread_cond_broadcast(&g_warm_cv);
+    pthread_mutex_unlock(&g_warm_mu);
 }
 
 static void *warm_main(void *arg) {
     fl_look L;
     char err[160];
-    const char *lut = g_warm_lut[0] ? g_warm_lut : NULL;
+    const char *lut = g_warm_lut[0] ? g_warm_lut : NULL;   /* stays as it is until warm_done */
     int grid = variant_grid(g_warm_variant), padded = g_warm_variant == V_PACKED;
+    ycc_entry *e;
     (void)arg;
 #ifdef __linux__
     {
@@ -3102,27 +3510,41 @@ static void *warm_main(void *arg) {
     }
 #endif
     yc_tables();
-    if (look_init(&L, lut, g_warm_params, err, sizeof err) != 0) return NULL;
-    if (g_warm_params[FL_PARAM_GRAIN] > 0) {
-        int size = g_warm_params[FL_PARAM_GRAINSIZE];
-        grain_tile(size < 1 ? 1 : size > 3 ? 3 : size);
+    if (look_init(&L, lut, g_warm_params, err, sizeof err) == 0) {
+        if (g_warm_params[FL_PARAM_GRAIN] > 0) {
+            int size = g_warm_params[FL_PARAM_GRAINSIZE];
+            grain_tile(size < 1 ? 1 : size > 3 ? 3 : size);
+        }
+        if (!(e = ycc_get(lut, g_warm_params, grid, padded))) {
+            ycc_look Y;
+            memset(&Y, 0, sizeof Y);
+            if (ycc_make(&L, &Y, grid, padded) == 0) e = ycc_keep(lut, g_warm_params, grid, padded, &Y);
+        }
+        if (e) ycc_put(e);
+        look_free(&L);
     }
-    if (!ycc_cached(lut, g_warm_params, grid, padded)) {
-        ycc_look Y;
-        memset(&Y, 0, sizeof Y);
-        if (ycc_make(&L, &Y, grid, padded) == 0) ycc_keep(lut, g_warm_params, grid, padded, &Y);
-    }
-    look_free(&L);
+    warm_done();
     return NULL;
 }
 
 void fl_prewarm(const char *lut_path, const int *params) {
-    warm_join();
+    pthread_t th;
+    pthread_attr_t at;
+    int started = 0;
     if (lut_path && strlen(lut_path) >= sizeof g_warm_lut) return;
+    pthread_mutex_lock(&g_warm_mu);
+    while (g_warm_running) pthread_cond_wait(&g_warm_cv, &g_warm_mu);   /* the last one finished first */
     strcpy(g_warm_lut, lut_path ? lut_path : "");
     memcpy(g_warm_params, params, sizeof g_warm_params);
     g_warm_variant = g_variant;
-    if (pthread_create(&g_warm_th, NULL, warm_main, NULL) == 0) g_warm_running = 1;
+    g_warm_running = 1;
+    pthread_mutex_unlock(&g_warm_mu);
+    if (pthread_attr_init(&at) == 0) {
+        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+        started = pthread_create(&th, &at, warm_main, NULL) == 0;
+        pthread_attr_destroy(&at);
+    }
+    if (!started) warm_done();
 }
 
 /*
@@ -3134,7 +3556,9 @@ void fl_prewarm(const char *lut_path, const int *params) {
 int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_block_get get, fl_block_put put, void *ctx,
                       fl_progress_fn progress, void *pctx, char *err, int errlen) {
     fl_look L;
-    ycc_look Y, *Yp;
+    ycc_look Y;
+    const ycc_look *Yp;
+    ycc_entry *ye;
     fl_grain G;
     look_pool P;
     look_helper helpers[MAX_HELPERS];
@@ -3144,20 +3568,23 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
 
     memset(g_timing, 0, sizeof g_timing);
     if (w < 2 || h < 1 || (w & 1) || w > 20000 || h > 20000) { set_err(err, errlen, "bad image size %dx%d", w, h); return -1; }
+    warm_wait();   /* a film being made ready (fl_prewarm) is ready first, so its table is used, not made again */
+    prev_forget();   /* the darkroom needs the memory more than the screen's decoded previews (up to 1.4 MB) */
     yc_tables();
     if (look_init(&L, lut_path, params, err, errlen) != 0) return -1;
     if (grain_init(&G, params, err, errlen) != 0) { look_free(&L); return -1; }
-    Yp = ycc_cached(lut_path, params, variant_grid(v), v == V_PACKED);   /* made before: by the last develop, or fl_prewarm */
-    if (Yp) warm = 1;
+    ye = ycc_get(lut_path, params, variant_grid(v), v == V_PACKED);   /* made before: by the last develop, or fl_prewarm */
+    if (ye) warm = 1;
     else {
         memset(&Y, 0, sizeof Y);
-        if (ycc_make(&L, &Y, variant_grid(v), v == V_PACKED) != 0) {
+        if (ycc_make(&L, &Y, variant_grid(v), v == V_PACKED) != 0
+                || !(ye = ycc_keep(lut_path, params, variant_grid(v), v == V_PACKED, &Y))) {   /* the cache owns it now */
             set_err(err, errlen, "out of memory for the look");
             look_free(&L); grain_free(&G);
             return -1;
         }
-        Yp = ycc_keep(lut_path, params, variant_grid(v), v == V_PACKED, &Y);   /* the cache owns it now */
     }
+    Yp = &ye->Y;
 
     memset(&P, 0, sizeof P);
     pthread_mutex_init(&P.mu, NULL);
@@ -3281,7 +3708,8 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
         g_timing[FL_TIME_SETUP] = (int)t_setup;
         g_timing[FL_TIME_WARM] = warm;
     }
-    look_free(&L); grain_free(&G);   /* the Y'CbCr table stays in g_ycc for the next develop */
+    ycc_put(ye);   /* the Y'CbCr table stays in g_ycc for the next develop */
+    look_free(&L); grain_free(&G);
     return rc;
 }
 

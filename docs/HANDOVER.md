@@ -40,6 +40,7 @@ per screen. They like the current designs.
 | Roll model tests | compile `src/.../Roll,Library,Stock,Probe,FilmCore` and `tests/.../RollTest` with the android.jar from the toolchain, then run `RollTest <empty dir>` |
 | Image core on the Mac | `tools/build-host.sh`, then `out/host/fltool` |
 | Sony memory bridge test | `tools/sony-test.sh` (4 photos, 1 and 3 threads, the lookup memory, prewarm, under UBSan and Guard Malloc) |
+| Shared caches under load | `tools/cache-test.sh` (3 frame composers changing films, 2 threads previewing, reading ahead, prewarming and forgetting; UBSan, Guard Malloc) |
 | JNI and the live frame composer | `tools/test-jni.sh testdata/STREET.JPG` (37+ checks: the composer, overlay maths, two threads) |
 | Viewfinder logic | `tools/viewfinder-test.sh`; roll model `tools/roll-test.sh`; sanitizer `tools/sanitize-test.sh testdata/X.JPG` |
 | Previews check the viewfinder's layers | `tools/preview.sh` fails if the overlay / screen / surface parts don't add up to the whole (scenes 8w, 8x) |

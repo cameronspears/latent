@@ -320,6 +320,22 @@ JNIEXPORT void JNICALL Java_com_latent_camera_FilmCore_forgetLut(JNIEnv *env, jc
     fl_forget_lut();
 }
 
+/* Any thread (the viewfinder's own, while the worker previews): its error goes through a local buffer first. */
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_cacheLut(JNIEnv *env, jclass cls, jstring jlut) {
+    char err[sizeof g_err];
+    const char *lut;
+    int rc;
+    (void)cls;
+    if (!jlut) return 0;   /* no film: nothing to read */
+    lut = (*env)->GetStringUTFChars(env, jlut, NULL);
+    if (!lut) return -1;
+    err[0] = 0;
+    rc = fl_cache_lut(lut, err, sizeof err);
+    (*env)->ReleaseStringUTFChars(env, jlut, lut);
+    if (rc != 0) snprintf(g_err, sizeof g_err, "%s", err);
+    return rc;
+}
+
 JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_cubeCheck(JNIEnv *env, jclass cls, jstring jpath, jintArray jms) {
     int ms[4], rc;
     const char *path;
