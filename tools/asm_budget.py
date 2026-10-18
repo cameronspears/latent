@@ -3,7 +3,7 @@
 
     python3 tools/asm_budget.py jni/filmcore.c filmcore.s [--show NAME ...] [--mark NAME=TEXT ...] [--funcs f1 f2 ...]
 
-A loop is marked by a comment on a line of its body, '/* hot: NAME per=WHAT max=N sp=S */' (per, max and sp
+A loop is marked by a comment on a line of its body, '/* hot: NAME per=WHAT max=N sp=S */' (per, max, sp and opt
 optional). gcc's line notes (-g, which ndk-build always passes and which never changes the code) say which
 instructions came from that line, wherever they were inlined. The loop holding them is found in the function's
 flow graph (the innermost natural loop), and each trip through it is walked from its head back to it:
@@ -12,7 +12,9 @@ flow graph (the innermost natural loop), and each trip through it is walked from
 
 A conditional ARM instruction counts as one (it takes its slot whether it runs or not); a call counts as one
 (what it costs isn't seen here). --mark NAME=TEXT marks the first line holding TEXT without a comment
-there; --funcs reports every innermost loop of those functions; --show NAME prints that loop's instructions. Exit 1 when a loop's longest trip is over max, or its stack references over sp.
+there; --funcs reports every innermost loop of those functions; --show NAME prints that loop's instructions.
+opt=WHY: the loop may be compiled out (e.g. behind a constant that is off). Exit 1 when a loop's longest trip is
+over max, or its stack references over sp, or a loop that isn't optional can't be found.
 """
 import re
 import sys
@@ -320,7 +322,7 @@ def main():
                     bad.append('%d stack > sp %s' % (hisp, opts['sp']))
                 if bad:
                     over.append('%s in %s: %s' % (label, where, ', '.join(bad)))
-    missing = [name for name, n, opts in ms if not any(r[0] == name for r in rows)]
+    missing = [name for name, n, opts in ms if 'opt' not in opts and not any(r[0] == name for r in rows)]
     print('%-12s %-34s %-10s %9s %9s %6s %7s' % ('loop', 'in', 'a trip', 'shortest', 'longest', 'stack', 'size'))
     for label, where, per, lo, hi, hisp, size, allsp, opts in rows:
         budget = '' if 'max' not in opts else '  (max %s%s)' % (opts['max'], ', sp %s' % opts['sp'] if 'sp' in opts else '')

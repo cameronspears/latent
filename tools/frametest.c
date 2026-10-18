@@ -382,24 +382,32 @@ static void render(const char *dir, const char *name, const unsigned short *o) {
     fclose(f);
 }
 
+/* Composed frames for judging by eye (tools/frame-test.sh --render DIR): v0.44.1's, today's, and today's with the
+ * options that are off (sharpening at two strengths). No overlay: the picture alone. */
 static void renders(const char *dir, frame_jpg *fr, int nfr) {
+    static const int SHARP[2] = { 4, 8 };
     fl_frame_ctx *c = fl_frame_new();
     unsigned short *a = (unsigned short *)malloc(sizeof(unsigned short) * OW * OH);
-    unsigned int *ov = viewfinder_overlay();
-    int info[FL_FRAME_INFO], tm[FL_FRAME_TIMES], i;
+    int info[FL_FRAME_INFO], tm[FL_FRAME_TIMES], i, k, keep = g_sharpen;
     char err[256], name[256];
-    fl_set_overlay(ov, OW, OH);
+    fl_set_overlay(NULL, 0, 0);
     for (i = 0; i < nfr; i++) {
         char base[64];
         snprintf(base, sizeof base, "%.*s", (int)(strchr(fr[i].name, '.') ? strchr(fr[i].name, '.') - fr[i].name : (long)strlen(fr[i].name)), fr[i].name);
-        fl_frame(c, fr[i].jpg, fr[i].len, FILMS[3], PARAMS, 0, 1, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
-        snprintf(name, sizeof name, "%s-now", base); render(dir, name, a);
         fl_frame(c, fr[i].jpg, fr[i].len, FILMS[3], PARAMS, FL_F_REFERENCE, 1, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
-        snprintf(name, sizeof name, "%s-v0441", base); render(dir, name, a);
+        snprintf(name, sizeof name, "%s-a-v0441", base); render(dir, name, a);
+        g_sharpen = 0;
+        fl_frame(c, fr[i].jpg, fr[i].len, FILMS[3], PARAMS, 0, 1, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
+        snprintf(name, sizeof name, "%s-b-now", base); render(dir, name, a);
+        for (k = 0; k < 2; k++) {
+            g_sharpen = SHARP[k];
+            fl_frame(c, fr[i].jpg, fr[i].len, FILMS[3], PARAMS, 0, 1, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
+            snprintf(name, sizeof name, "%s-c-sharpen%d", base, SHARP[k]); render(dir, name, a);
+        }
+        g_sharpen = keep;
     }
-    fl_set_overlay(NULL, 0, 0);
     fl_frame_free(c);
-    free(a); free(ov);
+    free(a);
 }
 
 int main(int argc, char **argv) {

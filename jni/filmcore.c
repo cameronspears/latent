@@ -1673,8 +1673,8 @@ typedef struct {
 struct fl_frame_ctx {
     /* the film: as read (RGB, 17 points), for frames decoded as RGB (F), and for frames decoded as Y'CbCr (Y) */
     struct { char path[512]; int highlight, shadow, ready; fl_look L; live_film F, Y; } film;
-    unsigned char *rgb, *row;              /* the last frame decoded: RGB, or Y'CbCr when ycc */
-    int rgb_cap, row_cap, sw, sh, ycc;     /* its size */
+    unsigned char *rgb, *row, *sharp;      /* the last frame decoded: RGB, or Y'CbCr when ycc; a row for sharpen_y */
+    int rgb_cap, row_cap, sharp_cap, sw, sh, ycc;   /* its size */
     unsigned int *px;                      /* the looked frame: red << 16 | green << 8 | blue, a word a pixel */
     int cap_px, pw, ph;                    /* its size (a still frame is decoded but not looked: sw, sh may differ) */
     unsigned int *hrow;                    /* two stretched rows (stretch_px's records), then a screen row */
@@ -1689,7 +1689,7 @@ void fl_frame_free(fl_frame_ctx *c) {
     if (!c) return;
     if (c->film.ready) free(c->film.L.data);
     free(c->film.F.nodes); free(c->film.Y.nodes);
-    free(c->rgb); free(c->row); free(c->px); free(c->hrow); free(c->xiw);
+    free(c->rgb); free(c->row); free(c->sharp); free(c->px); free(c->hrow); free(c->xiw);
     free(c);
 }
 
@@ -2007,6 +2007,40 @@ static int frame_decode(fl_frame_ctx *c, const unsigned char *jpeg, unsigned lon
     if (thumbing) { thumb_rgb(&P, c->rgb); thumb_free(&P); }
     c->sw = ow; c->sh = oh;
     return 0;
+}
+
+/* ---- sharpening: a little, on brightness alone, at the frame's own size before the stretch softens it (1.69x
+ * across, 2.25x down). Off unless FL_SHARPEN is set: 18-25 instructions a source pixel (tools/asm-budget.sh
+ * -DFL_SHARPEN=6), ~5-7 ms a frame on the camera, more than the ~3 ms it was allowed for edges only a little
+ * crisper under the 4-bit dither (tools/frame-test.sh --render draws both). */
+#ifndef FL_SHARPEN
+#define FL_SHARPEN 0      /* strength in sixteenths of the detail (6: Y + 0.375 x (Y - its four neighbours' mean)) */
+#endif
+#define FL_SHARP_CORE 2   /* detail under this many steps of Y is left alone: the frames' JPEG block noise stays as it is */
+static int g_sharpen = FL_SHARPEN;
+
+/* Y of a decoded Y'CbCr frame sharpened in place (Cb, Cr untouched: no colour fringes), the outermost pixels
+ * left as they are; buf: a row (w bytes), each of its pixels the row above's Y before sharpening. */
+static NOINLINE void sharpen_y(unsigned char *ycc, int w, int h, int k, unsigned char *buf) {
+    int x, y;
+    for (x = 0; x < w; x++) buf[x] = ycc[x * 3];
+    for (y = 1; y + 1 < h; y++) {
+        unsigned char *p = ycc + ((size_t)y * w + 1) * 3;
+        const unsigned char *below = p + (size_t)w * 3;
+        int l = p[-3], c = p[0];
+        buf[0] = (unsigned char)l;
+        for (x = 1; x + 1 < w; x++, p += 3, below += 3) {
+            int r = p[3], d = 4 * c - l - r - buf[x] - below[0];   /* hot: sharpen per=pixel opt=FL_SHARPEN */
+            buf[x] = (unsigned char)c;
+            if (d >= 4 * FL_SHARP_CORE || d <= -4 * FL_SHARP_CORE) {
+                int v = c + ((d * k) >> 6);
+                p[0] = (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
+            }
+            l = c;
+            c = r;
+        }
+        buf[w - 1] = (unsigned char)c;
+    }
 }
 
 /* ---- the look: the film on every decoded pixel, one word out a pixel (red << 16 | green << 8 | blue, each
@@ -2403,6 +2437,15 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
         }
         if (flags & FL_F_LEVEL) fl_level(c->rgb, c->sw, c->sh, info + 2);
         else info[2] = info[3] = info[4] = FL_NO_READING;
+        if (g_sharpen && c->ycc && c->sw >= 3 && c->sh >= 3) {
+            if (c->sharp_cap < c->sw) {
+                free(c->sharp);
+                c->sharp_cap = 0;
+                if (!(c->sharp = (unsigned char *)malloc((size_t)c->sw))) { set_err(err, errlen, "out of memory"); return -1; }
+                c->sharp_cap = c->sw;
+            }
+            sharpen_y(c->rgb, c->sw, c->sh, g_sharpen, c->sharp);
+        }
         t = now_ms(); if (tm) tm[FL_TM_READ] = (int)(t - t0); t0 = t;
         if (c->cap_px < c->sw * c->sh) {
             free(c->px);
