@@ -188,6 +188,67 @@ static void test_look_kernels(frame_jpg *fr, int nfr) {
     fl_frame_free(c);
 }
 
+/* ---- frames decoded as Y'CbCr through the Y'CbCr-indexed film, against v0.44.1's RGB decode and look */
+static void test_ycc(frame_jpg *fr, int nfr) {
+    static const int TONES[2][2] = { { 0, 0 }, { 3, -2 } };
+    fl_frame_ctx *c = fl_frame_new();
+    unsigned short *a = (unsigned short *)malloc(sizeof(unsigned short) * OW * OH), *b = (unsigned short *)malloc(sizeof(unsigned short) * OW * OH);
+    int i, f, t, info[FL_FRAME_INFO], tm[FL_FRAME_TIMES];
+    double worst_mean = 0, worst_levels = 0, worst_composed = 0;
+    long big = 0, all = 0;
+    char err[256];
+    for (i = 0; i < nfr; i++) for (f = 0; f < NFILMS; f++) for (t = 0; t < 2; t++) {
+        int params[FL_PARAM_COUNT], n, k, ch;
+        unsigned int *ref_rb, *now;
+        unsigned char *ref_g;
+        long levels = 0;
+        double same, mean, sum = 0;
+        int maxd;
+        memcpy(params, PARAMS, sizeof params);
+        params[FL_PARAM_HIGHLIGHT] = TONES[t][0]; params[FL_PARAM_SHADOW] = TONES[t][1];
+        if (!frame_film(c, FILMS[f], params, err, sizeof err) || frame_decode(c, fr[i].jpg, fr[i].len, 320, 240, 1, err, sizeof err)) {
+            check(0, "film / decode: %s", err);
+            continue;
+        }
+        n = c->sw * c->sh;
+        ref_rb = (unsigned int *)malloc(sizeof(unsigned int) * n); ref_g = (unsigned char *)malloc(n);
+        now = (unsigned int *)malloc(sizeof(unsigned int) * n);
+        ref_look_pack(&c->film.L, c->rgb, n, ref_rb, ref_g);
+        if (frame_decode(c, fr[i].jpg, fr[i].len, 320, 240, 0, err, sizeof err) || c->sw * c->sh != n) { check(0, "Y'CbCr decode: %s", err); continue; }
+        look_frame(&c->film.Y, c->rgb, n, now);
+        for (k = 0; k < n; k++) for (ch = 0; ch < 3; ch++) {
+            int r8 = ch == 0 ? (int)(ref_rb[k] >> 16) : ch == 1 ? ref_g[k] : (int)(ref_rb[k] & 255);
+            int v = (int)(now[k] >> (16 - 8 * ch) & 255);   /* the dither's units: 255 / 240 of an 8-bit step */
+            double d = abs(v - dd(r8)) * 255.0 / 240;   /* like for like, in 8-bit steps */
+            sum += d;
+            if (d > 12) big++;
+            all++;
+            if ((v + 8) >> 4 != (dd(r8) + 8) >> 4) levels++;
+        }
+        if (getenv("FT_VERBOSE")) printf("    %s %s %d: mean %.2f/255, levels %.1f%%\n", fr[i].name, FILMS[f], t, sum / (3.0 * n), 100.0 * levels / (3.0 * n));
+        if ((double)sum / (3.0 * n) > worst_mean) worst_mean = (double)sum / (3.0 * n);
+        if ((double)levels / (3.0 * n) > worst_levels) worst_levels = (double)levels / (3.0 * n);
+        /* and composed: Y'CbCr against RGB through today's composer, the same dither */
+        fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], params, FL_F_TEMPORAL, 3, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
+        fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], params, FL_F_TEMPORAL | FL_F_LEVEL, 3, b, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
+        versus(a, b, OW * OH, &same, &maxd, &mean);
+        {
+            long diff = 0;
+            for (k = 0; k < OW * OH; k++) { int la[3], lb[3]; lv(a[k], la); lv(b[k], lb); for (ch = 0; ch < 3; ch++) diff += la[ch] != lb[ch]; }
+            if ((double)diff / (3.0 * OW * OH) > worst_composed) worst_composed = (double)diff / (3.0 * OW * OH);
+        }
+        free(ref_rb); free(ref_g); free(now);
+    }
+    /* (rounded to 4 bits, a flat patch near a level's edge flips whole: the test chart's flat patches change
+     * up to ~7% of their samples so, the photos at most ~5%; dithered, as the screen shows them, under 6%) */
+    check(worst_mean < 1.5,
+          "Y'CbCr decode and table against v0.44.1's RGB, %d frames x %d films x 2 tone settings: mean |difference| at worst %.2f/255 "
+          "(rounded to 4 bits, at worst %.1f%% of samples change; over 12/255, %.3f%%)", nfr, NFILMS, worst_mean, worst_levels * 100, 100.0 * big / (all ? all : 1));
+    check(worst_composed < 0.06, "and composed for the screen, against the RGB decode through the same composer: at worst %.1f%% of 4-bit channel values changed", worst_composed * 100);
+    fl_frame_free(c);
+    free(a); free(b);
+}
+
 /* ---- the fused row's lanes never carry: every alpha, colour, row weight and threshold, the picture at its
  * extremes (0 and 240 in the dither's units), through the composer's own arithmetic */
 static void test_no_carry(void) {
@@ -324,6 +385,19 @@ int main(int argc, char **argv) {
     if (!nfr) { fprintf(stderr, "usage: frametest [--bench] [--render DIR] IN.JPG...\n"); return 2; }
     test_no_carry();
     test_look_kernels(fr, nfr);
+    test_ycc(fr, nfr);
+    {   /* what a film change costs a look thread (the RGB table and the Y'CbCr one; the film file itself cached) */
+        fl_frame_ctx *c = fl_frame_new();
+        char err[256];
+        int params[FL_PARAM_COUNT], k;
+        double t;
+        memcpy(params, PARAMS, sizeof params);
+        frame_film(c, FILMS[3], params, err, sizeof err);
+        t = now_s();
+        for (k = 0; k < 20; k++) { params[FL_PARAM_HIGHLIGHT] = k & 1; frame_film(c, FILMS[3], params, err, sizeof err); }
+        printf("  a film change on the Mac: %.2f ms a look thread\n", (now_s() - t) / 20 * 1000);
+        fl_frame_free(c);
+    }
     test_versus_reference(fr, nfr);
     if (do_bench) bench(fr, nfr);
     if (dir) renders(dir, fr, nfr);

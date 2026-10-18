@@ -1663,16 +1663,18 @@ int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, 
  * summed give its cell (>> 10) and each its own position (& 1023: three positions add up to at most 768). The
  * nodes hold the look rounded to 8 bits and already in the dither's units (dd: sixteen to a 4-bit level). */
 typedef struct {
-    int n;                         /* points a side; 0: no table, the tone curve alone */
-    unsigned int at[3][256];       /* red, green, blue */
-    unsigned int *nodes;           /* red << 16 | green << 8 | blue a node, red fastest */
+    int n;                         /* points along the first channel; 0: no table, the tone curve alone */
+    int sg, sb;                    /* bytes from a node to the next along the second and third channels */
+    unsigned int at[3][256];       /* the first channel (red, or Y), the second (green, Cb), the third (blue, Cr) */
+    unsigned int *nodes;           /* red << 16 | green << 8 | blue a node, the first channel fastest */
     unsigned char tone[256];       /* the tone curve (dd) */
 } live_film;
 
 struct fl_frame_ctx {
-    struct { char path[512]; int highlight, shadow, ready; fl_look L; live_film F; } film;
-    unsigned char *rgb, *row;
-    int rgb_cap, row_cap, sw, sh;          /* the last frame, decoded and looked */
+    /* the film: as read (RGB, 17 points), for frames decoded as RGB (F), and for frames decoded as Y'CbCr (Y) */
+    struct { char path[512]; int highlight, shadow, ready; fl_look L; live_film F, Y; } film;
+    unsigned char *rgb, *row;              /* the last frame decoded: RGB, or Y'CbCr when ycc */
+    int rgb_cap, row_cap, sw, sh, ycc;     /* its size */
     unsigned int *px;                      /* the looked frame: red << 16 | green << 8 | blue, a word a pixel */
     int cap_px;
     unsigned int *hrow;                    /* two stretched rows (stretch_px's records), then a screen row */
@@ -1686,7 +1688,7 @@ fl_frame_ctx *fl_frame_new(void) { return (fl_frame_ctx *)calloc(1, sizeof(fl_fr
 void fl_frame_free(fl_frame_ctx *c) {
     if (!c) return;
     if (c->film.ready) free(c->film.L.data);
-    free(c->film.F.nodes);
+    free(c->film.F.nodes); free(c->film.Y.nodes);
     free(c->rgb); free(c->row); free(c->px); free(c->hrow); free(c->xiw);
     free(c);
 }
@@ -1705,6 +1707,8 @@ static int live_film_rgb(live_film *F, const fl_look *L) {
     nn = L->n * L->n * L->n;
     if (!(F->nodes = (unsigned int *)malloc(sizeof(unsigned int) * nn))) return -1;
     F->n = L->n;
+    F->sg = L->n * 4;
+    F->sb = L->n * L->n * 4;
     for (v = 0; v < 256; v++) {
         F->at[0][v] = (unsigned int)(L->offR[v] / 3 * 4) << 10 | (unsigned int)L->frac[v];
         F->at[1][v] = (unsigned int)(L->offG[v] / 3 * 4) << 10 | (unsigned int)L->frac[v];
@@ -1713,6 +1717,56 @@ static int live_film_rgb(live_film *F, const fl_look *L) {
     for (i = 0; i < nn; i++) {   /* 8.4 fixed point to 8 bits, rounded, then to the dither's units */
         const short *q = L->data + i * 3;
         F->nodes[i] = (unsigned int)dd((q[0] + 8) >> 4) << 16 | (unsigned int)dd((q[1] + 8) >> 4) << 8 | (unsigned int)dd((q[2] + 8) >> 4);
+    }
+    return 0;
+}
+
+/*
+ * The film for frames decoded as Y'CbCr (live view's usual way since v0.45: libjpeg then skips its colour
+ * conversion): a table indexed by (Y, Cb, Cr) holding the look's R'G'B', built from the RGB film as the darkroom
+ * builds its own (build_ycc_look): each node to BT.601 RGB, the look, and outside the RGB cube a straight line on
+ * from its surface rather than flattening, so cells straddling its edge interpolate smoothly. The tone curve is in
+ * the look already. Its cells are sheared against the RGB film's, so it needs more points to follow the film as
+ * closely: FL_LIVE_YGRID along Y, where the tone curve bends (25: 28.9 KB, v0.44's table's size), 17 across
+ * colour (tools/frame-test.sh measures it against the RGB decode). 0, or -1.
+ */
+#ifndef FL_LIVE_YGRID
+#define FL_LIVE_YGRID 25
+#endif
+
+static int live_film_ycc(live_film *Y, const fl_look *L) {
+    const int gy = FL_LIVE_YGRID, g = FL_LIVE_GRID;
+    int i, j, k, v;
+    free(Y->nodes);
+    memset(Y, 0, sizeof *Y);
+    if (!(Y->nodes = (unsigned int *)malloc(sizeof(unsigned int) * gy * g * g))) return -1;
+    Y->n = gy;
+    Y->sg = gy * 4;
+    Y->sb = gy * g * 4;
+    for (v = 0; v < 256; v++) {   /* as build_index places a value, without a tone curve */
+        int pos = v * (gy - 1) * 256 / 255, cell = pos >> 8, f = pos & 255;
+        if (cell >= gy - 1) { cell = gy - 2; f = 256; }
+        Y->at[0][v] = (unsigned int)(cell * 4) << 10 | (unsigned int)f;
+        pos = v * (g - 1) * 256 / 255; cell = pos >> 8; f = pos & 255;
+        if (cell >= g - 1) { cell = g - 2; f = 256; }
+        Y->at[1][v] = (unsigned int)(cell * Y->sg) << 10 | (unsigned int)f;
+        Y->at[2][v] = (unsigned int)(cell * Y->sb) << 10 | (unsigned int)f;
+        Y->tone[v] = (unsigned char)dd(v);
+    }
+    for (k = 0; k < g; k++) for (j = 0; j < g; j++) for (i = 0; i < gy; i++) {
+        double y = i * 255.0 / (gy - 1), cb = j * 255.0 / (g - 1) - 128, cr = k * 255.0 / (g - 1) - 128;
+        double rgb[3];
+        unsigned char px[3];
+        unsigned int node = 0;
+        int ch;
+        rgb[0] = y + 1.402 * cr; rgb[1] = y - 0.344136 * cb - 0.714136 * cr; rgb[2] = y + 1.772 * cb;
+        for (ch = 0; ch < 3; ch++) px[ch] = (unsigned char)(rgb[ch] < 0 ? 0 : rgb[ch] > 255 ? 255 : rgb[ch] + 0.5);
+        look_apply(L, px);
+        for (ch = 0; ch < 3; ch++) {
+            double o = px[ch] + (rgb[ch] - (rgb[ch] < 0 ? 0 : rgb[ch] > 255 ? 255 : rgb[ch]));
+            node = node << 8 | (unsigned int)dd((int)(o < 0 ? 0 : o > 255 ? 255 : o + 0.5));
+        }
+        Y->nodes[(k * g + j) * gy + i] = node;
     }
     return 0;
 }
@@ -1743,6 +1797,8 @@ static const fl_look *frame_film(fl_frame_ctx *c, const char *lut_path, const in
     c->film.L.shared = 1;
     look_free(&L);
     if (live_film_rgb(&c->film.F, &c->film.L) != 0) { set_err(err, errlen, "out of memory"); return NULL; }
+    if (!c->film.F.n) { free(c->film.Y.nodes); memset(&c->film.Y, 0, sizeof c->film.Y); }   /* no film: frames stay RGB */
+    else if (live_film_ycc(&c->film.Y, &c->film.L) != 0) { set_err(err, errlen, "out of memory"); return NULL; }
     strcpy(c->film.path, p);
     c->film.highlight = params[FL_PARAM_HIGHLIGHT];
     c->film.shadow = params[FL_PARAM_SHADOW];
@@ -2006,16 +2062,21 @@ static inline __attribute__((always_inline)) void look_cells(const live_film *F,
 }
 
 static NOINLINE void look17(const live_film *F, const unsigned char *rgb, int n, unsigned int *px) {
-    look_cells(F, rgb, n, px, 17 * 4, 17 * 17 * 4);
+    look_cells(F, rgb, n, px, FL_LIVE_GRID * 4, FL_LIVE_GRID * FL_LIVE_GRID * 4);
+}
+
+static NOINLINE void look_ycc(const live_film *F, const unsigned char *rgb, int n, unsigned int *px) {
+    look_cells(F, rgb, n, px, FL_LIVE_YGRID * 4, FL_LIVE_YGRID * FL_LIVE_GRID * 4);
 }
 
 static NOINLINE void look_any(const live_film *F, const unsigned char *rgb, int n, unsigned int *px) {
-    look_cells(F, rgb, n, px, F->n * 4, F->n * F->n * 4);
+    look_cells(F, rgb, n, px, F->sg, F->sb);
 }
 
 /* The film on n decoded pixels. */
 static void look_frame(const live_film *F, const unsigned char *rgb, int n, unsigned int *px) {
-    if (F->n == 17) look17(F, rgb, n, px);
+    if (F->sg == FL_LIVE_GRID * 4 && F->sb == FL_LIVE_GRID * FL_LIVE_GRID * 4) look17(F, rgb, n, px);
+    else if (F->sg == FL_LIVE_YGRID * 4 && F->sb == FL_LIVE_YGRID * FL_LIVE_GRID * 4) look_ycc(F, rgb, n, px);
     else if (F->n) look_any(F, rgb, n, px);
     else look_tone(F, rgb, n, px);
 }
@@ -2272,13 +2333,16 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
     if (jpeg) {
         const fl_look *L = frame_film(c, lut_path, params, err, errlen);
         if (!L) return -1;
-        if (frame_decode(c, jpeg, len, max_w, max_h, 1, err, errlen) != 0) return -1;
+        /* Y'CbCr straight from the decoder unless the level wants RGB (or there is no film) */
+        c->ycc = !(flags & FL_F_LEVEL) && c->film.Y.n;
+        if (frame_decode(c, jpeg, len, max_w, max_h, !c->ycc, err, errlen) != 0) return -1;
         t = now_ms(); if (tm) tm[FL_TM_DECODE] = (int)(t - t0); t0 = t;
         if (flags & FL_F_LEVEL) fl_level(c->rgb, c->sw, c->sh, info + 2);
         else info[2] = info[3] = info[4] = FL_NO_READING;
         if (flags & FL_F_HIST) {
             const unsigned char *p = c->rgb;
-            for (i = 0; i < c->sw * c->sh; i++, p += 3) info[5 + ((p[0] * 77 + p[1] * 150 + p[2] * 29) >> 10)]++;
+            if (c->ycc) for (i = 0; i < c->sw * c->sh; i++, p += 3) info[5 + (p[0] >> 2)]++;
+            else for (i = 0; i < c->sw * c->sh; i++, p += 3) info[5 + ((p[0] * 77 + p[1] * 150 + p[2] * 29) >> 10)]++;
         }
         t = now_ms(); if (tm) tm[FL_TM_READ] = (int)(t - t0); t0 = t;
         if (c->cap_px < c->sw * c->sh) {
@@ -2288,7 +2352,7 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
             if (!c->px) { set_err(err, errlen, "out of memory"); return -1; }
             c->cap_px = c->sw * c->sh;
         }
-        look_frame(&c->film.F, c->rgb, c->sw * c->sh, c->px);
+        look_frame(c->ycc ? &c->film.Y : &c->film.F, c->rgb, c->sw * c->sh, c->px);
         t = now_ms(); if (tm) tm[FL_TM_LOOK] = (int)(t - t0); t0 = t;
     } else {
         if (!c->px) { set_err(err, errlen, "no frame yet"); return -1; }

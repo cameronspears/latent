@@ -140,8 +140,13 @@ public class JniTest {
         double ma = 0, mr = 0;
         for (int i = 0; i < ow * oh; i++) { ma += (a[i] >> 12 & 15) + (a[i] >> 8 & 15) + (a[i] >> 4 & 15); mr += (ref[i] >> 12 & 15) + (ref[i] >> 8 & 15) + (ref[i] >> 4 & 15); }
         check(Math.abs(ma - mr) / (ow * oh * 3) < 0.25, "as bright as the 32-bit look: " + String.format("%.2f vs %.2f", ma / (ow * oh * 3), mr / (ow * oh * 3)));
+        // without the level the frame is decoded as Y'CbCr and looked up in the film's Y'CbCr table (v0.45.0)
         rc = FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 1, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
-        check(rc == 0 && info[2] == FilmCore.NO_READING && java.util.Arrays.equals(a, b), "no level asked: none read, the same picture");
+        int changed = 0;
+        for (int i = 0; i < ow * oh; i++) { int[] la = levels(a[i], FilmCore.FMT_4444), lb = levels(b[i], FilmCore.FMT_4444); for (int k = 0; k < 3; k++) if (la[k] != lb[k]) changed++; }
+        check(rc == 0 && info[2] == FilmCore.NO_READING && changed < ow * oh * 3 * 0.06, "no level asked: none read, decoded as Y'CbCr, "
+                + String.format("%.1f%%", changed * 100.0 / (ow * oh * 3)) + " of 4-bit values changed (RGB's within 6%)");
+        System.arraycopy(b, 0, a, 0, a.length);
         FilmCore.frame(c, null, 0, lut, p, 0, 1, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
         check(java.util.Arrays.equals(a, b), "the last frame again (no JPEG): the same picture");
         FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL, 2, a, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
