@@ -593,6 +593,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 note("exposure: " + Probe.why(e));
             }
             note("focus " + afMode + ", " + afArea + "; " + shutter + " " + aperture + " ISO " + (isoAuto ? "auto" : iso) + ", exposure " + ev + "/3");
+            pictureNote(p);
+            flushLogSoon();   // the long dump onto the card now, not with the first shutter's flush
         } catch (Throwable e) {
             note("settings: " + Probe.why(e));
         }
@@ -611,6 +613,27 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 ui.post(new Runnable() { public void run() { shotsLeft = l; host.changed(); } });
             }
         });
+    }
+
+    /**
+     * The picture settings the camera's interface reports for Latent's shots (v0.46.1). Latent's frames have come out
+     * at contrast -1, saturation +1, sharpness -1 while the camera's own menus (and its own-mode shots) were neutral, so
+     * the interface keeps settings of its own. Noted once a visit, in full, to find which of its keys hold them; the
+     * parameters were read already (readSettings), and nothing is changed.
+     */
+    private void pictureNote(Camera.Parameters p) {
+        String all = p.flatten();
+        if (all == null) { note("picture: no parameters"); return; }
+        StringBuilder pick = new StringBuilder();
+        for (String kv : all.split(";")) {
+            String k = kv.toLowerCase(Locale.US);
+            if (k.contains("creative") || k.contains("style") || k.contains("contrast") || k.contains("saturation") || k.contains("sharp")
+                    || k.contains("white") || k.contains("balance") || k.contains("color") || k.contains("dro") || k.contains("hdr")
+                    || k.contains("effect") || k.contains("kelvin") || k.contains("temperature"))
+                pick.append(pick.length() == 0 ? "" : "; ").append(kv);
+        }
+        note("picture: " + (pick.length() > 0 ? pick.toString() : "none of the picture keys"));
+        for (int i = 0; i < all.length(); i += 400) note("parameters " + (i / 400 + 1) + ": " + all.substring(i, Math.min(all.length(), i + 400)));
     }
 
     // ------------------------------------------------------------------------------ live frames with the look

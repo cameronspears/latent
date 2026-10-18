@@ -196,6 +196,7 @@ public class MainActivity extends Activity {
         Display.fullColour(!(vf != null && Viewfinder.SHOOT_16BIT));   // the camera's own 16-bit plane while it's Latent's
         light.shown(SystemClock.uptimeMillis());   // back on screen: lit (the darkroom keeps its own light)
         applyLight();
+        neutralCheckDue = true;   // once a visit: the camera's settings read back (Latent may have been away, or its viewfinder open)
         if (card != null && developing == null) refresh(null);
     }
 
@@ -321,7 +322,13 @@ public class MainActivity extends Activity {
                 // be in front, and shooting there within ~6 s of a write restarts the A5100 (goShoot's settle guards only
                 // Latent's way to shooting). A card read in the background (a develop ending after you left) leaves
                 // it to the next one in front, onResume's.
-                final String neutralMsg = resumed ? reconcileNeutral(inCamera != null) : null;
+                String nm = null;
+                try {
+                    nm = resumed ? reconcileNeutral(inCamera != null) : null;
+                } catch (Exception e) {   // never the end of a card read: the roll, the photos and the screen still come
+                    devLog("neutral: " + Probe.why(e));
+                }
+                final String neutralMsg = nm;
                 if (cardReadNote == null) cardReadNote = "card read: first touch " + (r0 - r00) + " ms" + (cardThere ? "" : " (no LATENT)") + ", looks " + (r1 - r0) + " ms, rolls " + (r2 - r1) + " ms, photos "
                         + (r3 - r2) + " ms (" + all.size() + "), the rest " + (SystemClock.uptimeMillis() - r3) + " ms";
                 final String msg = problem;
@@ -618,6 +625,12 @@ public class MainActivity extends Activity {
         if (!resumed) {   // left meanwhile (the camera's own mode may be in front): never open the camera behind it
             shootAfterFrame = false;
             shootPending = false;
+            return;
+        }
+        if (NeutralSettings.unanswered()) {   // a settings read still with the camera: not opened beside it (press again once it answers)
+            shootAfterFrame = false;
+            shootPending = false;
+            toast("The camera's settings aren't answering. Turn the camera off and on to shoot");
             return;
         }
         if (developing != null && devQuiet) {   // the photo in hand finishes first (a frame half-written is wasted)
@@ -1192,10 +1205,13 @@ public class MainActivity extends Activity {
                     // sets it (reconcileNeutral, as for a roll loaded before Latent did this), before any shooting
                     if (resumed) {
                         StringBuilder nl = new StringBuilder();
-                        String why = new NeutralSettings(card, nl).apply();
+                        NeutralSettings ns = new NeutralSettings(card, nl);
+                        boolean noted = ns.active();   // put away for an earlier roll: apply() leaves them, the card read checks them
+                        String why = ns.apply();
                         neutralTried = true;
+                        if (noted) neutralCheckDue = true;
                         devLogAll(nl);
-                        msg = stock.name + " loaded" + (why == null ? "  ·  camera set to neutral" : ". Camera " + why);
+                        msg = stock.name + " loaded" + (why != null ? ". Camera " + why : noted ? "" : "  ·  camera set to neutral");
                     } else {
                         neutralTried = false;   // so the next card read in front applies it for this roll
                         devLog("load film: " + made.label() + " loaded with Latent away; the camera is set neutral on the next open");
@@ -1224,6 +1240,7 @@ public class MainActivity extends Activity {
     }
 
     private volatile boolean neutralTried;   // set neutral at most once per run for a roll loaded before v0.13
+    private volatile boolean neutralCheckDue;   // the camera's settings not yet read back this visit (NeutralSettings.check)
 
     /**
      * The camera shoots neutral exactly while a roll is loaded, so every look starts from a plain picture: once
@@ -1240,6 +1257,23 @@ public class MainActivity extends Activity {
             neutralTried = true;
             String why = ns.apply();
             msg = why == null ? "Camera set to neutral for this roll" : "Camera " + why;
+        } else if (loaded && ns.active() && neutralCheckDue && (Viewfinder.opened || HardwareDevelop.hung())) {
+            neutralCheckDue = false;   // the next process checks
+            nl.append(Viewfinder.opened ? "neutral: not checked (the camera is open)\r\n" : "neutral: not checked (a call to the camera hadn't answered)\r\n");
+        } else if (loaded && ns.active() && neutralCheckDue) {
+            // once a visit, with the camera closed: read back what Latent set (reads only). Not beside Sony's delete of an
+            // original, which may run during a card read and has never had a settings call alongside it: then next time
+            boolean got = false;
+            try { got = HardwareDevelop.SONY.tryLock(1500, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
+            if (got) {
+                try {
+                    neutralCheckDue = false;
+                    if (HardwareDevelop.hung()) nl.append("neutral: not checked (a call to the camera hadn't answered)\r\n");   // a delete that hung while we waited
+                    else ns.check();
+                } finally {
+                    HardwareDevelop.SONY.unlock();
+                }
+            } else nl.append("neutral: not checked this time (the camera was busy filing a negative)\r\n");
         }
         devLogAll(nl);
         return msg;
@@ -1576,7 +1610,7 @@ public class MainActivity extends Activity {
                 final int[] t = new int[FilmCore.T_COUNT];
                 // into the camera roll, while the original is still there and the hardware keeps working
                 final HardwareDevelop h = hw;
-                if (exists && h != null && !HardwareDevelop.hung() && src.getPath().equals(r.frames.get(frame))) {
+                if (exists && h != null && !HardwareDevelop.hung() && !NeutralSettings.unanswered() && src.getPath().equals(r.frames.get(frame))) {
                     // the negative is copied alongside, so it has settled on the card by the time the original goes
                     final File neg = r.negative(frame);
                     filer.execute(new Runnable() { public void run() { copyNegative(src, neg); } });
@@ -1693,7 +1727,7 @@ public class MainActivity extends Activity {
      * Returns how many originals were filed. Filer thread.
      */
     private int fileSettled(Roll r, boolean wait) {
-        if (HardwareDevelop.hung() || Viewfinder.opened) return 0;   // never alongside the camera
+        if (HardwareDevelop.hung() || Viewfinder.opened || NeutralSettings.unanswered()) return 0;   // never alongside the camera, nor a settings request
         List<Integer> todo = unfiled(r);
         if (todo.isEmpty()) return 0;
         HardwareDevelop sony = new HardwareDevelop(this, card, new StringBuilder());
@@ -1743,7 +1777,7 @@ public class MainActivity extends Activity {
                 negCrc.remove(key);
                 negAt.remove(key);
             }
-            if (HardwareDevelop.hung()) break;
+            if (HardwareDevelop.hung() || NeutralSettings.unanswered()) break;
         }
         if (wait) showFiling(r, 0);
         if (filed > 0) {

@@ -118,6 +118,42 @@ line it misses.
 - Latent's own viewfinder with the film look live: ~11 frames a second (up to ~15).
 - Test shots are kept off rolls through `LATENT/IGNORE.TXT`.
 
+## What v0.46.1 changes (Mac-tested only): neutral read back
+
+v0.46.0's first camera run (Roll 005) showed Latent's frames are not neutral: every photo shot through
+Latent's viewfinder since Oct 16 (95 of them) records contrast -1, saturation +1, sharpness -1, while the
+only two shot in the camera's own mode (DSC04708, DSC04864) are Standard 0/0/0 with no shift. So the
+stored settings Latent writes were neutral, and the camera interface Latent shoots through keeps picture
+settings of its own, most likely left by Recipe Lab (the user used it, uninstalled it a few days ago).
+The WB fine-tune A2/M2 on frames 4-7 is a real change to the stored settings: the user set it in the
+camera's menu at about 11:00 for their own shooting. Nothing re-checked any of this: NeutralSettings.apply()
+returns at once while NEUTRAL.TXT exists (since v0.35.1 on this card), yet loading film said "camera set
+to neutral". The user's rule: any time they shoot with Latent, the base is neutral.
+
+- `NeutralSettings.check()`: once a visit with a roll loaded (the first card read in front, the camera
+  closed, not on a Relaunch's first visit, not beside Sony's delete of an original: `SONY.tryLock`), it
+  reads the 11 settings back and logs `neutral: read back in N ms: <all 11 as numbers>`, then
+  `neutral: as Latent set them` or `neutral: changed since Latent set them: <id> a->b, ... (the camera
+  now: ...); read only, nothing written`. Reads only: no write, no sync, no settle. Each read has a 1.5 s
+  limit; a hang (or 'did not answer') writes `LATENT/NOANSWER.TXT` (8.3) and no check asks for 30 min. While
+  that call's thread is still waiting (`NeutralSettings.unanswered()`), nothing of Sony's runs beside it: the
+  filer's delete (also re-checked under `SONY`), a hardware develop (that frame develops in software) and
+  opening the camera (a toast says why). It doesn't set `stuck`, so apply() and restore() run as in v0.46.0.
+  No check after a Sony call has hung (`HardwareDevelop.hung()`, now set before `removeOriginal` lets `SONY`
+  go). Every skipped check says why once. A damaged note is logged and left. apply() keeps the note when a
+  write failed so that it may have reached the camera (an exception, or no answer), and says "not fully set
+  to neutral" then; v0.46.0 deleted the note and said "left as it was". The check also runs on a Relaunch's
+  first visit: it reads the settings right after Latent's own viewfinder visit.
+- The viewfinder logs `picture: <the camera interface's picture keys>` and the full `parameters N:`
+  list once a visit (from the parameters it already read; no new camera call), to find the keys that hold
+  -1/+1/-1.
+- Loading film says "camera set to neutral" only when it was (no earlier note), and the card read right
+  after checks. `apply()`'s message no longer claims "left as it was" when its undo failed. A failure in
+  the neutral step can no longer end a card read.
+- Next (the user's call; each is a new camera write): make Latent's shots neutral at capture, in its own
+  camera session (the interface's picture keys, once the log names them), which would leave the camera's
+  own mode with the user's settings; and decide what happens to stored-setting drift (re-apply, adopt).
+
 ## What v0.46.0 changes (Mac-tested only): the looks
 
 The user asked for the best film emulation Latent can have, few options and no settings: they liked
@@ -487,6 +523,16 @@ Each thread has its own last error (a pthread key: Android 2.3 has no `__thread`
   called on the camera). Buttons Latent doesn't use are noted, one line a visit in DEVELOP.TXT.
 
 ## The next camera visit: what to check, and the lines that answer it
+
+Neutral (v0.46.1):
+
+- DEVELOP.TXT, each open with a roll loaded: `neutral: read back in N ms: 0x01070019=… …` (expect contrast
+  0x01070178, saturation 0x01070187, sharpness 0x0107018a at 0, and the user's A2/M2 in 0x01070017/16 and
+  the Auto copies 0x0107067f/e, if they set it in the menu), then `as Latent set them` or `changed since`.
+  check() never writes: `wrote` lines come only from apply() (loading film with no note) and restore() (a
+  12/24/36 roll developed), as in v0.46.0. `start: camera on for N s` must keep climbing (no restart).
+- VIEWFIND.TXT, each visit: `picture: …` and `parameters 1..N:`: which keys say contrast -1, saturation +1,
+  sharpness -1 (and a creative style), and whether a WB shift key follows the menu's A2/M2.
 
 The looks (v0.46.0):
 

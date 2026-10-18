@@ -22,6 +22,8 @@ import java.util.Properties;
  *  - Restoring only touches a setting still at the value Latent set. Anything you changed yourself
  *    in the meantime stays as you left it.
  *  - Every call has a time limit; if the camera stops answering, Latent stops asking.
+ *  - While a roll is loaded, each visit reads them back (check, v0.46.1) and notes any that changed since: reads only.
+ *    While a check's request goes unanswered, nothing else of Sony's runs beside it (unanswered()), and checks pause.
  */
 final class NeutralSettings {
     /** The settings switched, and their neutral values. WB mode first: its fine-tune copies follow it. */
@@ -29,10 +31,44 @@ final class NeutralSettings {
             CameraSettings.WB_GM_AUTO, CameraSettings.STYLE, CameraSettings.CONTRAST, CameraSettings.SATURATION,
             CameraSettings.SHARPNESS, CameraSettings.DRO, CameraSettings.DRO_LEVEL };
     static final int[] NEUTRAL = { 1 /* Auto */, 0, 0, 0, 0, 1 /* Standard */, 0, 0, 0, 0 /* off */, 1 };
+    /** Each setting's menu range, as jni/settings_bridge.c fences writes (SettingsTest checks they agree). */
+    static final int[] LO = { 0, -7, -7, -7, -7, 1, -3, -3, -3, 0, 1 }, HI = { 31, 7, 7, 7, 7, 14, 3, 3, 3, 6, 6 };
+    /** check()'s time limit for each call: its 22 requests take about 2.5 ms each on the camera. */
+    private static final long CHECK_MS = 1500;
+    /** After the service didn't answer a check, how long no check asks again (NOANSWER.TXT). */
+    private static final long HUNG_PAUSE_MS = 30 * 60 * 1000L;
 
     private final File file;
     private final StringBuilder log;
     private static volatile boolean stuck;   // the settings service stopped answering: leave it alone
+    /** check()'s call that went unanswered, while its thread is still waiting on the settings service. */
+    private static volatile Thread pending;
+    private static volatile boolean pauseNoted;   // "not checked (paused)" said once this run
+
+    /**
+     * A check's request is still with the camera's settings service: Sony's delete, a hardware develop and opening the
+     * camera wait until it answers (never seen: these reads answer in milliseconds).
+     */
+    static boolean unanswered() { Thread t = pending; return t != null && t.isAlive(); }
+
+    /** A check's reads and writes nothing else: a time limit of its own, and an unanswered call is kept (pending). */
+    private static Object checkCall(final HardwareDevelop.Call c) throws Exception {
+        final Object[] r = new Object[2];
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                try { r[0] = c.run(); } catch (Throwable e) { r[1] = e; }
+            }
+        }, "sony-call");
+        t.start();
+        t.join(CHECK_MS);
+        if (t.isAlive()) { pending = t; throw new HardwareDevelop.Stuck(); }
+        if (r[1] instanceof Exception) throw (Exception) r[1];
+        if (r[1] != null) throw new RuntimeException(Probe.why((Throwable) r[1]));
+        return r[0];
+    }
+
+    /** A settings call's failure that may still reach the camera (the service didn't answer it). */
+    static boolean noAnswer(String why) { return why != null && (why.contains("did not answer") || why.contains("no message buffer")); }
     /**
      * When Latent last changed a camera setting (a monotonic clock in ms, 0 = not this run). The A5100
      * restarts if its shooting mode starts within a second or two of a change (seen twice in v0.14.4),
@@ -80,6 +116,7 @@ final class NeutralSettings {
         }
         List<Integer> written = new ArrayList<Integer>();
         String why = null;
+        boolean unsure = false;   // a write that failed so that it may have reached the camera, or may yet
         try {
             for (int i = 0; i < IDS.length && why == null; i++) {
                 if (yours[i] == NEUTRAL[i]) continue;
@@ -88,20 +125,116 @@ final class NeutralSettings {
             }
         } catch (Exception e) {
             why = Probe.why(e);
+            unsure = true;
         }
-        if (why != null) {   // put back what was changed; the note stays if even that fails
-            boolean back = true;
+        if (why != null) {   // put back what was changed; the note stays if even that fails, or a write may have landed
+            boolean back = !unsure && !noAnswer(why);   // (yours stay on the card for restore, and the next check notes it)
             for (int i : written) {
                 try { back &= writeByte(IDS[i], yours[i]) == null; } catch (Exception e) { back = false; }
             }
             sync();
             if (back) file.delete();
-            log.append("neutral: not applied (").append(why).append(")").append(back ? ", undone\r\n" : ", NOT fully undone; retried next start\r\n");
-            return "camera left as it was: " + why;
+            log.append("neutral: not applied (").append(why).append(")").append(back ? ", undone\r\n" : ", NOT fully undone\r\n");
+            return (back ? "left as it was: " : "not fully set to neutral: ") + why;
         }
         sync();
         log.append("neutral: applied; yours were ").append(describe(yours)).append("\r\n");
         return null;
+    }
+
+    /**
+     * While a roll is loaded and your settings are put away (v0.46.1): reads the switched settings back and notes
+     * them in DEVELOP.TXT, all 11 as numbers, with any that no longer hold the value Latent set (changed in the
+     * camera's menus, or by another app, while Latent was away). Reads only: the same reads apply() makes, each
+     * time-limited, and nothing written. A call that doesn't answer is noted on the card (NOANSWER.TXT), and no check
+     * asks again for HUNG_PAUSE_MS; it doesn't mark the service stuck, so apply() and restore() run as before. A note
+     * that can't be read is noted and left as it is (restore() needs it).
+     */
+    void check() {
+        if (!active() || stuck) return;
+        if (unanswered() || hung()) {
+            if (!pauseNoted) log.append("neutral: not checked (a check had no answer from the camera; paused)\r\n");
+            pauseNoted = true;
+            return;
+        }
+        long t0 = now();
+        int[] ours = new int[IDS.length], cam = new int[IDS.length];
+        try {
+            Properties p = load();
+            for (int i = 0; i < IDS.length; i++)
+                ours[i] = Integer.parseInt(p.getProperty("ours." + hex(IDS[i]), String.valueOf(NEUTRAL[i])).trim());
+        } catch (Exception e) {
+            log.append("neutral: not checked (NEUTRAL.TXT: ").append(Probe.why(e)).append(")\r\n");
+            return;
+        }
+        try {
+            if (!(Boolean) checkCall(new HardwareDevelop.Call() { public Object run() { return CameraSettings.available(); } })) {
+                log.append("neutral: not checked (").append(CameraSettings.lastError()).append(")\r\n");
+                return;
+            }
+            for (int i = 0; i < IDS.length; i++) cam[i] = checkRead(IDS[i]);
+        } catch (HardwareDevelop.Stuck e) {
+            hung("no answer in " + CHECK_MS + " ms");
+            return;
+        } catch (Exception e) {
+            String why = Probe.why(e);
+            if (noAnswer(why)) hung(why);
+            else log.append("neutral: not checked (").append(why).append(")\r\n");
+            return;
+        }
+        StringBuilder raw = new StringBuilder(), moved = new StringBuilder();
+        for (int i = 0; i < IDS.length; i++) {
+            raw.append(i == 0 ? "" : " ").append(hex(IDS[i])).append('=').append(cam[i]);
+            if (cam[i] == ours[i]) continue;
+            moved.append(moved.length() == 0 ? "" : ", ").append(hex(IDS[i])).append(' ').append(ours[i]).append("->").append(cam[i])
+                 .append(cam[i] < LO[i] || cam[i] > HI[i] ? " (outside what Latent may write)" : "");
+        }
+        log.append("neutral: read back in ").append(now() - t0).append(" ms: ").append(raw).append("\r\n");
+        log.append(moved.length() == 0 ? "neutral: as Latent set them\r\n"
+                : "neutral: changed since Latent set them: " + moved + " (the camera now: " + describe(cam) + "); read only, nothing written\r\n");
+    }
+
+    /** A check's call went unanswered within HUNG_PAUSE_MS of now, on the camera's clock since it started (one that went back: it restarted). */
+    private boolean hung() {
+        File f = hungFile();
+        if (!f.exists()) return false;
+        long at = -1;
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f));
+            try { at = Long.parseLong(r.readLine().trim()); } finally { r.close(); }
+        } catch (Exception e) {
+            at = -1;
+        }
+        long since = now() - at;
+        if (at >= 0 && since >= 0 && since < HUNG_PAUSE_MS) return true;
+        f.delete();
+        return false;
+    }
+
+    private void hung(String why) {
+        log.append("neutral: not checked (").append(why).append("); not asked again for ").append(HUNG_PAUSE_MS / 60000).append(" min\r\n");
+        try {
+            FileOutputStream out = new FileOutputStream(hungFile());
+            try { out.write((now() + "\r\n").getBytes("UTF-8")); } finally { out.close(); }
+        } catch (IOException e) {
+            log.append("  (NOANSWER.TXT not written: ").append(e.getMessage()).append(")\r\n");
+        }
+    }
+
+    private File hungFile() { return new File(file.getParentFile(), "NOANSWER.TXT"); }   // 8.3, as the card needs
+
+    /** One of check()'s reads: CHECK_MS, and a timeout leaves `stuck` alone (the caller notes it). */
+    private static int checkRead(final int id) throws Exception {
+        byte[] b = (byte[]) checkCall(new HardwareDevelop.Call() { public Object run() { return CameraSettings.read(id); } });
+        if (b == null || b.length != 1) throw new IOException(b == null ? CameraSettings.lastError() : hex(id) + " is " + b.length + " bytes");
+        return b[0];
+    }
+
+    private Properties load() throws IOException {
+        Properties p = new Properties();
+        FileInputStream in = new FileInputStream(file);
+        try { p.load(in); } finally { in.close(); }
+        return p;
     }
 
     /** Puts your settings back (only those still as Latent set them). Returns null when done, or why not. */

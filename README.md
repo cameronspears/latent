@@ -18,7 +18,7 @@ shows your developed photos too, without a trip to the camera's Playback.
 *The screens as Latent draws them, rendered on a Mac from the same code the camera runs
 (`tools/readme-images.sh`). The photos in them are the test photos credited below.*
 
-Status: **v0.46.0**. v0.44.1 is the last version run on the A5100: rolls (12, 24, 36 or ∞), Latent's
+Status: **v0.46.1**. v0.46.0 ran on the A5100 today; v0.44.1 before it: rolls (12, 24, 36 or ∞), Latent's
 own viewfinder with the film look live, the darkroom into the camera roll on three cores, negatives
 and the looks all work there. v0.45.0 is lighter (no Lab, no settings, no camera tests) and adds
 Photos, a faster viewfinder and a screen that saves the battery. v0.46.0 rebuilds the looks: five
@@ -191,6 +191,14 @@ the roll is developed. Your values are kept in `LATENT/NEUTRAL.TXT` until then. 
 write those few settings, within their menu ranges, and only while it's on screen. If you leave
 while a roll's last frame develops, the roll finishes and your settings come back the next time
 you open Latent; film loaded just as you leave is set neutral then, before anything shoots.
+
+Each time you open Latent with a roll loaded, it reads those settings back and notes in
+`LATENT/DEVELOP.TXT` any that changed since it set them (in the camera's menus, or by another app).
+v0.46.1 only notes them: it reads, and changes nothing. Its viewfinder also notes, in
+`LATENT/VIEWFIND.TXT`, the picture settings Sony's camera interface uses for Latent's own shots. The
+first camera run of v0.46.0 found those at contrast −1, saturation +1, sharpness −1 while the
+camera's menus read neutral, most likely left there by Recipe Lab. Making Latent's shots neutral
+whatever the camera holds is the next step.
 
 ### Where developed frames go
 

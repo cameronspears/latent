@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the settings bridge for this Mac against a stand-in settings service (tools/fakeosal.c)
-# and runs tests/SettingsTest: the write fence, and NeutralSettings' apply / restore.
+# and runs tests/SettingsTest: the write fence, and NeutralSettings' apply / check / restore.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 JH="${LATENT_JAVA_HOME:-$(/usr/libexec/java_home -v 11 2>/dev/null || /usr/libexec/java_home)}"
@@ -13,4 +13,4 @@ clang -O1 -g -Wall -Wno-unused-parameter -dynamiclib -DSETTINGS_HOST_TEST -I"$JH
   src/com/latent/camera/HardwareDevelop.java src/com/latent/camera/CpuGate.java src/com/latent/camera/Probe.java src/com/latent/camera/Library.java \
   src/com/latent/camera/SonyMemory.java src/com/latent/camera/FilmCore.java src/com/latent/camera/Stock.java src/com/latent/camera/Roll.java \
   tests/com/latent/camera/SettingsTest.java 2>&1 | grep -v "^Note" || true
-cd "$O" && DYLD_LIBRARY_PATH="$PWD" "$JH/bin/java" -Djava.library.path="$PWD" -cp "classes:$AJ" com.latent.camera.SettingsTest "$PWD/card"
+cd "$O" && FAKE_CONTROL="$PWD/control.txt" FAKE_LOG="$PWD/fake.log" DYLD_LIBRARY_PATH="$PWD" "$JH/bin/java" -Djava.library.path="$PWD" -cp "classes:$AJ" com.latent.camera.SettingsTest "$PWD/card"

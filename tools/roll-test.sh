@@ -9,7 +9,7 @@ JH="${LATENT_JAVA_HOME:-$(/usr/libexec/java_home -v 11 2>/dev/null || /usr/libex
 AJ="${LATENT_TOOLCHAIN:-$HOME/.latent-toolchain}/sdk/platforms/android-28/android.jar"
 O=out/rolltest
 rm -rf "$O"; mkdir -p "$O/classes" "$O/card"
-"$JH/bin/javac" -encoding UTF-8 -nowarn -cp "$AJ" -d "$O/classes" src/com/latent/camera/{Roll,Library,Stock,Probe,FilmCore,Backlight,Slots,HardwareDevelop,SonyMemory,CpuGate,Photos,UiState}.java \
+"$JH/bin/javac" -encoding UTF-8 -nowarn -cp "$AJ" -d "$O/classes" src/com/latent/camera/{Roll,Library,Stock,Probe,FilmCore,Backlight,Slots,HardwareDevelop,SonyMemory,CpuGate,Photos,UiState,NeutralSettings,CameraSettings}.java \
   tests/com/latent/camera/{RollTest,LogicTest}.java 2>&1 | { grep -v "^Note:" || true; }
 "$JH/bin/java" -cp "$O/classes:$AJ" com.latent.camera.RollTest "$O/card"
 "$JH/bin/java" -cp "$O/classes:$AJ" com.latent.camera.LogicTest

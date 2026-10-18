@@ -450,8 +450,12 @@ final class HardwareDevelop {
             Object[] answer = new Object[1];
             SONY.lock();
             try {
+                if (hung || NeutralSettings.unanswered()) return "a call to the camera hasn't answered; original kept";
                 String kept = deleteOriginal(original, print, answer);
                 if (kept != null) return kept;
+            } catch (Stuck e) {
+                hung = true;   // before SONY goes: whatever takes it next sees the delete is still with Sony
+                throw e;
             } finally {
                 SONY.unlock();
             }
