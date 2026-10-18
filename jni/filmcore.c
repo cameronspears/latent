@@ -1801,16 +1801,20 @@ static const fl_look *frame_film(fl_frame_ctx *c, const char *lut_path, const in
         memcpy(c->film.L.data, L.data, bytes);
     }
     if (c->film.L.data && c->film.L.n > FL_LIVE_GRID) {
-        /* live view's film at 17 points (exact where the grids meet, e.g. 33 -> 17): 29 KB the core's cache
-         * holds, where 33 points (215 KB) sent every pixel's lookup out to memory */
+        /* live view's film at 17 points (exact where the grids meet, e.g. 33 -> 17), what its tables are made
+         * from: tables the core's cache holds, where 33 points (215 KB) sent every pixel's lookup out to memory */
         short *small = resample_lut(c->film.L.data, c->film.L.n, FL_LIVE_GRID);
         if (small) { free(c->film.L.data); c->film.L.data = small; c->film.L.n = FL_LIVE_GRID; build_index(&c->film.L); }
     }
     c->film.L.shared = 1;
     look_free(&L);
-    if (live_film_rgb(&c->film.F, &c->film.L) != 0) { set_err(err, errlen, "out of memory"); return NULL; }
-    if (!c->film.F.n) { free(c->film.Y.nodes); memset(&c->film.Y, 0, sizeof c->film.Y); }   /* no film: frames stay RGB */
-    else if (live_film_ycc(&c->film.Y, &c->film.L) != 0) { set_err(err, errlen, "out of memory"); return NULL; }
+    if (!c->film.L.data) { free(c->film.Y.nodes); memset(&c->film.Y, 0, sizeof c->film.Y); }   /* no film: frames stay RGB */
+    if (live_film_rgb(&c->film.F, &c->film.L) != 0 || (c->film.F.n && live_film_ycc(&c->film.Y, &c->film.L) != 0)) {
+        free(c->film.L.data);
+        c->film.L.data = NULL;
+        set_err(err, errlen, "out of memory");
+        return NULL;
+    }
     strcpy(c->film.path, p);
     c->film.highlight = params[FL_PARAM_HIGHLIGHT];
     c->film.shadow = params[FL_PARAM_SHADOW];
@@ -2071,7 +2075,8 @@ static void look_tone(const live_film *F, const unsigned char *rgb, int n, unsig
  * one table word a channel for both its cell and its position, and the nodes as single words of 8-bit values
  * weighted 256 - f1, f1 - f2, f2 - f3 and f3 (f1 >= f2 >= f3): none negative and 256 together, so red and blue
  * share each multiply without borrowing from each other. Within 1/255 of the 8.4 nodes (tools/frame-test.sh).
- * sg, sb: bytes from a node to the next along green and blue (constants for the 17-point film).
+ * The same kernel reads the Y'CbCr film (Y, Cb, Cr in place of red, green, blue). sg, sb: bytes from a node to
+ * the next along the second and third channels (constants for the two live films: look17, look_ycc).
  */
 static inline __attribute__((always_inline)) void look_cells(const live_film *F, const unsigned char *rgb, int n, unsigned int *px,
                                                              const int sg, const int sb) {
