@@ -2807,9 +2807,11 @@ public class MainActivity extends Activity {
 
     /** Appends one line per developed frame to /LATENT/TIMING.TXT. Worker thread. */
     private void logTiming(File src, String look, int[] p, int[] t) {
+        String note = FilmCore.helperNote();   // why a thread didn't have its core, if one didn't
         String line = stamp()
                 + " v" + versionName() + " abi=" + Build.CPU_ABI + " " + src.getName() + " look=" + look
                 + " grain=" + p[FilmCore.GRAIN] + "/" + p[FilmCore.GRAIN_SIZE] + " threads=" + p[FilmCore.THREADS]
+                + " ran=" + t[FilmCore.T_THREADS] + (note.length() > 0 ? " (" + note + ")" : "")
                 + " ms: read=" + t[FilmCore.T_READ] + " look=" + t[FilmCore.T_LOOK] + " write=" + t[FilmCore.T_WRITE]
                 + " finish=" + t[FilmCore.T_FINISH] + " total=" + t[FilmCore.T_TOTAL] + " cpu=" + t[FilmCore.T_CPU]
                 + " " + cpuInfo() + " screen=" + screenSize + " " + batteryNote() + "\r\n";

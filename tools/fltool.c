@@ -124,8 +124,11 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(argv[1], "process")) {
         int tm[FL_TIME_COUNT];
+        char note[96];
         fl_last_timing(tm);
-        fprintf(stderr, "ms: read %d  look %d  write %d  finish %d  total %d  cpu %d\n", tm[0], tm[1], tm[2], tm[3], tm[4], tm[5]);
+        fl_last_threads(note, sizeof note);
+        fprintf(stderr, "ms: read %d  look %d  write %d  finish %d  total %d  cpu %d  threads %d%s%s%s\n", tm[0], tm[1], tm[2], tm[3], tm[4], tm[5],
+                tm[FL_TIME_THREADS], note[0] ? " (" : "", note, note[0] ? ")" : "");
     }
     fprintf(stderr, "done in %.2f s\n", now() - t0);
     return 0;

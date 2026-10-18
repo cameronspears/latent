@@ -52,6 +52,14 @@ rolls, not `save=` alone.
   through 8 to 256 KB (`VIEWFIND.TXT`'s `speed:` line), which will show how big the caches are.
 - Latent's thread runs on core 3 together with the UI thread, so anything the screen draws during a
   develop slows the develop's reads and writes.
+- Latent starts on core 3 alone (Sony's Dalvik: `cpumask=0x8`), and a thread takes the cores of the
+  thread that made it, but nothing fences it in: the Speed test widened a thread to all four cores and
+  its helper ran on core 0. So the block develop's helpers are pinned, and the pin checked. The software
+  fallback's look workers and writer weren't: they took the caller's core 3 (all four threads on one
+  core, nothing gained), and could have taken core 0 had anything widened it. Now its look runs on
+  cores 1 and 2 like the block develop's, the writer on core 3 beside the decoding; a thread refused its
+  core stays out, and the picture is the same (`tools/threads-test.sh`). Its speed on the camera is to be
+  measured, the next time a frame falls back.
 - Prefs set by a test can be lost if the camera crashes and restarts (v0.41.0 lost `fastCube`).
   Anything proven becomes a default in code; since v0.45.0 there are no settings at all.
 - On the Mac, instruction counts from `tools/asm-budget.sh` (the camera's own compiler and flags) rank

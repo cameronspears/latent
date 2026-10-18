@@ -52,7 +52,8 @@ on-camera tests.
 | The composer against v0.44.1's | `tools/frame-test.sh testdata/*.JPG` (`--bench` Mac ratios, `--render DIR` frames as PPMs to judge by eye; UBSan) |
 | Hot loops' instruction budget | `tools/asm-budget.sh` (the camera's own compiler and flags; each loop marked `hot:` in `jni/filmcore.c`; fails when one is over budget) |
 | Shared caches under load | `tools/cache-test.sh` (3 frame composers changing films, 2 threads previewing, reading ahead, prewarming and forgetting; UBSan, Guard Malloc) |
-| Sony memory bridge | `tools/sony-test.sh` (every develop bit for bit against the reference; 1 and 3 threads, the lookup memory, prewarm; UBSan, Guard Malloc) |
+| Sony memory bridge | `tools/sony-test.sh` (every develop bit for bit against the reference; 1 and 3 threads, the lookup memory, prewarm, helpers refused their cores; UBSan, Guard Malloc) |
+| The software develop's threads | `tools/threads-test.sh` (the writer on core 3, a look worker on 1 and 2; with cores refused through `FL_REFUSE_CORES`, every develop the same as one thread's and on the threads expected; UBSan) |
 | Darkroom outputs unchanged | `tools/compare-builds.sh OLD_FLTOOL NEW_FLTOOL testdata/*.JPG` |
 | Sanitizer | `tools/sanitize-test.sh testdata/*.JPG` |
 | Neutral settings | `tools/settings-test.sh` (the write fence, apply and restore, against a stand-in service) |
@@ -153,6 +154,36 @@ line it misses.
   than the small share the rule above allows: it's the user's call (by eye, below;
   `FL_DITHER_GREEN` 0 is one threshold again).
 
+## The software develop's cores (Mac-tested only)
+
+The software develop (`fl_process_file`: the fallback when Sony's hardware develop is unavailable or a
+frame falls back) started its look workers and its writer unpinned. They took the calling thread's
+cores: core 3 alone, only as long as nothing had widened it (camera facts, below). Its threads now sit where
+the block develop's do, and none can be on core 0:
+
+- **A look worker on core 1 and one on core 2**, at the helpers' lower priority (`HELPER_CORES`,
+  `HELPER_NICE`), each pin checked (`pin_checked`, which the block develop's helpers now share). A
+  worker that can't have its core doesn't join; rows are independent, so the picture is the same.
+- **The writer on core 3**, Latent's own, at Latent's priority, beside the decoding. It can't simply
+  stay out (the frame needs its encoding). On core 3 its pin is never refused short of something badly
+  wrong (the camera starts Latent there); it doesn't share the camera's leftovers on core 1 with a look
+  worker at the helpers' lower priority; and the decoding and the encoding take turns, each running
+  while the other waits on the card, leaving cores 1 and 2 to the look, as in the block develop. Core 1
+  would spread the encoding further, but at the helpers' priority beside the camera's own work, for a
+  path that runs only when the hardware fails.
+- **No writer on core 3, or no worker on its core,** and the others leave before the first strip: the
+  calling thread does it all, as with one thread. A thread that can't be started at all counts the same
+  (before, that failed the frame with "cannot start worker threads").
+- At most two workers, one per helper core (there were up to three). The darkroom asks for
+  `availableProcessors` threads (4: the caller, the writer, two workers) unless `adaptThreads` has
+  stored 1. It never raises it again: a camera whose software develop once ran time-sliced on core 3
+  (CPU under 1.3x wall time) keeps the fallback on one thread, on core 3. Safe; only slower.
+- The software line in `TIMING.TXT` has `ran=N` after `threads=`, and why a thread stayed out (as the
+  hardware line's `threads=` does), e.g. `ran=3 (core 2 refused (errno 22))`.
+- Every develop identical to v0.45.0's (`compare-builds.sh`, 24 of 24 at 1 and 3 threads and 12 of 12
+  at 4; LAKE.JPG is progressive and refused by both), `threads-test.sh` (39 develops with cores
+  refused), `sanitize-test.sh`, `cache-test.sh`, `sony-test.sh`. No Sony or camera calls.
+
 ## Camera facts learned the hard way
 
 - **Settings writes:** shooting mode must not start within about 6 s of a settings write, or the
@@ -187,6 +218,13 @@ From the viewfinder work (each cost an install or a battery pull):
   after giving it back).
 - **Never use core 0:** it is the camera's own. A look thread and the overlay thread there (v0.41-0.42)
   starved its video path: live view tore into green and pink lines and the camera restarted itself.
+  Where the camera starts Latent is no fence: Sony's Dalvik gives the process core 3 alone (logcat's
+  `Application process N: cpumask=0x8`, the Speed test's `Cpus_allowed_list` 3), and a new thread takes
+  the cores of the thread that made it, but there is no cpuset (the Speed test asked for all four cores,
+  got them, and its helper ran on core 0). So the develops' helper threads pin themselves and check the
+  kernel's answer (`pin_checked`), and one refused its core does no work. The viewfinder's threads pin
+  with `fl_pin_core` and, refused, run on the cores they were started with (`Latent's core (…)` in
+  `VIEWFIND.TXT`).
 - **These cores are slow:** ~54 M dependent multiply-adds a second; memory reads ~60-90 MB/s, ~430 ns
   a missed line. The look is limited by memory traffic more than by arithmetic.
 - **Asking for a 16-bit window does nothing here** (setFormat); a SurfaceView with its own format works.
@@ -439,6 +477,9 @@ outcome in brackets. No time is logged for the negative's copy (it runs on the f
   listing didn't cover; `total=` lower by up to 300 ms. Every print still in the catalogue and the
   right way up.
 - `battery=N% NmV T C` after `total=`: the mV slope per frame.
+- Only if a frame falls back to software: its line's `threads=4 ran=4` (the caller and the writer on
+  core 3, workers on 1 and 2). `ran=1` with a note in brackets: a core was refused, and the frame
+  developed on one thread. `threads=1`: `adaptThreads` stored it earlier.
 
 `DEVELOP.TXT`:
 

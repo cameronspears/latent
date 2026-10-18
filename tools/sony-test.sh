@@ -27,6 +27,10 @@ for img in "$@"; do
     check "$img threads $th prewarm" env SB_WARM=assets/luts/TRIX400.CUB out/host/sonytest "$img" assets/luts/PORTRA4W.CUB $th
   done
   check "ubsan $img prewarm" env SB_WARM=assets/luts/NATURAL.CUB out/host/sonytest-ubsan "$img" assets/luts/CUBANNEG.CUB 3
+  # helpers refused their cores, as a kernel might (FL_REFUSE_CORES, the Mac's stand-in): core 1, then both
+  for refuse in 0x2 0x6; do
+    check "$img threads 3, cores $refuse refused" env FL_REFUSE_CORES=$refuse out/host/sonytest "$img" assets/luts/PORTRA4W.CUB 3
+  done
 done
 check "gmalloc prewarm" env SB_WARM=assets/luts/NATURAL.CUB DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_PROTECT_BEFORE=1 \
   out/host/sonytest "$1" assets/luts/TRIX400.CUB 3
