@@ -3,7 +3,8 @@ package com.latent.camera;
 /**
  * Host test: drives the real JNI bridge (built as a macOS library) exactly as the app does.
  *
- *   JniTest IN.JPG OUTDIR LUT                  the camera's build: everything
+ *   JniTest IN.JPG OUTDIR LUT                  the camera's build: everything (v0.47.0: the focus check on a
+ *                                              Sony-like JPEG made from IN, the steady shutter's motion on frames from it)
  *   JniTest IN.JPG OUTDIR LUT one-threshold    a library built with FL_DITHER_GREEN 0: the composer against
  *                                              v0.44.1's, pixel for pixel
  */
@@ -51,6 +52,8 @@ public class JniTest {
         byte[] jpeg = read(outDir + "/PRV04491.JPG");
         frameComposer(jpeg, lut, p);
         sharedCaches(in, jpeg, lut, p);
+        focusCheck(in, outDir);
+        motion(in, lut, p);
         System.out.println("JNI OK");
     }
 
@@ -492,6 +495,176 @@ public class JniTest {
         io.close();
         w.dispose();
         return bo.toByteArray();
+    }
+
+    // ------------------------------------------------------------------------------ the focus check (v0.47.0)
+
+    /** The photo, read at a third of its size (the test photos are 24 MP) and drawn at w x h. */
+    static java.awt.image.BufferedImage picture(String path, int w, int h) throws Exception {
+        javax.imageio.ImageReader r = javax.imageio.ImageIO.getImageReadersByFormatName("jpeg").next();
+        javax.imageio.stream.ImageInputStream in = javax.imageio.ImageIO.createImageInputStream(new java.io.File(path));
+        r.setInput(in);
+        javax.imageio.ImageReadParam rp = r.getDefaultReadParam();
+        rp.setSourceSubsampling(3, 3, 0, 0);
+        java.awt.image.BufferedImage big = r.read(0, rp);
+        in.close();
+        java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = out.createGraphics();
+        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        g.drawImage(big, 0, 0, w, h, null);
+        g.dispose();
+        return out;
+    }
+
+    static byte[] encode(java.awt.image.BufferedImage im, float quality) throws Exception {
+        javax.imageio.ImageWriter w = javax.imageio.ImageIO.getImageWritersByFormatName("jpeg").next();
+        javax.imageio.ImageWriteParam wp = w.getDefaultWriteParam();
+        wp.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+        wp.setCompressionQuality(quality);
+        java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+        javax.imageio.stream.ImageOutputStream io = javax.imageio.ImageIO.createImageOutputStream(o);
+        w.setOutput(io);
+        w.write(null, new javax.imageio.IIOImage(im, null, null), wp);
+        io.close();
+        return o.toByteArray();
+    }
+
+    /** A box blur of radius r over the part x0..x1, y0..y1 of im (the rest left sharp). */
+    static void blur(java.awt.image.BufferedImage im, int x0, int y0, int x1, int y1, int r) {
+        int w = x1 - x0, h = y1 - y0;
+        int[] src = im.getRGB(x0, y0, w, h, null, 0, w), dst = new int[w * h];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                int rr = 0, gg = 0, bb = 0, n = 0;
+                for (int dy = -r; dy <= r; dy++)
+                    for (int dx = -r; dx <= r; dx++) {
+                        int xx = Math.max(0, Math.min(w - 1, x + dx)), yy = Math.max(0, Math.min(h - 1, y + dy)), c = src[yy * w + xx];
+                        rr += c >> 16 & 255; gg += c >> 8 & 255; bb += c & 255; n++;
+                    }
+                dst[y * w + x] = 0xFF000000 | (rr / n) << 16 | (gg / n) << 8 | bb / n;
+            }
+        im.setRGB(x0, y0, w, h, dst, 0, w);
+    }
+
+    static void le16(java.io.ByteArrayOutputStream o, int v) { o.write(v & 255); o.write(v >> 8 & 255); }
+    static void le32(java.io.ByteArrayOutputStream o, long v) { for (int i = 0; i < 4; i++) o.write((int) (v >> 8 * i) & 255); }
+    static void entry(java.io.ByteArrayOutputStream o, int tag, int type, long count, long value) { le16(o, tag); le16(o, type); le32(o, count); le32(o, value); }
+
+    /**
+     * A JPEG laid out as the A5100's: EXIF with the exposure and Sony's makernote (its AF cells, tag 0x201F), an MPF
+     * index, the main picture, then the preview the index points to.
+     */
+    static byte[] sonyLike(byte[] main, byte[] preview, int afMask, int expNum, int expDen) throws Exception {
+        java.io.ByteArrayOutputStream t = new java.io.ByteArrayOutputStream();   // EXIF's TIFF block
+        t.write('I'); t.write('I'); le16(t, 42); le32(t, 8);
+        le16(t, 1); entry(t, 0x8769, 4, 1, 26); le32(t, 0);                                 // IFD0 at 8: the EXIF IFD at 26
+        le16(t, 2); entry(t, 0x829A, 5, 1, 56); entry(t, 0x927C, 7, 30, 64); le32(t, 0);    // EXIF IFD: exposure at 56, makernote at 64
+        le32(t, expNum); le32(t, expDen);
+        t.write("SONY DSC ".getBytes("US-ASCII")); t.write(0); t.write(0); t.write(0);
+        le16(t, 1); le16(t, 0x201F); le16(t, 7); le32(t, 4); le32(t, afMask); le32(t, 0);
+        byte[] tiff = t.toByteArray();
+        java.io.ByteArrayOutputStream m = new java.io.ByteArrayOutputStream();   // MPF's TIFF block: the index, then two entries
+        int app1 = 2 + 2 + 6 + tiff.length, app2Len = 2 + 4 + 58;
+        long mpfTiffAt = 2 + app1 + 2 + 2 + 4;   // where MPF's offsets count from: after SOI, APP1, APP2's marker, length and "MPF\0"
+        long previewAt = 2 + app1 + 2 + app2Len + (main.length - 2);
+        m.write('I'); m.write('I'); le16(m, 42); le32(m, 8);
+        le16(m, 1); entry(m, 0xB002, 7, 32, 26); le32(m, 0);
+        le32(m, 0x20030000L); le32(m, main.length); le32(m, 0); le16(m, 0); le16(m, 0);
+        le32(m, 0x00010001L); le32(m, preview.length); le32(m, previewAt - mpfTiffAt); le16(m, 0); le16(m, 0);
+        byte[] mpf = m.toByteArray();
+        check(mpf.length == 58, "the MPF block's size");
+        java.io.ByteArrayOutputStream f = new java.io.ByteArrayOutputStream();
+        f.write(0xFF); f.write(0xD8);
+        f.write(0xFF); f.write(0xE1); f.write(app1 - 2 >> 8); f.write(app1 - 2 & 255); f.write("Exif".getBytes("US-ASCII")); f.write(0); f.write(0); f.write(tiff);
+        f.write(0xFF); f.write(0xE2); f.write(app2Len >> 8); f.write(app2Len & 255); f.write("MPF".getBytes("US-ASCII")); f.write(0); f.write(mpf);
+        f.write(main, 2, main.length - 2);
+        check(f.size() == previewAt, "the preview where the index says");
+        f.write(preview);
+        return f.toByteArray();
+    }
+
+    static void write(String path, byte[] b) throws Exception {
+        java.io.FileOutputStream o = new java.io.FileOutputStream(path);
+        try { o.write(b); } finally { o.close(); }
+    }
+
+    /**
+     * The focus check (FilmCore.focusCheck): the camera's preview found and measured, its cells and exposure read; the
+     * photo's sharpest cell taken as where the camera focused, then that cell blurred and measured again.
+     */
+    static void focusCheck(String photo, String outDir) throws Exception {
+        java.awt.image.BufferedImage prv = picture(photo, 1616, 1080);
+        byte[] main = encode(picture(photo, 640, 427), 0.9f), sharp = encode(prv, 0.92f);
+        int[] a = new int[FilmCore.FC_COUNT], b = new int[FilmCore.FC_COUNT], c = new int[FilmCore.FC_COUNT];
+        write(outDir + "/SHARP.JPG", sonyLike(main, sharp, 0, 1, 60));
+        check(FilmCore.focusCheck(outDir + "/SHARP.JPG", a) == 0, "a Sony-like photo checked " + FilmCore.lastError());
+        check(a[FilmCore.FC_W] == 808 && a[FilmCore.FC_H] == 540, "its 1616 x 1080 preview measured at half size: " + a[FilmCore.FC_W] + "x" + a[FilmCore.FC_H]);
+        int k = 0, far = 0;
+        for (int i = 1; i < 25; i++) if (a[i] > a[k]) k = i;   // its sharpest cell: where the camera "focused"
+        for (int i = 0; i < 25; i++)
+            if (Math.max(Math.abs(i % 5 - k % 5), Math.abs(i / 5 - k / 5)) > Math.max(Math.abs(far % 5 - k % 5), Math.abs(far / 5 - k / 5)) && a[i] >= 0) far = i;
+        int mask = 1 << k;
+        write(outDir + "/SHARP.JPG", sonyLike(main, sharp, mask, 1, 60));
+        check(FilmCore.focusCheck(outDir + "/SHARP.JPG", a) == 0, "the same with the camera's cell " + k);
+        check(a[FilmCore.FC_MASK] == mask && a[FilmCore.FC_EXPOSURE] == 16667, "the makernote's cells and the exposure read: " + a[FilmCore.FC_MASK] + ", " + a[FilmCore.FC_EXPOSURE] + " us");
+        blur(prv, (k % 5) * 1616 / 5, (k / 5) * 1080 / 5, (k % 5 + 1) * 1616 / 5, (k / 5 + 1) * 1080 / 5, 7);   // that cell out of focus
+        write(outDir + "/MISSED.JPG", sonyLike(main, encode(prv, 0.92f), mask, 1, 8));
+        write(outDir + "/PLAIN.JPG", main);
+        check(FilmCore.focusCheck(outDir + "/MISSED.JPG", b) == 0 && b[FilmCore.FC_EXPOSURE] == 125000, "the same with that cell blurred " + FilmCore.lastError());
+        int ba = 0, bb = 0;
+        for (int i = 0; i < 25; i++) { ba = Math.max(ba, a[i]); bb = Math.max(bb, b[i]); }
+        check(a[k] >= 520 && a[k] >= 0.7 * ba, "sharp: the focused cell scores " + a[k] + " of the best " + ba + " (sharp by Focus.verdict's limits)");
+        // blurred past its last edge, a cell has no score: Focus.verdict then says nothing (it can't tell it from a plain wall)
+        check(b[k] < 0 || b[k] < 520 || b[k] < 0.7 * bb, b[k] < 0 ? "blurred there past its last edge: no score, so no verdict (as a plain wall)"
+                : "blurred there: " + b[k] + " of the best " + bb + " (soft by them)");
+        check(a[far] == b[far], "a cell far from the blur scores the same (cell " + far + ": " + a[far] + ")");
+        check(FilmCore.focusCheck(outDir + "/PLAIN.JPG", c) != 0 && FilmCore.lastError().contains("no preview"), "a JPEG with no MPF preview: no check (" + FilmCore.lastError() + ")");
+        check(FilmCore.focusCheck(outDir + "/NOPE.JPG", c) != 0, "no file: no check (" + FilmCore.lastError() + ")");
+        byte[] cut = read(outDir + "/SHARP.JPG");
+        write(outDir + "/CUT.JPG", java.util.Arrays.copyOf(cut, cut.length - 1000));
+        check(FilmCore.focusCheck(outDir + "/CUT.JPG", c) != 0, "a file cut short: no check (" + FilmCore.lastError() + ")");
+        System.out.println("  focus check (Mac): read " + a[FilmCore.FC_READ] + " ms, measure " + a[FilmCore.FC_MEASURE] + " ms");
+    }
+
+    /** The steady shutter's measure (F_MOTION, FilmCore.motion): frames moved by known amounts, half pixels too. */
+    static void motion(String photo, String lut, int[] p) throws Exception {
+        java.awt.image.BufferedImage big = picture(photo, 680, 460);   // twice a frame's size, and room to move
+        long c = FilmCore.frameNew();
+        int ow = 540, oh = 480;
+        short[] out = new short[ow * oh];
+        int[] info = new int[FilmCore.FI_COUNT], tm = new int[FilmCore.TM_COUNT], mo = new int[FilmCore.MO_COUNT];
+        int[][] at = { { 20, 16 }, { 23, 16 }, { 23, 21 }, { 29, 13 }, { 29, 13 } };   // the frame's place in twice its size
+        for (int i = 0; i < at.length; i++) {
+            java.awt.image.BufferedImage f = new java.awt.image.BufferedImage(320, 213, java.awt.image.BufferedImage.TYPE_INT_RGB);
+            java.awt.Graphics2D g = f.createGraphics();
+            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.drawImage(big.getSubimage(at[i][0], at[i][1], 640, 426), 0, 0, 320, 213, null);
+            g.dispose();
+            byte[] j = encode(f, 0.85f);
+            int rc = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_MOTION, 100 + i, out, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info, tm);
+            check(rc == 0, "a frame kept for the motion measure " + FilmCore.lastError());
+        }
+        for (int i = 1; i < at.length; i++) {
+            check(FilmCore.motion(100 + i - 1, 100 + i, mo) == 0, "two kept frames measured");
+            double dx = mo[FilmCore.MO_DX] / 16.0, dy = mo[FilmCore.MO_DY] / 16.0;
+            double ex = -(at[i][0] - at[i - 1][0]) / 2.0, ey = -(at[i][1] - at[i - 1][1]) / 2.0;   // the view moves right: the scene left
+            check(Math.abs(dx - ex) <= 0.3 && Math.abs(dy - ey) <= 0.3 && mo[FilmCore.MO_DETAIL] >= 32,
+                    String.format(java.util.Locale.US, "moved %.1f, %.1f px: measured %.2f, %.2f (detail %.1f, miss %.1f)", ex, ey, dx, dy,
+                            mo[FilmCore.MO_DETAIL] / 16.0, mo[FilmCore.MO_MISS] / 16.0));
+        }
+        check(FilmCore.motion(100, 99, mo) != 0 && FilmCore.motion(90, 100, mo) != 0, "a frame not kept: no measure");
+        int[] info2 = new int[FilmCore.FI_COUNT];
+        java.awt.image.BufferedImage f = new java.awt.image.BufferedImage(320, 213, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        byte[] flat = encode(f, 0.85f);
+        FilmCore.frame(c, flat, flat.length, lut, p, FilmCore.F_MOTION, 200, out, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info2, tm);
+        FilmCore.frame(c, flat, flat.length, lut, p, FilmCore.F_MOTION, 201, out, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info2, tm);
+        check(FilmCore.motion(200, 201, mo) == 0 && mo[FilmCore.MO_DETAIL] < 32, "a plain black frame: detail " + mo[FilmCore.MO_DETAIL] / 16.0 + ", too plain to judge");
+        short[] withOut = new short[ow * oh], without = new short[ow * oh];
+        byte[] j = encode(big.getSubimage(0, 0, 320, 213), 0.85f);
+        FilmCore.frame(c, j, j.length, lut, p, 0, 7, without, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info, tm);
+        FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_MOTION, 7, withOut, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info, tm);
+        check(java.util.Arrays.equals(withOut, without), "keeping the centre changes nothing on screen");
+        FilmCore.frameFree(c);
     }
 
     static byte[] read(String path) {

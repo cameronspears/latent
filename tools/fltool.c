@@ -3,8 +3,11 @@
  *
  *   fltool process IN.JPG OUT.JPG [--lut F.cub] [--hl N] [--sh N] [--grain N] [--size N] [--q N] [--seed N]
  *   fltool preview IN.JPG OUT.ppm [--crop] [... same options]
- *   fltool live IN.JPG OUT.ppm [--lut F.cub]       the viewfinder's frame composer (from memory, 540x480)
+ *   fltool live IN.JPG OUT.ppm [--lut F.cub]       the viewfinder's frame composer (from memory, 540x480), and the
+ *                                                  steady shutter's motion measure between two of its frames
  *   fltool cubecheck F.cub...                      the fast .cube reader against sscanf, row by row
+ *   fltool focus PHOTO.JPG...                      the focus check: each AF cell's sharpness in the camera's preview,
+ *                                                  the cells the makernote lists, the best of them and of all
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +41,26 @@ int main(int argc, char **argv) {
             printf("  %s  %s: sscanf %d ms, fast %d ms, %d rows fast, %d left to sscanf%s%s\n", rc == 0 ? "pass" : "FAIL", argv[k],
                    ms[0], ms[1], ms[2], ms[3], rc ? " - " : "", rc ? err : "");
             if (rc) bad = 1;
+        }
+        return bad;
+    }
+    if (argc >= 3 && !strcmp(argv[1], "focus")) {   /* fltool focus PHOTO.JPG...: what the viewfinder's focus check measures */
+        int k, bad = 0;
+        for (k = 2; k < argc; k++) {
+            int out[FL_FC_COUNT], c, locked = -1, best = -1;
+            const char *name = strrchr(argv[k], '/') ? strrchr(argv[k], '/') + 1 : argv[k];
+            if (fl_focus_check(argv[k], out, err, sizeof err) != 0) { printf("%s  no check: %s\n", name, err); bad = 1; continue; }
+            for (c = 0; c < FL_FC_CELLS; c++) {
+                if (out[c] > best) best = out[c];
+                if (out[FL_FC_MASK] > 0 && (out[FL_FC_MASK] >> c & 1) && out[c] > locked) locked = out[c];
+            }
+            printf("%s  %dx%d  exposure %d us  read %d ms  measure %d ms  cells", name, out[FL_FC_W], out[FL_FC_H], out[FL_FC_EXPOSURE],
+                   out[FL_FC_READ], out[FL_FC_MEASURE]);
+            if (out[FL_FC_MASK] < 0) printf(" (no tag)");
+            for (c = 0; c < FL_FC_CELLS; c++) if (out[FL_FC_MASK] > 0 && (out[FL_FC_MASK] >> c & 1)) printf(" %d", c);
+            printf("  locked %d  best %d\n   ", locked, best);
+            for (c = 0; c < FL_FC_CELLS; c++) printf(" %4d%s", out[c], c % 5 == 4 && c < FL_FC_CELLS - 1 ? "\n   " : "");
+            printf("\n");
         }
         return bad;
     }
@@ -86,10 +109,16 @@ int main(int argc, char **argv) {
         if (!fc || !o16 || fl_set_overlay(ov, 540, 480) <= 0) { fprintf(stderr, "error: composer\n"); return 1; }
         t1 = now();
         for (n = 0; n < 10; n++)
-            if (fl_frame(fc, jpg, (unsigned long)len, lut, params, FL_F_HIST | FL_F_TEMPORAL, n, o16, 540, 480, 540, 1500,
+            if (fl_frame(fc, jpg, (unsigned long)len, lut, params, FL_F_HIST | FL_F_TEMPORAL | FL_F_MOTION, n, o16, 540, 480, 540, 1500,
                          n & 1 ? FL_FMT_565 : FL_FMT_4444, sh, 320, 240, fi, tm, err, sizeof err) != 0) { fprintf(stderr, "error: %s\n", err); return 1; }
         fprintf(stderr, "composed 540x480 from %dx%d in %.2f ms (decode %d, read %d, look %d, compose %d)\n", fi[0], fi[1], (now() - t1) * 100,
                 tm[0], tm[1], tm[2], tm[3]);
+        {   /* the steady shutter's measure between two of those frames (the same picture: no movement) */
+            int mo[FL_MO_COUNT];
+            double t2 = now();
+            if (fl_motion(2, 9, mo) != 0 || mo[FL_MO_DX] != 0 || mo[FL_MO_DY] != 0) { fprintf(stderr, "error: motion\n"); return 1; }
+            fprintf(stderr, "motion between frames 2 and 9: %d, %d sixteenths (detail %d) in %.2f ms\n", mo[FL_MO_DX], mo[FL_MO_DY], mo[FL_MO_DETAIL], (now() - t2) * 1000);
+        }
         if (fl_frame(fc, NULL, 0, lut, params, 0, 3, o16, 540, 480, 540, 1500, FL_FMT_4444, sh, 320, 240, fi, tm, err, sizeof err) != 0) { fprintf(stderr, "error: again: %s\n", err); return 1; }
         f = fopen(argv[3], "wb");
         fprintf(f, "P6\n540 480\n255\n");

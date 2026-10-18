@@ -116,4 +116,23 @@ final class FilmCore {
 
     /** Latent's type and fades laid over every frame from now on (argb as getPixels gives it, ow x oh); null clears. Its generation. */
     static native int setOverlay(int[] argb, int w, int h);
+
+    // ---- the steady shutter (v0.47.0)
+    /** frame(): keep the decoded frame's centre (brightness) under seq, for motion(). */
+    static final int F_MOTION = 16;
+    /** motion()'s out: the movement in sixteenths of a frame pixel (+ right, + down), the match's miss and the detail, both x 16. */
+    static final int MO_DX = 0, MO_DY = 1, MO_MISS = 2, MO_DETAIL = 3, MO_COUNT = 4;
+
+    /** How far the picture moved from frame a to frame b (both made with F_MOTION, among the last 8 kept), into out. 0, or -1. */
+    static native int motion(int a, int b, int[] out);
+
+    // ---- the focus check (v0.47.0)
+    /** focusCheck()'s out: the 25 cells' scores (0..1000, -1: too few edges), the makernote's AF cells (-1: no tag), EXIF exposure (us), ms, size. */
+    static final int FC_CELLS = 25, FC_MASK = 25, FC_EXPOSURE = 26, FC_READ = 27, FC_MEASURE = 28, FC_W = 29, FC_H = 30, FC_COUNT = 31;
+
+    /**
+     * A photo on the card measured for sharpness in its own MPF preview (half size, brightness only), each cell of the
+     * camera's 5 x 5 AF grid, into out[FC_COUNT] (Focus judges it). 0, or -1 (lastError; the mask and exposure may still be in out).
+     */
+    static native int focusCheck(String path, int[] out);
 }

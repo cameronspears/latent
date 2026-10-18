@@ -355,7 +355,7 @@ final class Ui {
         k.append(s.width).append('|').append(f == null ? "-" : f.title + "/" + f.accent + "/" + f.body + "/" + f.band).append('|')
                 .append(s.liveThrough).append(s.grid).append(s.clean).append(s.endless).append('|')
                 .append(s.exposed).append('/').append(s.length).append('|').append(s.battery).append('|')
-                .append(s.evEdit).append(s.evEdit ? 0 : s.ev).append('|').append(s.shutter).append('|').append(s.aperture).append('|')
+                .append(s.evEdit).append(s.evEdit ? 0 : s.ev).append('|').append(s.shutter).append(s.shutterSlow).append('|').append(s.aperture).append('|')
                 .append(s.iso).append(s.isoAuto);
         return k.toString();
     }
@@ -457,7 +457,8 @@ final class Ui {
      */
     static float exposure(Gfx g, float x, float y, UiState s) {
         float sw = widest(g, SHUTTERS), aw = widest(g, APERTURES), iw = widest(g, ISOS), lw = g.textWidth("ISO A", Gfx.MEDIUM, T_LABEL, 80) + 6;
-        if (s.shutter.length() > 0) g.text(s.shutter, x + sw, y, Gfx.MEDIUM, T_READOUT, INK, Gfx.RIGHT, 0);
+        // slower than 1/30 in amber: a heads-up that the camera's own movement can blur it (the shutter waits for it to settle)
+        if (s.shutter.length() > 0) g.text(s.shutter, x + sw, y, Gfx.MEDIUM, T_READOUT, s.shutterSlow ? AMBER : INK, Gfx.RIGHT, 0);
         x += sw + 22;
         if (s.aperture.length() > 0) g.text(s.aperture, x + aw, y, Gfx.MEDIUM, T_READOUT, INK, Gfx.RIGHT, 0);
         x += aw + 22;
@@ -524,7 +525,7 @@ final class Ui {
     private static void print(Gfx g, UiState s, float R, float y, int accent) {
         if (s.printImage == null && s.developing <= 0) return;
         float w = 66, h = 44, x = R - w, top = y - h + 6;
-        g.roundRect(x - 3, top - 3, w + 6, h + 6, 4, 0xFFEEEEDD);   // a white border, like a print
+        g.roundRect(x - 3, top - 3, w + 6, h + 6, 4, s.printSoft ? AMBER : 0xFFEEEEDD);   // a white border, like a print; amber if it came out soft
         if (s.printImage == null) {   // nothing to show yet: a print still latent, waiting for the darkroom
             g.rect(x, top, w, h, 0xFF222211);
             g.rect(x, top + h - 2, w, 2, (accent & 0x00FFFFFF) | 0xCC000000);
@@ -544,9 +545,18 @@ final class Ui {
         }
     }
 
-    /** The focus brackets and what they say. */
+    /**
+     * The focus brackets and what they say. They stand where the camera's focus area is (s.afBox: its Center zone, or
+     * its Flexible Spot), else as a bracket in the middle; on a lock, the cells it focused on.
+     */
     private static void afBrackets(Gfx g, UiState s, float ix, float iw) {
         float cx = ix + iw / 2, cy = H / 2, w = 150, h = 100;
+        if (s.afBox != null) {
+            w = s.afBox[2] * iw;
+            h = s.afBox[3] * H;
+            cx = ix + s.afBox[0] * iw + w / 2;
+            cy = s.afBox[1] * H + h / 2;
+        }
         int c;
         float k, stroke;
         switch (s.afState) {
@@ -566,9 +576,12 @@ final class Ui {
             if (s.afState == 1) corners(g, cx - w / 2, cy - h / 2, w, h, 16, vw(s, 1), 0x40FFFFEE);   // where it started
         }
         if (s.afState == 2 && s.afAreas == null) g.circle(cx, cy, 2.5f, GREEN);
-        String say = s.afState == 3 ? (s.afNote.length() > 0 ? s.afNote : "Can't focus") : s.afState == 1 && s.afTry > 1 ? "Trying again \u00b7 " + s.afTry : "";
+        String say = s.afState == 3 ? (s.afNote.length() > 0 ? s.afNote : "Can't focus") : s.afState == 1 && s.afTry > 1 ? "Trying again \u00b7 " + s.afTry
+                : s.afState == 2 && s.steadying ? "Hold still" : "";
         if (say.length() > 0) {
-            float tw = g.textWidth(say, Gfx.MEDIUM, 15, 0) + 28, ty = cy + h / 2 + 18;
+            // under the bracket; under the middle of a tall one (the Center zone), above one too low to be under
+            float tw = g.textWidth(say, Gfx.MEDIUM, 15, 0) + 28, ty = h > 150 ? H / 2 + 68 : cy + h / 2 + 18;
+            if (ty > H / 2 + 120) ty = cy - h / 2 - 18 - 28;
             g.roundRect(cx - tw / 2, ty, tw, 28, 14, PLATE);
             g.text(say, cx, ty + 19, Gfx.MEDIUM, 15, s.afState == 3 ? AMBER : INK, Gfx.CENTER, 0);
         }

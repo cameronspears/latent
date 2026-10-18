@@ -217,9 +217,40 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private boolean lamp, lampThisTry;
     private int locks, misses;
     String afMode = "", afArea = "";
+    // where the camera focused and where its area is (v0.47.0: Focus)
+    private int lockMask;              // the cells the camera's last lock named (Focus.mask of its report); 0 from each new try
+    private float[] areaBox;           // the camera's focus area for the bracket (Focus.areaBox); null: the usual bracket
+    // the steady shutter (v0.47.0: Steady): slower than 1/30, a full press waits for a frame that shows the camera still
+    final Steady steady = new Steady();
+    private boolean steadyPassed;      // this shot's wait is over: shoot() goes straight on
+    private int moPrevSeq = -1;        // the last frame asked for with F_MOTION, in the order frames are taken, and when
+    private long moPrevGrab;
+    private int frameW = FRAME_W;      // the frames' width, for the steady shutter's scale
+    private final int[] moOut = new int[FilmCore.MO_COUNT];
+    private int steadyNotes, steadyWaits;
+    /** The photo's width in pixels (the A5100's large size): the steady shutter's blur is counted in these. */
+    static final int PHOTO_W = 6000;
+    // the focus check after a shot (v0.47.0: Focus.verdict)
+    /** Each photo is checked once it's on the card and the camera is done with it; off: never (TOCHECK.TXT neither). */
+    static final boolean FOCUS_CHECK = true;
+    /** A picture taken: the cells and speed at its lock, its file once the catalogue names it. */
+    private static final class Shot {
+        final int index, reportMask;
+        final double exposure;
+        File file;
+        Shot(int index, int reportMask, double exposure) { this.index = index; this.reportMask = reportMask; this.exposure = exposure; }
+    }
+    private final java.util.LinkedList<Shot> unnamed = new java.util.LinkedList<Shot>();   // taken, the catalogue hasn't named it yet
+    private final java.util.LinkedList<Shot> toCheck = new java.util.LinkedList<Shot>();   // named, not yet tried here
+    private final java.util.LinkedList<Shot> later = new java.util.LinkedList<Shot>();     // not readable here: checked after the restart
+    private boolean checking;
+    private Shot checkingShot;         // the one a look thread is checking now (kept for TOCHECK.TXT if Latent closes first)
+    private int printShot = -1, softShot = -1;   // the print's picture (its shot number); the one found soft
+    private int checkNotes;
 
     // exposure
     String shutter = "", aperture = "", iso = "";
+    double exposureS;          // the shutter speed as last read, in seconds (0: not known)
     boolean isoAuto;
     int ev;                    // exposure compensation, in thirds of a stop (the camera's own setting)
     private int evMin = -9, evMax = 9;
@@ -473,6 +504,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                     lastReportAt = SystemClock.uptimeMillis();
                     if (logged++ < 20) note("camera's focus: status " + status + ", areas " + (a[1] instanceof int[] ? java.util.Arrays.toString((int[]) a[1]) : String.valueOf(a[1])));
                     if (!release.app && status == Release.AF_WARN) lampThisTry = lamp || lampThisTry;
+                    if (status == Release.AF_LOCK || status == Release.AF_CONTINUOUS) lockMask = Focus.mask(a[1] instanceof int[] ? (int[]) a[1] : null);
                     release.cameraFocus(status);
                     host.changed();
                 }
@@ -491,7 +523,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 if (m.getName().startsWith("on") && a != null && a.length > 0 && a[0] != null) {
                     if (!logged) { logged = true; note("shutter speed info: " + fields(a[0])); }
                     int n = intField(a[0], "currentShutterSpeed_n"), d = intField(a[0], "currentShutterSpeed_d");
-                    if (n > 0 && d > 0) { shutter = shutterText(n, d); host.changed(); }
+                    if (n > 0 && d > 0) { setShutter(n, d); host.changed(); }
                 }
                 return objectMethod(p, m, a);
             }
@@ -554,7 +586,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             Object pair = m.getClass().getMethod("getShutterSpeed").invoke(m);
             if (pair instanceof android.util.Pair) {
                 Object n = ((android.util.Pair<?, ?>) pair).first, d = ((android.util.Pair<?, ?>) pair).second;
-                if (n instanceof Integer && d instanceof Integer && (Integer) n > 0 && (Integer) d > 0) shutter = shutterText((Integer) n, (Integer) d);
+                if (n instanceof Integer && d instanceof Integer && (Integer) n > 0 && (Integer) d > 0) setShutter((Integer) n, (Integer) d);
             }
             Object f = m.getClass().getMethod("getAperture").invoke(m);
             if (f instanceof Integer && (Integer) f > 0) aperture = apertureText((Integer) f);
@@ -565,12 +597,22 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     private int exposureFails;
 
+    /** The shutter speed, n/d seconds: as text for the foot, and as seconds for the steady shutter. */
+    private void setShutter(int n, int d) {
+        shutter = shutterText(n, d);
+        exposureS = n / (double) d;
+    }
+
     /** Focus mode and area, exposure as set, and how many more photos fit on the card. Read once; changes nothing. */
     private void readSettings() {
         try {
             Camera.Parameters p = camera.getParameters();
             afMode = afModeText(p.get("af-mode"), p.getFocusMode());
             afArea = areaText(p.get("focus-area-type"));
+            areaBox = Focus.areaBox(p.get("focus-area-type"), p.get("focus-area-flexible-spot-size"), p.get("focus-point-x"), p.get("focus-point-y"));
+            note("focus area " + p.get("focus-area-type") + ", spot " + p.get("focus-area-flexible-spot-size") + " at " + p.get("focus-point-x") + ", "
+                    + p.get("focus-point-y") + (areaBox == null ? ": the usual bracket" : String.format(Locale.US, ": drawn at %.2f, %.2f, %.2f x %.2f",
+                    areaBox[0], areaBox[1], areaBox[2], areaBox[3])));
             float step = p.getExposureCompensationStep();
             evStep = step > 0 ? step : 1f / 3;
             ev = Math.round(p.getExposureCompensation() * evStep * 3);
@@ -583,7 +625,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 Object pair = m.getClass().getMethod("getShutterSpeed").invoke(m);
                 if (pair instanceof android.util.Pair) {
                     Object n = ((android.util.Pair<?, ?>) pair).first, d = ((android.util.Pair<?, ?>) pair).second;
-                    if (n instanceof Integer && d instanceof Integer && (Integer) n > 0 && (Integer) d > 0) shutter = shutterText((Integer) n, (Integer) d);
+                    if (n instanceof Integer && d instanceof Integer && (Integer) n > 0 && (Integer) d > 0) setShutter((Integer) n, (Integer) d);
                 }
                 Object f = m.getClass().getMethod("getAperture").invoke(m);
                 if (f instanceof Integer && (Integer) f > 0) aperture = apertureText((Integer) f);
@@ -732,6 +774,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private void feed() {
         if (closed || closing || sequence == null || sequenceStopped) return;
         ui.removeCallbacks(feeder);
+        tryCheck();   // a photo to check takes a free look thread before the next frame does
         long now = SystemClock.uptimeMillis();
         boolean drain = hidden || !lookOn;   // out of sight, or the camera's own view: frames only drained
         if (pacing && !drain) pace(now);
@@ -873,7 +916,22 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         boolean still;         // a still check, and the scene was still: nothing made, the shown picture stays
         boolean miss;          // every screen bitmap was busy: the frame went
         boolean noSig;         // made from a frame, but the core gave no signature (it can't check for stillness)
+        boolean motion;        // its centre kept for the steady shutter (F_MOTION)
+        int moPrev = -1;       // ... and the frame taken before it, also kept (-1: none), taken at moPrevGrab
+        long moPrevGrab;
         String err;
+    }
+
+    /** Look thread: on its core, with its composer and priority, once (frames and focus checks both run here). */
+    private static void settle(Looker k) {
+        if (k.pinned != null) return;
+        k.pinned = FilmCore.pinCore(k.core) == 0 ? "core " + k.core : "Latent's core (" + FilmCore.lastError() + ")";
+        k.ctx = FilmCore.frameNew();
+        // set once (v0.44 set and reset it every frame: on core 3 two cgroup moves a frame): a little behind
+        // the screen and the camera's callbacks, ahead of the darkroom (v0.31's background priority starved
+        // it under the camera's own load); on core 3, Latent's own, only what the screen leaves
+        android.os.Process.setThreadPriority(k.core == LOW_PRIORITY_CORE ? android.os.Process.THREAD_PRIORITY_BACKGROUND
+                : android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
     }
 
     /** Which of LOOK_CORES this core is, or -1. */
@@ -908,23 +966,23 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         final String l = lut;
         final int[] p = params.clone();
         final int n = ++seq;
+        // the steady shutter's frames keep their centres, each paired with the one taken before it
+        final boolean motion = jpeg != null && motionWanted();
+        final int moPrev = motion ? moPrevSeq : -1;
+        final long moPrevAt = moPrevGrab;
+        if (jpeg != null) {
+            moPrevSeq = motion ? n : -1;
+            moPrevGrab = grabAt;
+        }
         // the histogram only when it shows
         final int flags = (jpeg != null && display == D_GRID ? FilmCore.F_HIST : 0)
-                | (MOVING_GRAIN ? FilmCore.F_TEMPORAL : 0) | (check && jpeg != null ? FilmCore.F_STILL : 0);
+                | (MOVING_GRAIN ? FilmCore.F_TEMPORAL : 0) | (check && jpeg != null ? FilmCore.F_STILL : 0) | (motion ? FilmCore.F_MOTION : 0);
         final int w = liveW, h = liveH;
         // once a visit, on core 2, a while in (not the first frame, which it made late): this core's and its memory's speed
         final boolean probe = probeWanted && !probed && jpeg != null && k.core == LOOK_CORES[0];
         k.exec.execute(new Runnable() {
             public void run() {
-                if (k.pinned == null) {
-                    k.pinned = FilmCore.pinCore(k.core) == 0 ? "core " + k.core : "Latent's core (" + FilmCore.lastError() + ")";
-                    k.ctx = FilmCore.frameNew();
-                    // set once (v0.44 set and reset it every frame: on core 3 two cgroup moves a frame): a little behind
-                    // the screen and the camera's callbacks, ahead of the darkroom (v0.31's background priority starved
-                    // it under the camera's own load); on core 3, Latent's own, only what the screen leaves
-                    android.os.Process.setThreadPriority(k.core == LOW_PRIORITY_CORE ? android.os.Process.THREAD_PRIORITY_BACKGROUND
-                            : android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE);
-                }
+                settle(k);
                 if (probe && !probed && w > 0 && h > 0) {
                     probed = true;
                     Bitmap pb = null;
@@ -941,6 +999,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 r.by = k;
                 r.seq = n;
                 r.grabAt = jpeg == null ? 0 : grabAt;   // a frame again (under a new overlay) has no age of its own
+                r.motion = motion;
+                r.moPrev = moPrev;
+                r.moPrevGrab = moPrevAt;
                 long t = SystemClock.uptimeMillis();
                 try {
                     if (closed) return;
@@ -1004,6 +1065,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         } else if (r.miss) {
             bitmapMisses++;
         } else {
+            if (r.motion) moved(r);
+            if (r.w > 0) frameW = r.w;
             if (r.noSig && pacing) {   // an image core without the still check (signatures): full rate for the visit
                 pacing = false;
                 pacer.input(now);
@@ -1508,6 +1571,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      */
     void hide() {
         if (hidden) return;
+        dropSteady();
         if (release.half) release.halfUp();
         closeEv();
         cancelFocus();
@@ -1688,6 +1752,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         final int g = ++focusGen;
         focusStart = SystemClock.uptimeMillis();
         lampThisTry = lamp;
+        lockMask = 0;   // this try's cells come with the camera's report, just after its answer
         try {
             camera.autoFocus(new Camera.AutoFocusCallback() {
                 public void onAutoFocus(boolean success, Camera c) { focusDone(g, success); }
@@ -1753,6 +1818,12 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             ui.postDelayed(new Runnable() { public void run() { shoot(); } }, 100);
             return;
         }
+        if (!steadyPassed) {   // slower than 1/30: a frame that shows the camera still first (Steady)
+            if (steady.waiting) return;   // waiting already: its frame or its time takes it
+            if (exposureS == 0 || Steady.wanted(exposureS)) readExposure();   // a dim scene: this shot's own speed (10-40 ms)
+            if (Steady.wanted(exposureS)) { beginSteady(); return; }
+        }
+        steadyPassed = false;
         shutterAt = SystemClock.uptimeMillis();
         note("Latent's shutter");
         quietUntil = shutterAt + STORE_QUIET_MS + SHUTTER_TIMEOUT_MS;   // from the press; set again at the answer
@@ -1785,6 +1856,167 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     private int shutterNotes;
     private Method mTake;
+
+    // ---- the steady shutter (Steady): the frames' movement decides the moment, within Steady.MAX_MS
+
+    /** A full press on a slow shot: the picture waits for a still frame (moved) or its time (steadyTick). */
+    private void beginSteady() {
+        long now = SystemClock.uptimeMillis();
+        steady.begin(now, exposureS, PHOTO_W / (double) Math.max(1, frameW));
+        steadyWaits++;
+        if (steadyNotes++ < 60) note(String.format(Locale.US, "steady: %s, waiting for a still frame (blur under %.1f px, at most %d ms)",
+                shutter, steady.aim(), Steady.MAX_MS));
+        if (pacer.input(now)) paced(now, "the steady shutter");
+        ui.removeCallbacks(steadyTick);
+        ui.postDelayed(steadyTick, 40);
+        host.changed();
+        feed();
+    }
+
+    private final Runnable steadyTick = new Runnable() {
+        public void run() {
+            if (!steady.waiting || closed) return;
+            long now = SystemClock.uptimeMillis();
+            if (steady.due(now)) { steadyFire(steady.judged == 0 ? "with no frame to judge by" : "at the limit"); return; }
+            ui.postDelayed(this, 40);
+        }
+    };
+
+    /** Two frames' movement while a slow shot waits (UI thread): taken as soon as one shows the camera still. */
+    private void moved(Looked r) {
+        if (!steady.waiting || r.moPrev < 0 || r.grabAt < steady.since) return;   // only frames taken since the press
+        int rc;
+        try { rc = FilmCore.motion(r.moPrev, r.seq, moOut); } catch (Throwable e) { rc = -1; }
+        if (rc != 0) return;   // the frame before isn't kept yet (made alongside): the next pair
+        long dt = r.grabAt - r.moPrevGrab;
+        double dx = moOut[FilmCore.MO_DX] / 16.0, dy = moOut[FilmCore.MO_DY] / 16.0;
+        boolean go = steady.frame(dx, dy, dt, moOut[FilmCore.MO_DETAIL]);
+        if (steadyNotes++ < 60) note(String.format(Locale.US, "steady: frames %d-%d moved %.2f, %.2f px in %d ms (detail %.1f, miss %.1f): %s",
+                r.moPrev, r.seq, dx, dy, dt, moOut[FilmCore.MO_DETAIL] / 16.0, moOut[FilmCore.MO_MISS] / 16.0,
+                moOut[FilmCore.MO_DETAIL] < Steady.DETAIL_MIN ? "too plain to judge" : String.format(Locale.US, "blur %.1f px", steady.lastBlur)));
+        if (go) steadyFire("on a still frame");
+    }
+
+    private void steadyFire(String how) {
+        ui.removeCallbacks(steadyTick);
+        if (steadyNotes++ < 60) note("steady: taken " + how + ", " + (SystemClock.uptimeMillis() - steady.since) + " ms after the press ("
+                + steady.frames + " pairs, " + steady.judged + " judged)");
+        steadyPassed = true;
+        host.changed();
+        shoot();
+    }
+
+    /** Hidden or closing while a slow shot waits: no picture, and the button's state says so. */
+    private void dropSteady() {
+        if (!steady.waiting) return;
+        steady.cancel();
+        ui.removeCallbacks(steadyTick);
+        note("steady: dropped, the viewfinder going");
+        release.shot(false);
+    }
+
+    /** Frames keep their centres for the steady shutter: while a slow shot may be pressed, and while one waits. */
+    private boolean motionWanted() { return steady.waiting || (release.half && Steady.wanted(exposureS)); }
+
+    // ---- the focus check after a shot (Focus): each photo once the camera is done with it, on a look thread
+
+    /** The catalogue named a picture: its record gets its file and waits for the check. */
+    private void named(File f) {
+        Shot sh = unnamed.isEmpty() ? new Shot(stored, 0, exposureS) : unnamed.removeFirst();
+        sh.file = f;
+        if (FOCUS_CHECK) toCheck.add(sh);
+    }
+
+    /**
+     * The next photo checked on a free look thread (cores 2 and 1), once nothing is being taken or written: Linux reads
+     * the card then, never while the camera writes it. A photo Linux can't see yet (v0.22.1: not until the card is read
+     * afresh, so most likely every one) is left for after the restart (TOCHECK.TXT, MainActivity).
+     */
+    private void tryCheck() {
+        if (!FOCUS_CHECK || checking || toCheck.isEmpty() || closed || closing || hidden) return;
+        if (storing() || quietNow(SystemClock.uptimeMillis()) || steady.waiting) return;
+        Looker k = null;
+        for (int i = 0; i < LOOK_CORES.length && k == null; i++) {
+            if (LOOK_CORES[i] == LOW_PRIORITY_CORE) continue;   // core 3 is the screen's
+            if (lookers[i] == null) lookers[i] = new Looker(LOOK_CORES[i]);
+            if (!lookers[i].busy) k = lookers[i];
+        }
+        if (k == null) return;   // both making frames: the next to finish tries again (done, feed)
+        final Shot sh = toCheck.removeFirst();
+        final Looker lk = k;
+        final String path = sh.file.getPath();
+        checking = true;
+        checkingShot = sh;
+        lk.busy = true;
+        try {
+            lk.exec.execute(new Runnable() {
+                public void run() {
+                    settle(lk);
+                    final int[] out = new int[FilmCore.FC_COUNT];
+                    int rc;
+                    String err = null;
+                    long t = SystemClock.uptimeMillis();
+                    try {
+                        rc = FilmCore.focusCheck(path, out);
+                        if (rc != 0) err = FilmCore.lastError();
+                    } catch (Throwable e) {
+                        rc = -1;
+                        err = Probe.why(e);
+                    }
+                    final int code = rc;
+                    final String why = err;
+                    final long ms = SystemClock.uptimeMillis() - t;
+                    ui.post(new Runnable() {
+                        public void run() {
+                            lk.busy = false;
+                            checking = false;
+                            checkingShot = null;
+                            if (!closed) checked(sh, code, out, why, ms);
+                            feed();
+                        }
+                    });
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {   // closing
+            lk.busy = false;
+            checking = false;
+            checkingShot = null;
+            toCheck.addFirst(sh);
+        }
+    }
+
+    /** A photo's check came back (UI thread): logged; soft, and it's the print in the corner, said so. */
+    private void checked(Shot sh, int rc, int[] out, String why, long ms) {
+        if (rc != 0) {
+            later.add(sh);
+            if (checkNotes++ < 12) note("focus check: " + sh.file.getName() + " not readable here (" + why + "): after the restart");
+            return;
+        }
+        int v = Focus.verdictOf(out, sh.reportMask, sh.exposure);
+        if (checkNotes++ < 40) note(Focus.line(sh.file.getName(), out, sh.reportMask, sh.exposure, v) + ", " + ms + " ms here");
+        if (v > Focus.SHARP && sh.index == printShot && print != null) {
+            softShot = sh.index;
+            say(Focus.words(v));
+        }
+    }
+
+    /** Closing: the photos not checked here go to TOCHECK.TXT, for the restart. */
+    private void saveChecks() {
+        if (!FOCUS_CHECK) return;
+        if (checkingShot != null) later.add(checkingShot);
+        later.addAll(toCheck);
+        toCheck.clear();
+        if (later.isEmpty()) return;
+        try {
+            List<String> lines = new java.util.ArrayList<String>();
+            for (Shot sh : later) lines.add(Focus.pendingLine(sh.file.getPath(), sh.reportMask, sh.exposure));
+            Focus.addPending(card, lines);
+            note("focus check: " + later.size() + " photo(s) left for after the restart (TOCHECK.TXT)");
+        } catch (Throwable e) {
+            note("focus check: TOCHECK.TXT not written (" + Probe.why(e) + ")");
+        }
+        later.clear();
+    }
 
     /** burstableTakePicture, the Method found once (it was looked up on every press). */
     private void takePicture() throws Exception {
@@ -1833,7 +2065,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             quietCapAt = now + QUIET_CAP_MS;
             liveAgainFrom = now;
             flashUntil = now + FLASH_MS;
-            if (pendingPrint != null) { print = pendingPrint; pendingPrint = null; printAt = now; }   // the last one is kept, not freed
+            if (pendingPrint != null) { print = pendingPrint; pendingPrint = null; printAt = now; printShot = shots; }   // the last one is kept, not freed
+            unnamed.add(new Shot(shots, lockMask, exposureS));   // the cells and speed of its lock, for its focus check
             if (shots <= 30) note("shot " + shots + (ours ? ": Latent's shutter " + (now - shutterAt) + " ms" : ": the camera's shutter"));
             expectPicture();
             ui.removeCallbacks(tick);
@@ -2061,10 +2294,11 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                             if (stored > shots) {   // the shutter wasn't reported: it's an exposure all the same
                                 shots = stored;
                                 flashUntil = SystemClock.uptimeMillis() + FLASH_MS;
-                                if (pendingPrint != null) { print = pendingPrint; pendingPrint = null; printAt = SystemClock.uptimeMillis(); }
+                                if (pendingPrint != null) { print = pendingPrint; pendingPrint = null; printAt = SystemClock.uptimeMillis(); printShot = shots; }
                             }
                             File f = dcfFile(n / 10000, n % 10000);
                             if (stored <= 30) note(f.getName() + " in the catalogue " + (SystemClock.uptimeMillis() - storeSince) + " ms after the shutter");
+                            named(f);
                             host.shot(f, nextFilm());
                         }
                         storeBusy = storing();
@@ -2255,6 +2489,12 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         s.afTry = release.tries;
         s.afLamp = lamp;
         s.afNote = release.state == Release.NO_LOCK ? (lampThisTry ? "Too dark to focus" : "Can't focus") : "";
+        if (lockMask != boxesFor) { boxesFor = lockMask; boxes = Focus.boxes(lockMask); }
+        s.afAreas = release.state == Release.LOCKED ? boxes : null;
+        s.afBox = areaBox;
+        s.steadying = steady.waiting;
+        s.shutterSlow = Steady.wanted(exposureS);
+        s.printSoft = print != null && softShot >= 0 && softShot == printShot;
         s.afMode = afMode;
         s.afArea = afArea;
         s.shutter = shutter;
@@ -2275,6 +2515,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         s.vfNote = now < noteUntil ? note : "";
         s.fatal = held ? STUCK : null;   // nothing else can happen until the camera is switched off
     }
+
+    private int boxesFor;          // the lock's cells as boxes, made once a lock (fill runs every frame)
+    private float[][] boxes;
 
     /** A picture won't save and the camera is held (not given back: that froze it every time). */
     boolean held() { return held; }
@@ -2298,6 +2541,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         closingAt = SystemClock.uptimeMillis();
         closeWhy = why;
         if (why != null) note("closing: " + why);
+        dropSteady();
         cancelFocus();
         if (storing()) { say("Saving\u2026"); note("closing: waiting for " + Math.max(1, shots - stored) + " picture(s) to be stored"); }
         flushLog();
@@ -2349,6 +2593,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         Thread.setDefaultUncaughtExceptionHandler(previousHandler);
         long now = SystemClock.uptimeMillis();
         long liveMs = Math.max(1, (lastFrameAt > 0 ? lastFrameAt : now) - framesAskedAt);
+        saveChecks();
         note("closed: " + shots + " picture(s), " + stored + " in the catalogue, " + frames + " live frames (" + String.format(Locale.US, "%.1f", frames * 1000.0 / liveMs)
                 + " a second, " + (frames > 0 ? lookMsSum / frames : 0) + " ms each on " + lookers.length + " threads), Latent's focus " + locks + " locked / " + misses
                 + " missed");

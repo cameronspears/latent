@@ -356,6 +356,7 @@ public class MainActivity extends Activity {
                         saveSnapshot();
                         if (mode == BACK && current == null) openLoad(false);   // nothing in the camera: choosing film is home
                         final long filingFrom = SystemClock.uptimeMillis();
+                        if (Viewfinder.FOCUS_CHECK) checkFocusLater();   // the last visit's photos first, then the filing
                         filer.execute(new Runnable() {
                             public void run() {
                                 fileBacklog(ro);
@@ -2875,6 +2876,56 @@ public class MainActivity extends Activity {
                 + " save=" + m[HardwareDevelop.T_SAVE] + " find=" + m[HardwareDevelop.T_FIND] + " (settle " + m[HardwareDevelop.T_SETTLE] + ")"
                 + " orient=" + m[HardwareDevelop.T_ORIENT]
                 + extra + " total=" + total + " " + batteryNote() + " (" + print.orientation + ")");
+    }
+
+    /**
+     * The focus check for the photos the viewfinder couldn't read while it had the camera (Focus, TOCHECK.TXT): on the
+     * filer's thread, giving way to the darkroom's look as filing does, each in a fraction of a second. A photo that
+     * came out soft is named on screen ("Frame 9: missed focus"), and every one is logged in DEVELOP.TXT.
+     */
+    private void checkFocusLater() {
+        filer.execute(new Runnable() {
+            public void run() {
+                List<Focus.Waiting> waiting = Focus.takePending(card);
+                if (waiting.isEmpty()) return;
+                final List<String> soft = new ArrayList<String>();
+                final List<Integer> verdicts = new ArrayList<Integer>();
+                for (Focus.Waiting w : waiting) {
+                    CpuGate.await();   // between the darkroom's looks, as the filing goes
+                    int[] out = new int[FilmCore.FC_COUNT];
+                    String name = new File(w.path).getName();
+                    try {
+                        if (FilmCore.focusCheck(w.path, out) != 0) { devLog("focus check " + name + ": not done (" + FilmCore.lastError() + ")"); continue; }
+                    } catch (Throwable e) {
+                        devLog("focus check " + name + ": not done (" + Probe.why(e) + ")");
+                        continue;
+                    }
+                    int v = Focus.verdictOf(out, w.reportMask, w.exposure);
+                    devLog(Focus.line(name, out, w.reportMask, w.exposure, v));
+                    if (v > Focus.SHARP) { soft.add(w.path); verdicts.add(v); }
+                }
+                if (soft.isEmpty()) return;
+                ui.post(new Runnable() {
+                    public void run() {
+                        List<int[]> said = new ArrayList<int[]>();
+                        for (int i = 0; i < soft.size(); i++) said.add(new int[] { frameOf(soft.get(i)), verdicts.get(i) });
+                        toast(Focus.summary(said));
+                    }
+                });
+            }
+        });
+    }
+
+    /** A photo's frame number on the roll in the camera (1 on), or 0 when it isn't one of its frames. */
+    private int frameOf(String path) {
+        Roll r = current;
+        if (r == null) return 0;
+        int i = r.frames.indexOf(path);
+        if (i < 0) {
+            List<File> ex = r.exposures(photos);
+            for (int k = 0; k < ex.size() && i < 0; k++) if (ex.get(k).getPath().equals(path)) i = k;
+        }
+        return i + 1;
     }
 
     /** What the darkroom decided and why, in LATENT/DEVELOP.TXT. */
