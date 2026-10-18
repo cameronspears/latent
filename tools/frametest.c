@@ -305,6 +305,36 @@ static void test_versus_reference(frame_jpg *fr, int nfr) {
     free(a); free(b); free(ov);
 }
 
+/* ---- the still scene: each frame's signature as computed here from its decode, F_STILL stopping on it */
+static void test_still(frame_jpg *fr, int nfr) {
+    fl_frame_ctx *c = fl_frame_new();
+    unsigned short *a = (unsigned short *)calloc((size_t)OW * OH, sizeof(unsigned short));
+    int i, info[FL_FRAME_INFO], tm[FL_FRAME_TIMES], ok = 1, k;
+    char err[256];
+    for (i = 0; i < nfr; i++) {
+        int sig[FL_FI_SIG_N], sum[FL_FI_SIG_N] = { 0 }, cnt[FL_FI_SIG_N] = { 0 }, x, y, f;
+        for (f = 0; f < 2; f++) {   /* decoded as Y'CbCr, then as RGB (the level asked) */
+            fl_set_still_ref(NULL, 0);
+            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[1], PARAMS, FL_F_STILL | (f ? FL_F_LEVEL : 0), 1, a, OW, OH, OW, 1500, FL_FMT_565, SH, 320, 240, info, tm, err, sizeof err) != 0) ok = 0;
+            memcpy(sig, info + FL_FI_SIG, sizeof sig);
+            memset(sum, 0, sizeof sum); memset(cnt, 0, sizeof cnt);
+            for (y = 0; y < c->sh; y += 2) for (x = 0; x < c->sw; x += 2) {   /* the same cells, the slow way */
+                const unsigned char *p = c->rgb + ((size_t)y * c->sw + x) * 3;
+                int cell = y * FL_FI_SIG_H / c->sh * FL_FI_SIG_W + x * FL_FI_SIG_W / c->sw;
+                sum[cell] += f ? (p[0] * 77 + p[1] * 150 + p[2] * 29) >> 8 : p[0];
+                cnt[cell]++;
+            }
+            for (k = 0; k < FL_FI_SIG_N; k++) if (abs(sig[k] - (sum[k] + cnt[k] / 2) / cnt[k]) > 0) ok = 0;
+            fl_set_still_ref(sig, 2);
+            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[1], PARAMS, FL_F_STILL | (f ? FL_F_LEVEL : 0), 2, a, OW, OH, OW, 1500, FL_FMT_565, SH, 320, 240, info, tm, err, sizeof err) != 1) ok = 0;
+        }
+    }
+    fl_set_still_ref(NULL, 0);
+    check(ok, "the still scene's signature (8 x 6 cells, Y'CbCr and RGB decodes) and F_STILL stopping on it, %d frames", nfr);
+    fl_frame_free(c);
+    free(a);
+}
+
 /* ---- Mac timings: today's composer against v0.44.1's on the same frames (each the fastest of many runs: the
  * Mac is busy with other things, and the fastest run is the one they disturbed least) */
 static double fastest(fl_frame_ctx *c, const frame_jpg *f, int flags, unsigned short *a) {
@@ -399,6 +429,7 @@ int main(int argc, char **argv) {
         fl_frame_free(c);
     }
     test_versus_reference(fr, nfr);
+    test_still(fr, nfr);
     if (do_bench) bench(fr, nfr);
     if (dir) renders(dir, fr, nfr);
     for (i = 0; i < nfr; i++) free(fr[i].jpg);

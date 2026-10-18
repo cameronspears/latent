@@ -87,12 +87,17 @@ typedef struct fl_frame_ctx fl_frame_ctx;
 #define FL_F_LEVEL 1
 #define FL_F_HIST 2
 #define FL_F_TEMPORAL 4
+#define FL_F_STILL 8   /* after decoding, stop (return 1) when the signature is within the still scene's (fl_set_still_ref) */
 #define FL_F_REFERENCE (1 << 30)   /* host test builds only (FL_FRAME_REFERENCE): v0.44.1's composer, to compare with */
 #define FL_FMT_565 0
 #define FL_FMT_4444 1
 #define FL_NO_READING (-999999)
 #define FL_FI_OVERLAY 69
-#define FL_FRAME_INFO 70
+#define FL_FI_SIG 70      /* the decoded frame's signature: mean brightness (0..255) of FL_FI_SIG_W x FL_FI_SIG_H cells, row by row */
+#define FL_FI_SIG_W 8
+#define FL_FI_SIG_H 6
+#define FL_FI_SIG_N 48
+#define FL_FRAME_INFO 118
 #define FL_TM_DECODE 0
 #define FL_TM_READ 1
 #define FL_TM_LOOK 2
@@ -105,6 +110,9 @@ void fl_frame_free(fl_frame_ctx *c);
 int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
              int flags, int seq, unsigned short *out, int ow, int oh, int stride, int aspect1000, int format,
              const int *shifts, int max_w, int max_h, int *info, int *tm, char *err, int errlen);
+/* The still scene FL_F_STILL compares with: sig (FL_FI_SIG_N cells, as fl_frame writes them), and how far a cell may
+ * move (0..255) and still count as still; sig NULL forgets it. Any thread (locked). */
+void fl_set_still_ref(const int *sig, int threshold);
 /* This core's and its memory's speed, as a line of text for the log; px: a screen bitmap's pixels to fill too, or NULL. */
 int fl_probe(unsigned char *px, int bytes, char *out, int len);
 

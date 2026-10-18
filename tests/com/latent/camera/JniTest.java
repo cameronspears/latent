@@ -243,6 +243,42 @@ public class JniTest {
             }
             FilmCore.setOverlay(ov, ow, oh);
         }
+        {   // a still scene (v0.45.0): the frame's signature, and F_STILL stopping after the decode when it matches
+            byte[] still = cameraSize(jpeg, 0, 0), moved = cameraSize(jpeg, 12, 0), noisy = cameraSize(jpeg, 0, 3);
+            FilmCore.setStillRef(null, 0);
+            short[] s1 = new short[ow * oh];
+            rc = FilmCore.frame(c, still, still.length, lut, p, FilmCore.F_STILL, 4, s1, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
+            int[] sig = java.util.Arrays.copyOfRange(info, FilmCore.FI_SIG, FilmCore.FI_SIG + FilmCore.FI_SIG_N);
+            int lo = 255, hi = 0;
+            for (int v : sig) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+            check(rc == 0 && lo >= 0 && hi <= 255 && hi > lo, "no still scene yet: F_STILL composes, the signature written (" + lo + ".." + hi + ")");
+            FilmCore.setStillRef(sig, 4);
+            short[] mark = new short[ow * oh];
+            java.util.Arrays.fill(mark, (short) 0x1234);
+            short[] s2 = mark.clone();
+            int[] info2 = new int[FilmCore.FI_COUNT];
+            rc = FilmCore.frame(c, still, still.length, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            check(rc == 1 && java.util.Arrays.equals(s2, mark) && info2[0] == info[0] && info2[1] == info[1]
+                    && java.util.Arrays.equals(java.util.Arrays.copyOfRange(info2, FilmCore.FI_SIG, FilmCore.FI_SIG + FilmCore.FI_SIG_N), sig),
+                    "the same frame again with F_STILL: 1, the screen untouched, size and signature given (rc " + rc + ")");
+            s2 = mark.clone();
+            rc = FilmCore.frame(c, noisy, noisy.length, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            int most = 0;
+            for (int k = 0; k < FilmCore.FI_SIG_N; k++) most = Math.max(most, Math.abs(info2[FilmCore.FI_SIG + k] - sig[k]));
+            check(rc == 1 && java.util.Arrays.equals(s2, mark), "a little noise: still (cells at most " + most + " apart)");
+            s2 = mark.clone();
+            rc = FilmCore.frame(c, moved, moved.length, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            most = 0;
+            for (int k = 0; k < FilmCore.FI_SIG_N; k++) most = Math.max(most, Math.abs(info2[FilmCore.FI_SIG + k] - sig[k]));
+            check(rc == 0 && !java.util.Arrays.equals(s2, mark), "the camera turned a little (12 px): composed (cells up to " + most + " apart)");
+            s2 = mark.clone();
+            rc = FilmCore.frame(c, null, 0, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            check(rc == 0 && !java.util.Arrays.equals(s2, mark), "the last frame again (no JPEG) ignores F_STILL: composed");
+            FilmCore.setStillRef(null, 0);
+            s2 = mark.clone();
+            rc = FilmCore.frame(c, still, still.length, lut, p, FilmCore.F_STILL, 5, s2, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info2, tm);
+            check(rc == 0 && !java.util.Arrays.equals(s2, mark), "the still scene forgotten: composed");
+        }
         check(FilmCore.setOverlay(new int[10], 2, 5) > gen && FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 2, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm) == 0
                 && info[FilmCore.FI_OVERLAY] == 0, "an overlay of another size isn't laid in");
         check(FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 2, null, new Object(), ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info, tm) == -2, "no Android bitmaps here: says so");
@@ -319,13 +355,25 @@ public class JniTest {
     }
 
     /** The frame re-encoded as the camera sends them: 320 px wide, small and fairly compressed. */
-    static byte[] cameraSize(byte[] jpeg) throws java.io.IOException {
+    static byte[] cameraSize(byte[] jpeg) throws java.io.IOException { return cameraSize(jpeg, -1, 0); }
+
+    /** ... or (dx >= 0) a little narrower a view, dx pixels further right, with noise of up to +-noise a channel. */
+    static byte[] cameraSize(byte[] jpeg, int dx, int noise) throws java.io.IOException {
         java.awt.image.BufferedImage src = javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(jpeg));
         java.awt.image.BufferedImage dst = new java.awt.image.BufferedImage(320, 216, java.awt.image.BufferedImage.TYPE_INT_RGB);
         java.awt.Graphics2D g = dst.createGraphics();
         g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-        g.drawImage(src, 0, 0, 320, 216, null);
+        if (dx < 0) g.drawImage(src, 0, 0, 320, 216, null);
+        else g.drawImage(src, -12 - dx, 0, 344, 216, null);
         g.dispose();
+        if (noise > 0) {
+            java.util.Random rnd = new java.util.Random(7);
+            for (int y = 0; y < 216; y++) for (int x = 0; x < 320; x++) {
+                int v = dst.getRGB(x, y), o = 0;
+                for (int k = 0; k < 24; k += 8) { int ch = Math.max(0, Math.min(255, (v >> k & 255) + rnd.nextInt(2 * noise + 1) - noise)); o |= ch << k; }
+                dst.setRGB(x, y, o);
+            }
+        }
         javax.imageio.ImageWriter w = javax.imageio.ImageIO.getImageWritersByFormatName("jpeg").next();
         javax.imageio.ImageWriteParam wp = w.getDefaultWriteParam();
         wp.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);

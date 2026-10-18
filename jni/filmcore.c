@@ -1676,7 +1676,7 @@ struct fl_frame_ctx {
     unsigned char *rgb, *row;              /* the last frame decoded: RGB, or Y'CbCr when ycc */
     int rgb_cap, row_cap, sw, sh, ycc;     /* its size */
     unsigned int *px;                      /* the looked frame: red << 16 | green << 8 | blue, a word a pixel */
-    int cap_px;
+    int cap_px, pw, ph;                    /* its size (a still frame is decoded but not looked: sw, sh may differ) */
     unsigned int *hrow;                    /* two stretched rows (stretch_px's records), then a screen row */
     unsigned int *xiw;                     /* per screen column: its left source pixel's byte offset << 9 | its weight */
     int cap_ow, col_w, col_h, col_ow, col_oh, col_aspect;   /* what xiw was worked out for */
@@ -2190,12 +2190,12 @@ static void pack_tables(int f565, int rs, int gs, int bs, unsigned int alpha, un
 
 static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, int ow, int oh, int stride,
                          int aspect1000, int format, const int *shifts, int ox, int oy) {
-    const int w = c->sw, h = c->sh, ow2 = (ow + 1) & ~1;   /* a row's columns, rounded up to whole pairs */
+    const int w = c->pw, h = c->ph, ow2 = (ow + 1) & ~1;   /* a row's columns, rounded up to whole pairs */
     int x, y, held[2], rs = 11, gs = 5, bs = 0, as = 0, use_ovl, f565 = format != FL_FMT_4444;
     unsigned int *hr[2], alpha = 0, trb[256], tgg[256], tg1[16], T[96];
     unsigned short *row16;
     double sw, sh, sx0, sy0;
-    if (!c->rgb || w < 2 || h < 2 || ow < 1 || oh < 1 || ow > 4096 || oh > 4096 || stride < ow) return -1;
+    if (!c->px || w < 2 || h < 2 || ow < 1 || oh < 1 || ow > 4096 || oh > 4096 || stride < ow) return -1;
     if (!f565) {
         if (!shifts) return -1;
         rs = shifts[0]; gs = shifts[1]; bs = shifts[2]; as = shifts[3];
@@ -2271,6 +2271,50 @@ static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, in
     return 0;
 }
 
+/* ---- the still scene: a frame's signature, and the one F_STILL compares with */
+
+/* The decoded frame's mean brightness in FL_FI_SIG_W x FL_FI_SIG_H cells (row by row, 0..255), from every other
+ * pixel of every other row: Y as decoded, or BT.601 luma of RGB. */
+static void frame_signature(const fl_frame_ctx *c, int *sig) {
+    int sum[FL_FI_SIG_N], cnt[FL_FI_SIG_N], x, y, i, k;
+    const int w = c->sw, h = c->sh;
+    memset(sum, 0, sizeof sum);
+    memset(cnt, 0, sizeof cnt);
+    for (y = 0; y < h; y += 2) {
+        const unsigned char *row = c->rgb + (size_t)y * w * 3;
+        int *s = sum + y * FL_FI_SIG_H / h * FL_FI_SIG_W, *n = cnt + (s - sum);
+        for (k = 0; k < FL_FI_SIG_W; k++) {   /* a cell's stretch of the row */
+            int x1 = (k + 1) * w / FL_FI_SIG_W, acc = 0, m = 0;
+            for (x = k * w / FL_FI_SIG_W; x < x1; x += 2, m++)
+                acc += c->ycc ? row[x * 3] : (row[x * 3] * 77 + row[x * 3 + 1] * 150 + row[x * 3 + 2] * 29) >> 8;
+            s[k] += acc;
+            n[k] += m;
+        }
+    }
+    for (i = 0; i < FL_FI_SIG_N; i++) sig[i] = cnt[i] ? (sum[i] + cnt[i] / 2) / cnt[i] : 0;
+}
+
+static pthread_mutex_t g_still_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_still_sig[FL_FI_SIG_N], g_still_thr, g_still_on;
+
+void fl_set_still_ref(const int *sig, int threshold) {
+    pthread_mutex_lock(&g_still_mu);
+    if (sig) memcpy(g_still_sig, sig, sizeof g_still_sig);
+    g_still_thr = threshold < 0 ? 0 : threshold;
+    g_still_on = sig != NULL;
+    pthread_mutex_unlock(&g_still_mu);
+}
+
+/* Every cell of sig within the threshold of the still scene's (and there is one). */
+static int still_matches(const int *sig) {
+    int i, still;
+    pthread_mutex_lock(&g_still_mu);
+    still = g_still_on;
+    for (i = 0; still && i < FL_FI_SIG_N; i++) if (abs(sig[i] - g_still_sig[i]) > g_still_thr) still = 0;
+    pthread_mutex_unlock(&g_still_mu);
+    return still;
+}
+
 /* How fast this core and its memory really are, for the log (once a visit, ~0.1 s): a chain of dependent
  * multiply-adds, then 1 MB filled, read and copied in ordinary memory, and filled in 'px' (a screen
  * bitmap's pixels, 'bytes' long) when given. */
@@ -2337,6 +2381,12 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
         c->ycc = !(flags & FL_F_LEVEL) && c->film.Y.n;
         if (frame_decode(c, jpeg, len, max_w, max_h, !c->ycc, err, errlen) != 0) return -1;
         t = now_ms(); if (tm) tm[FL_TM_DECODE] = (int)(t - t0); t0 = t;
+        frame_signature(c, info + FL_FI_SIG);
+        if ((flags & FL_F_STILL) && still_matches(info + FL_FI_SIG)) {   /* the scene hasn't moved: nothing to compose */
+            info[0] = c->sw;
+            info[1] = c->sh;
+            return 1;
+        }
         if (flags & FL_F_LEVEL) fl_level(c->rgb, c->sw, c->sh, info + 2);
         else info[2] = info[3] = info[4] = FL_NO_READING;
         if (flags & FL_F_HIST) {
@@ -2353,6 +2403,7 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
             c->cap_px = c->sw * c->sh;
         }
         look_frame(c->ycc ? &c->film.Y : &c->film.F, c->rgb, c->sw * c->sh, c->px);
+        c->pw = c->sw; c->ph = c->sh;
         t = now_ms(); if (tm) tm[FL_TM_LOOK] = (int)(t - t0); t0 = t;
     } else {
         if (!c->px) { set_err(err, errlen, "no frame yet"); return -1; }
