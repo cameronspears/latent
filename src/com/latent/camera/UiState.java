@@ -5,7 +5,8 @@ import java.util.List;
 
 /** Everything a screen shows, filled in by MainActivity (or by the Mac preview tool). Plain data. */
 final class UiState implements Cloneable {
-    static final int BACK = 0, LOAD = 1, DARKROOM = 2, SHEET = 3, VIEW = 4, PHOTO = 7, SETTINGS = 8;   // (5 and 6: the Lab and the camera tests until v0.45.0)
+    // SHEET is Photos' contact sheet, VIEW its viewer (5 and 6: the Lab and the camera tests until v0.45.0)
+    static final int BACK = 0, LOAD = 1, DARKROOM = 2, SHEET = 3, VIEW = 4, PHOTO = 7, SETTINGS = 8;
 
     /** How a film stock is shown: names and its two canister colours plus a UI accent. */
     static final class Film {
@@ -100,14 +101,32 @@ final class UiState implements Cloneable {
     Object devPrint;                   // the frame being developed (its camera thumbnail), or null
     List<Object> devStrip = new ArrayList<Object>();   // developed frames so far, in order
 
-    // contact sheet and viewer
-    List<Object> thumbs = new ArrayList<Object>();
-    int sheetSel, sheetTotal;
-    boolean sheetUndeveloped;
-    boolean sheetPhotos;               // a photo roll (Photo mode), not a film roll
-    int filingLeft;                    // originals still moving to the roll's NEG folder
-    Object viewImage;
-    boolean viewCaption, viewFill;
+    List<Object> thumbs = new ArrayList<Object>();   // camera back: an endless roll's newest prints
+
+    // Photos (v0.45.0): every developed frame, newest first, on a contact sheet grouped by roll (Photos.Sheet)
+    /** A frame on the sheet's page on show. */
+    static final class Cell {
+        Object thumb;                  // its thumbnail, or null while it loads (a plain cell)
+        int number;                    // its number on its roll
+        int row, col;                  // where it sits on the page
+        Film roll;                     // on the first row of each roll on the page: its film (the canister marks the roll)
+        int rollNumber;                // ... and the roll's number
+    }
+    boolean photosReady;               // the list is made: until then only the title (never a flash of the empty state)
+    List<Cell> cells = new ArrayList<Cell>();   // the page on show; empty with photosReady: nothing developed yet
+    int cellSel = -1;                  // the chosen frame's cell
+    int frameNumber, frameOf;          // the chosen frame: its number on its roll (film and rollNumber above), of the roll's frames
+    String photoDate = "";             // when it was taken ("12 Oct 2026"), or "" when its EXIF doesn't say
+    String photoExposure = "";         // its exposure ("1/250  F5.6  ISO 400"), or ""
+    int filingLeft;                    // the chosen frame's roll: originals still moving to its NEG folder
+    // the viewer
+    Object viewImage;                  // the picture on show (the frame's preview, its 100% crop, or its thumbnail standing in); null: a note
+    boolean viewCrop;                  // viewImage is the 100% crop: drawn a photo pixel to a layout pixel
+    String viewNote = "";              // with no picture: what's happening ("Developing preview…") or that there is none
+    boolean viewCaption;               // the caption and the keys, for a moment: on arrival and on UP
+    boolean viewZoom, viewMoves;       // at 100% (its picture may be on its way); and the arrows move it
+    float[] viewMap;                   // at 100%: where the view lies in the photo {x, y, w, h} (0..1) and the photo's aspect; null: hidden
+    boolean viewMapPending;            // ... the picture is still on its way there
 
     // ---- the screens (v0.45.0, the UI stream)
     int readyIn = -1;                  // camera back: a shoot waits for the camera to settle, seconds to go (0: a moment); -1 none

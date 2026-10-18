@@ -90,7 +90,7 @@ final class Ui {
             case UiState.BACK: back(g, s); break;
             case UiState.LOAD: load(g, s); break;
             case UiState.DARKROOM: darkroom(g, s); break;
-            case UiState.SHEET: sheet(g, s); break;
+            case UiState.SHEET: photos(g, s); break;
             case UiState.VIEW: view(g, s); break;
             case UiState.PHOTO: photo(g, s); break;
             case UiState.SETTINGS: settings(g, s); break;
@@ -134,7 +134,8 @@ final class Ui {
 
     /**
      * The camera back with a roll in it: the frame counter is the hero, as in a film camera's window.
-     * One thing to do (half-press, or the centre button, to shoot); everything else is behind MENU.
+     * One thing to do (half-press, or the centre button, to shoot); DOWN shows your photos; everything else
+     * is behind MENU.
      */
     private static void back(Gfx g, UiState s) {
         float R = right(s);
@@ -171,6 +172,9 @@ final class Ui {
             if (note.length() > 0) keyText(g, note, L, 384, Gfx.REGULAR, T_BODY, INK2, Gfx.LEFT);
         }
         boolean develop = s.developed >= 0 || (!s.endless && shown >= s.length) || (s.endless && s.developLater && s.waiting > 0);
+        // DOWN opens Photos: from the left, after the photos still developing when there are some
+        float lx = s.developing > 0 ? developingPill(g, s, L, f.accent) + 26 : L;
+        hintPairs(g, new String[] { "down", "Photos" }, lx, HINT_Y, INK2, false);
         float rx;
         if (s.readyIn >= 0 && !develop) {   // a shoot waiting for the camera to settle: say so, and count it down
             rx = hintBar(g, s, INK2, null, new String[] { "menu", "Menu" });
@@ -185,7 +189,6 @@ final class Ui {
         } else {
             hintBar(g, s, INK2, null, new String[] { "centre", develop ? "Develop" : "Shoot", "menu", "Menu" });
         }
-        if (s.developing > 0) developingPill(g, s, L, f.accent);
     }
 
     /** "about 2 min", "about 90 s", "under a minute": how long a develop of this many ms takes. */
@@ -202,13 +205,14 @@ final class Ui {
         g.strokeCircle(cx + 5.2f, cy, 5f, 2f, color);
     }
 
-    /** "2 developing": a quiet pill on the hint bar's baseline, from x. */
-    private static void developingPill(Gfx g, UiState s, float x, int accent) {
+    /** "2 developing": a quiet pill on the hint bar's baseline, from x. Returns where it ends. */
+    private static float developingPill(Gfx g, UiState s, float x, int accent) {
         String d = s.developing + " developing";
         float dw = g.textWidth(d, Gfx.MEDIUM, T_SECOND, 0) + 36;
         g.roundRect(x - 4, HINT_Y - 20, dw, 28, 14, SURFACE);
         g.circle(x + 11, HINT_Y - 6, 3.5f, accent);
         g.text(d, x + 22, HINT_Y - 1, Gfx.MEDIUM, T_SECOND, INK, Gfx.LEFT, 0);
+        return x - 4 + dw;
     }
 
     // ------------------------------------------------------------------------------ the viewfinder
@@ -978,76 +982,109 @@ final class Ui {
         if (!s.devPreparing) hintBar(g, s, RED, null, new String[] { "wheel", "Brighten", "menu", "Pause" });
     }
 
-    // ------------------------------------------------------------------------------ contact sheet
+    // ------------------------------------------------------------------------------ Photos
 
-    private static void sheet(Gfx g, UiState s) {
+    /**
+     * Photos: every developed frame on the card, newest first, as a contact sheet (five across, three rows a page),
+     * grouped by roll the way a Fuji contact sheet is: each roll starts a row of its own, its film's canister in the
+     * margin. The title names the chosen frame's roll; at the right, when it was taken and which frame it is.
+     */
+    private static void photos(Gfx g, UiState s) {
         float R = right(s);
         UiState.Film f = s.film;
-        if (f == null) {
-            g.text("Contact sheets", L, TOP, Gfx.MEDIUM, T_BODY, INK, Gfx.LEFT, 0);
-            g.text("No rolls yet", L - 3, 222, Gfx.DISPLAY, T_DISPLAY, INK, Gfx.LEFT, -10);
-            g.text("Developed rolls appear here.", L, 262, Gfx.REGULAR, T_BODY, INK2, Gfx.LEFT, 0);
+        if (!s.photosReady || s.cells.isEmpty() || f == null) {
+            g.text("Photos", L, TOP, Gfx.MEDIUM, T_BODY, INK, Gfx.LEFT, 0);
+            if (s.photosReady) {   // nothing developed yet: what to do about it
+                g.text("Nothing developed yet", L - 3, 222, Gfx.DISPLAY, T_DISPLAY, INK, Gfx.LEFT, -10);
+                wrap(g, "Shoot a roll and develop it. Its photos appear here, newest first.", L, 262, R - L, Gfx.REGULAR, T_BODY, INK2, 27, 2);
+            }
             hintBar(g, s, INK2, null, new String[] { "menu", "Back" });
             return;
         }
-        title(g, f, s.sheetPhotos ? "Photos" : "Roll " + s.rollNumber, INK);
-        if (s.thumbs.isEmpty()) {
-            g.text(s.sheetUndeveloped ? "Not developed yet" : "No frames", L - 3, 222, Gfx.DISPLAY, T_DISPLAY, INK, Gfx.LEFT, -10);
-            if (s.sheetUndeveloped) keyText(g, "Press \u2299 to develop it.", L, 262, Gfx.REGULAR, T_BODY, INK2, Gfx.LEFT);
-            hintBar(g, s, INK2, new String[] { "updown", "Roll" }, s.sheetUndeveloped ? new String[] { "centre", "Develop", "menu", "Back" } : new String[] { "menu", "Back" });
-            return;
-        }
-        if (s.filingLeft > 0) {   // until then, leaving or switching to USB leaves an original for next time
-            String filing = "Filing " + s.filingLeft + (s.filingLeft == 1 ? " negative\u2026" : " negatives\u2026");
-            g.text(filing, R, TOP, Gfx.MEDIUM, T_SECOND, INK2, Gfx.RIGHT, 0);
-        } else {
-            g.text((s.sheetSel + 1) + " of " + s.thumbs.size(), R, TOP, Gfx.MEDIUM, T_SECOND, INK2, Gfx.RIGHT, 0);
-        }
-
-        int cols = SHEET_COLS, per = SHEET_PER, page = s.sheetSel / per;
-        float gap = SHEET_GAP, tw = sheetCell(s), th = tw * 2 / 3;
-        for (int k = 0; k < per; k++) {
-            int i = page * per + k;
-            if (i >= s.thumbs.size()) break;
-            float x = L + (k % cols) * (tw + gap), y = SHEET_TOP + (k / cols) * (th + 24);
-            Object img = s.thumbs.get(i);
-            if (img != null) g.image(img, x, y, tw, th, false);   // image() crops the thumbnail's letterbox bars
+        title(g, f, "Roll " + s.rollNumber, INK);
+        g.text(photosCount(s), R, TOP, Gfx.MEDIUM, T_SECOND, INK2, Gfx.RIGHT, 0);
+        float tw = sheetCell(s), th = tw * 2 / 3;
+        for (int k = 0; k < s.cells.size(); k++) {
+            UiState.Cell c = s.cells.get(k);
+            float x = L + c.col * (tw + SHEET_GAP), y = SHEET_TOP + c.row * (th + SHEET_ROW);
+            if (c.thumb != null) g.image(c.thumb, x, y, tw, th, false);   // image() crops the thumbnail's letterbox bars
             else g.rect(x, y, tw, th, SURFACE);
-            boolean on = i == s.sheetSel;
+            boolean on = k == s.cellSel;
             if (on) g.strokeRoundRect(x - 4, y - 4, tw + 8, th + 8, 4, vw(s, 2), INK);
-            g.text(String.valueOf(i + 1), x, y + th + 19, Gfx.MONO, 15, on ? f.accent : INK2, Gfx.LEFT, 0);
+            g.text(String.valueOf(c.number), x, y + th + 19, Gfx.MONO, 15, on ? f.accent : INK2, Gfx.LEFT, 0);
+            if (c.roll != null) {   // a roll starts (or carries on) here: its canister in the margin, its number under it
+                canister(g, c.roll, (L - 16) / 2, y + 4, 1, true);
+                g.text(String.valueOf(c.rollNumber), L / 2, y + 44, Gfx.MONO, FLOOR, INK3, Gfx.CENTER, 0);
+            }
         }
-        hintBar(g, s, INK2, new String[] { "wheel", "Frame", "updown", "Roll" }, new String[] { "centre", "View", "menu", "Back" });
+        hintBar(g, s, INK2, new String[] { "wheel", "Frame", "updown", "Row" }, new String[] { "centre", "View", "menu", "Back" });
     }
 
-    /** The photo as large as the panel allows; centre toggles filling the whole screen. */
+    /** The sheet's top right: when the chosen frame was taken and which of its roll's frames it is, or its roll's filing. */
+    private static String photosCount(UiState s) {
+        if (s.filingLeft > 0) return "Filing " + s.filingLeft + (s.filingLeft == 1 ? " negative…" : " negatives…");
+        return (s.photoDate.length() > 0 ? s.photoDate + "  ·  " : "") + s.frameNumber + " of " + s.frameOf;
+    }
+
+    /**
+     * The viewer: the photo as large as the panel allows, nothing over it but, for a moment on arrival and on UP,
+     * a calm caption (its film, roll and frame; when it was taken and its exposure) and the keys. At 100% it's a
+     * crop of the developed photo, a photo pixel to a layout pixel, with a small map of where it lies in the photo.
+     */
     private static void view(Gfx g, UiState s) {
         if (s.viewImage != null) {
             float iw = g.imageWidth(s.viewImage), ih = g.imageHeight(s.viewImage);
-            float sc = s.viewFill ? Math.max(s.width / iw, H / ih) : Math.min(s.width / iw, H / ih);
+            float sc = s.viewCrop ? 1 : Math.min(s.width / iw, H / ih);
             float dw = Math.min(s.width, iw * sc), dh = Math.min(H, ih * sc), x = (s.width - dw) / 2, y = (H - dh) / 2;
             // black only where the photo isn't (draw() didn't fill the screen), a pixel under its edges
             if (x > 0) { g.rect(0, 0, x + 1, H, BG); g.rect(x + dw - 1, 0, s.width - x - dw + 1, H, BG); }
             if (y > 0) { g.rect(0, 0, s.width, y + 1, BG); g.rect(0, y + dh - 1, s.width, H - y - dh + 1, BG); }
             g.image(s.viewImage, x, y, dw, dh, false);
-        } else {
-            g.text("Developing preview\u2026", s.width / 2, 248, Gfx.REGULAR, T_BODY, INK2, Gfx.CENTER, 0);
+        } else if (s.viewNote.length() > 0) {
+            g.text(s.viewNote, s.width / 2, 248, Gfx.REGULAR, T_BODY, INK2, Gfx.CENTER, 0);
         }
-        if (s.viewCaption) {   // for a moment: which frame, and the keys (on the hint bar's baseline)
-            UiState.Film f = s.film;
-            g.rect(0, HINT_Y - 26, s.width, H - HINT_Y + 26, GLASS);
-            String t = (s.sheetSel + 1) + " of " + s.sheetTotal + (f != null ? "  \u00b7  " + f.title + " " + f.iso : "");
-            g.text(t, L, HINT_Y, Gfx.MEDIUM, T_SECOND, INK, Gfx.LEFT, 0);
-            hintBar(g, s, INK, new String[] {}, new String[] { "wheel", "Frame", "centre", s.viewFill ? "Fit" : "Fill", "menu", "Sheet" });
-        }
+        if (s.viewMap != null) viewMap(g, s);
+        if (s.viewCaption) viewCaption(g, s);
+    }
+
+    /** For a moment: a soft fade at the foot, what the photo is over two lines, and the keys at the right. */
+    private static void viewCaption(Gfx g, UiState s) {
+        for (int y = 344; y < H; y += 2) g.rect(0, y, s.width, 2, fade(0xE0, (y + 1 - 344) / 112f));
+        hintBar(g, s, INK, null, !s.viewZoom ? new String[] { "wheel", "Frame", "centre", "100%", "menu", "Photos" }
+                : s.viewMoves ? new String[] { "arrows", "Move", "centre", "Fit", "menu", "Photos" } : new String[] { "centre", "Fit", "menu", "Photos" });
+        UiState.Film f = s.film;
+        if (s.viewZoom || f == null) return;   // at 100%: the keys alone, over the picture
+        String when = s.photoDate + (s.photoDate.length() > 0 && s.photoExposure.length() > 0 ? "  ·  " : "") + s.photoExposure;
+        float y = when.length() > 0 ? HINT_Y - 26 : HINT_Y;
+        canister(g, f, L, y - 15, 0.8f, true);
+        String what = f.title + (f.iso.length() > 0 ? " " + f.iso : "") + "  ·  Roll " + s.rollNumber + "  ·  Frame " + s.frameNumber;
+        g.text(what, L + 22, y, Gfx.MEDIUM, T_SECOND, INK, Gfx.LEFT, 0);
+        if (when.length() > 0) g.text(when, L, HINT_Y, Gfx.REGULAR, T_SECOND, INK2, Gfx.LEFT, 0);
+    }
+
+    /**
+     * At 100%: where the view lies in the photo, as the camera's own playback zoom shows it, on a plate at the top
+     * right. The view's frame is outlined only while its picture is on its way there.
+     */
+    private static void viewMap(Gfx g, UiState s) {
+        float[] m = s.viewMap;
+        float aspect = m.length > 4 && m[4] > 0 ? m[4] : 1.5f, mw = aspect >= 1 ? 96 : 96 * aspect, mh = mw / aspect;
+        float x = vx(s, right(s) - mw), y = 28;
+        g.roundRect(x - 10, y - 10, mw + 20, mh + 40, 10, PLATE);
+        g.strokeRoundRect(x, y, mw, mh, 2, vw(s, 1.4f), INK2);
+        float rx = x + m[0] * mw, ry = y + m[1] * mh, rw = Math.max(vw(s, 2), m[2] * mw), rh = Math.max(2, m[3] * mh);
+        if (!s.viewMapPending) g.rect(rx, ry, rw, rh, 0x66FFFFEE);
+        g.strokeRoundRect(rx, ry, rw, rh, 1, vw(s, 1.4f), INK);
+        g.text("100%", x + mw / 2, y + mh + 22, Gfx.MEDIUM, T_LABEL, INK, Gfx.CENTER, LABEL_TRACK);
     }
 
     // ------------------------------------------------------------------------------ what a key changes
 
-    // the layout the partial redraws share with the drawing: Choose film's length control, the contact sheet's grid
+    // the layout the partial redraws share with the drawing: Choose film's length control, Photos' contact sheet
     static final float LEN_SEG = 54, LEN_Y = 352, LEN_H = 40;
-    static final int SHEET_COLS = 5, SHEET_PER = 15;
-    static final float SHEET_TOP = 70, SHEET_GAP = 16;
+    static final float SHEET_TOP = 70, SHEET_GAP = 16, SHEET_ROW = 24;   // the sheet's top, the gap between frames, and under a row (its numbers)
+    /** Frames across the sheet: Photos.Sheet.COLS (the cells come with their columns; RenderScreens checks the two agree). */
+    static final int SHEET_COLS = 5;
 
     /** A contact sheet thumbnail's width. */
     private static float sheetCell(UiState s) { return (right(s) - L - (SHEET_COLS - 1) * SHEET_GAP) / SHEET_COLS; }
@@ -1055,7 +1092,7 @@ final class Ui {
     /**
      * After a key: the part of the screen that 'b' draws differently from 'a' (the state last drawn), as {x, y, w, h}
      * in the layout, or null for all of it. Only for the small changes keys make: Choose film's length, the menu's
-     * chosen row, the contact sheet's frame within a page. Anything else differing (a
+     * chosen row, Photos' frame within a page and a roll. Anything else differing (a
      * toast, the battery, the film, a picture arriving) means the whole screen. RenderScreens checks that every
      * pixel that changes lies inside.
      */
@@ -1070,7 +1107,7 @@ final class Ui {
         switch (b.mode) {
             case UiState.LOAD: return loadDirty(a, b);
             case UiState.SETTINGS: return menuDirty(a, b);
-            case UiState.SHEET: return sheetDirty(a, b);
+            case UiState.SHEET: return photosDirty(a, b);
             default: return null;
         }
     }
@@ -1115,20 +1152,26 @@ final class Ui {
         return new float[] { 0, y, b.width, H - y };
     }
 
-    /** The contact sheet, a frame along within a page: the two frames and the count at the top right. */
-    private static float[] sheetDirty(UiState a, UiState b) {
-        if (!sameFilm(a.film, b.film) || a.rollNumber != b.rollNumber || a.sheetPhotos != b.sheetPhotos || a.sheetUndeveloped != b.sheetUndeveloped
-                || a.filingLeft != b.filingLeft || a.thumbs.size() != b.thumbs.size() || b.thumbs.isEmpty()
-                || a.sheetSel / SHEET_PER != b.sheetSel / SHEET_PER) return null;
-        for (int i = 0; i < b.thumbs.size(); i++) if (a.thumbs.get(i) != b.thumbs.get(i)) return null;
+    /**
+     * Photos, a frame along on the same page and roll: the two frames and the top right (when it was taken, which
+     * frame). Everything else Ui.photos draws (the title, every cell, the canisters, the keys) must be the same.
+     */
+    private static float[] photosDirty(UiState a, UiState b) {
+        if (!a.photosReady || !b.photosReady || !sameFilm(a.film, b.film) || a.rollNumber != b.rollNumber || a.filingLeft != b.filingLeft
+                || a.cells.size() != b.cells.size() || b.cells.isEmpty() || a.cellSel < 0 || b.cellSel < 0
+                || a.cellSel >= a.cells.size() || b.cellSel >= b.cells.size()) return null;
+        for (int i = 0; i < b.cells.size(); i++) {
+            UiState.Cell p = a.cells.get(i), q = b.cells.get(i);
+            if (p.thumb != q.thumb || p.number != q.number || p.row != q.row || p.col != q.col || p.rollNumber != q.rollNumber || !sameFilm(p.roll, q.roll)) return null;
+        }
         float R = right(b);
-        return union(union(sheetCellRect(a), sheetCellRect(b)), new float[] { R - 200, TOP - 24, 204, 32 });
+        return union(union(cellRect(a, a.cells.get(a.cellSel)), cellRect(b, b.cells.get(b.cellSel))), new float[] { b.width / 2, TOP - 24, R + 4 - b.width / 2, 32 });
     }
 
-    private static float[] sheetCellRect(UiState s) {
-        int k = s.sheetSel % SHEET_PER;
+    /** A cell with its selection stroke and its number under it. */
+    private static float[] cellRect(UiState s, UiState.Cell c) {
         float tw = sheetCell(s), th = tw * 2 / 3;
-        float x = L + (k % SHEET_COLS) * (tw + SHEET_GAP), y = SHEET_TOP + (k / SHEET_COLS) * (th + 24);
+        float x = L + c.col * (tw + SHEET_GAP), y = SHEET_TOP + c.row * (th + SHEET_ROW);
         return new float[] { x - 7, y - 7, tw + 14, th + 7 + 26 };
     }
 
@@ -1178,6 +1221,13 @@ final class Ui {
             float o = both ? 0 : 2.5f;
             if (up) { g.line(x + 4, cy - 3 + o, x + 9, cy - 8 + o, 1.6f, color); g.line(x + 9, cy - 8 + o, x + 14, cy - 3 + o, 1.6f, color); }
             if (down) { g.line(x + 4, cy + 3 - o, x + 9, cy + 8 - o, 1.6f, color); g.line(x + 9, cy + 8 - o, x + 14, cy + 3 - o, 1.6f, color); }
+        } else if (kind.equals("arrows")) {   // all four: a small chevron each way, apart, round the centre
+            float cx = x + 9;
+            g.line(cx - 2.5f, cy - 5, cx, cy - 7.5f, 1.5f, color); g.line(cx, cy - 7.5f, cx + 2.5f, cy - 5, 1.5f, color);
+            g.line(cx - 2.5f, cy + 5, cx, cy + 7.5f, 1.5f, color); g.line(cx, cy + 7.5f, cx + 2.5f, cy + 5, 1.5f, color);
+            g.line(cx - 5, cy - 2.5f, cx - 7.5f, cy, 1.5f, color); g.line(cx - 7.5f, cy, cx - 5, cy + 2.5f, 1.5f, color);
+            g.line(cx + 5, cy - 2.5f, cx + 7.5f, cy, 1.5f, color); g.line(cx + 7.5f, cy, cx + 5, cy + 2.5f, 1.5f, color);
+            g.circle(cx, cy, 1.5f, color);
         } else if (kind.equals("menu")) {
             float w = glyphWidth(g, "menu");
             g.strokeRoundRect(x, cy - 9, w, 18, 4, 1.4f, color);

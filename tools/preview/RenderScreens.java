@@ -236,30 +236,55 @@ public class RenderScreens {
         s.film = new UiState.Film(); s.film.title = cuban.title; s.film.iso = cuban.iso; s.film.accent = cuban.accent; s.film.body = cuban.body; s.film.band = cuban.band;
         render(s, "8v-darkroom-getting-ready");
 
+        // ---- Photos: every developed frame, newest first, grouped by roll (Photos.page, as MainActivity builds it)
+        if (Ui.SHEET_COLS != Photos.Sheet.COLS) problems.add("Photos: Ui draws " + Ui.SHEET_COLS + " frames across, Photos.Sheet lays out " + Photos.Sheet.COLS);
+        Shelf shelf = new Shelf();
+        shelf.roll(cuban, 12, 7, 24, names, samples, "CUBANNEG");   // the newest roll: frames 7 down to 1 developed so far
+        shelf.roll(trix, 11, 12, 12, names, samples, "TRIX400");
+        shelf.roll(portra, 9, 9, 24, names, samples, "PORTRA4W");
+        s = photos(shelf, 2);
+        s.photoDate = "12 Oct 2026";
+        render(s, "9-photos");
+        s = photos(shelf, 9);   // the second roll on the page: the title and the count follow the chosen frame
+        s.photoDate = "3 Oct 2026";
+        render(s, "9b-photos-next-roll");
+        s = photos(shelf, 4);
+        s.filingLeft = 2;   // its originals still moving to the roll's NEG folder
+        render(s, "9c-photos-filing");
+        s = photos(shelf, 22);   // the second page: a roll carrying on from the page before, and the next roll
+        render(s, "9d-photos-page-two");
         s = state();
-        s.mode = UiState.SHEET; s.film = cuban; s.rollNumber = 3; s.thumbs = thumbs; s.sheetSel = 6;
-        render(s, "9-sheet");
-        s.filingLeft = 2;
-        render(s, "9b-sheet-filing");
-        s.filingLeft = 0;
+        s.mode = UiState.SHEET; s.photosReady = true;
+        render(s, "9e-photos-nothing-developed");
         s = state();
         s.mode = UiState.SHEET;
-        render(s, "9c-sheet-no-rolls");
-        s = state();
-        s.mode = UiState.SHEET; s.film = portra; s.rollNumber = 4; s.sheetUndeveloped = true;
-        render(s, "9d-sheet-undeveloped");
+        render(s, "9f-photos-reading");
 
-        s = state();
-        s.mode = UiState.VIEW; s.film = cuban; s.viewImage = img(samples, "HOUSE-PRV.png"); s.sheetSel = 6; s.sheetTotal = 24; s.viewCaption = true;
+        // ---- the viewer: fitted with its caption, a frame with no picture, 100% and moving
+        s = viewer(cuban, img(samples, "HOUSE-PRV.png"));
+        s.viewCaption = true; s.photoDate = "12 Oct 2026"; s.photoExposure = "1/250  F5.6  ISO 400";
         render(s, "10-view-fit");
-        s.viewFill = true; s.viewCaption = false;
-        render(s, "11-view-fill");
+        s.photoExposure = "";   // a photo whose EXIF doesn't tell its exposure: the date alone
+        render(s, "10a-view-fit-date-only");
         BufferedImage prv = (BufferedImage) img(samples, "HOUSE-PRV.png");
-        s.viewFill = false; s.viewCaption = false;
-        s.viewImage = prv.getSubimage(0, 0, Math.min(prv.getWidth(), 317), prv.getHeight());   // upright, and an odd width: edges off whole dots
+        s = viewer(cuban, prv.getSubimage(0, 0, Math.min(prv.getWidth(), 317), prv.getHeight()));   // upright, and an odd width: edges off whole dots
         render(s, "10b-view-fit-upright");
+        s = viewer(cuban, null);
+        s.viewNote = "This photo can't be shown"; s.viewCaption = true; s.photoDate = "12 Oct 2026";
+        render(s, "10c-view-no-picture");
+        s = viewer(cuban, img(samples, "HOUSE-100.png"));   // the middle at 100%, its keys and the map for a moment
+        s.viewCrop = true; s.viewZoom = true; s.viewMoves = true; s.viewCaption = true;
+        s.viewMap = new float[] { (6000 - 854) / 2f / 6000, (4000 - 480) / 2f / 4000, 854 / 6000f, 480 / 4000f, 1.5f };
+        render(s, "11-view-100");
+        s.viewCaption = false;   // RIGHT pressed: the map goes there at once, the picture follows
+        s.viewMap = new float[] { ((6000 - 854) / 2f + 427) / 6000, (4000 - 480) / 2f / 4000, 854 / 6000f, 480 / 4000f, 1.5f };
+        s.viewMapPending = true;
+        render(s, "11b-view-100-moving");
+        s.viewMapPending = false; s.viewMoves = false; s.viewCaption = true;   // a photo that can be seen at 100% only in its middle
+        s.viewMap = new float[] { (6000 - 854) / 2f / 6000, (4000 - 480) / 2f / 4000, 854 / 6000f, 480 / 4000f, 1.5f };
+        render(s, "11c-view-100-middle-only");
 
-        partials(six, m, thumbs);
+        partials(six, m, shelf);
 
         s = state();
         s.film = classic; s.rollNumber = 12; s.exposed = 9; s.length = 24;
@@ -273,6 +298,53 @@ public class RenderScreens {
             throw new IllegalStateException(problems.size() + " problem(s) in the screens");
         }
         System.out.println("checks: layers, overlay bands, window key, text sizes, contrast, overlaps, side-bar fit, palette: all pass");
+    }
+
+    /**
+     * Made-up developed frames across rolls, newest first, as Roll.developedAll lists them: the sheet reads them
+     * (Photos.Frames) as it reads MainActivity's.
+     */
+    static final class Shelf implements Photos.Frames {
+        final List<Object> thumbs = new ArrayList<Object>();
+        final List<Integer> numbers = new ArrayList<Integer>(), rolls = new ArrayList<Integer>(), ofs = new ArrayList<Integer>(), sizes = new ArrayList<Integer>();
+        final List<UiState.Film> films = new ArrayList<UiState.Film>();
+
+        /** Roll 'number' of 'of' frames, the first 'developed' of them developed (listed newest first), shown in this film. */
+        void roll(UiState.Film film, int number, int developed, int of, String[] names, File samples, String lut) throws Exception {
+            for (int k = developed; k >= 1; k--) {
+                thumbs.add(img(samples, names[k % names.length] + "-" + lut + ".png"));
+                numbers.add(k); rolls.add(number); ofs.add(of); films.add(film);
+            }
+            sizes.add(developed);
+        }
+
+        Photos.Sheet sheet() {
+            int[] n = new int[sizes.size()];
+            for (int i = 0; i < n.length; i++) n[i] = sizes.get(i);
+            return new Photos.Sheet(n);
+        }
+
+        public Object thumb(int i) { return thumbs.get(i); }
+        public int number(int i) { return numbers.get(i); }
+        public int roll(int i) { return rolls.get(i); }
+        public UiState.Film film(int i) { return films.get(i); }
+    }
+
+    /** Photos with frame 'sel' of the shelf chosen, as MainActivity fills it. */
+    static UiState photos(Shelf shelf, int sel) {
+        UiState s = state();
+        s.mode = UiState.SHEET; s.photosReady = true;
+        s.film = shelf.films.get(sel); s.rollNumber = shelf.rolls.get(sel); s.frameNumber = shelf.numbers.get(sel); s.frameOf = shelf.ofs.get(sel);
+        Photos.page(s, shelf.sheet(), sel, shelf);
+        return s;
+    }
+
+    /** The viewer on frame 7 of roll 12, this picture on show (null: none). */
+    static UiState viewer(UiState.Film film, Object picture) {
+        UiState s = state();
+        s.mode = UiState.VIEW; s.photosReady = true;
+        s.film = film; s.rollNumber = 12; s.frameNumber = 7; s.frameOf = 24; s.viewImage = picture;
+        return s;
     }
 
     /** The menu with this row chosen, as MainActivity builds it. */
@@ -387,8 +459,8 @@ public class RenderScreens {
         partialShare += Math.min(1, r[2] * r[3] / (b.width * 480));
     }
 
-    /** The keys that redraw only part of the screen, each checked (Choose film, the menu, the contact sheet). */
-    static void partials(List<UiState.Film> six, Ui.Menu m, List<Object> thumbs) throws Exception {
+    /** The keys that redraw only part of the screen, each checked (Choose film, the menu, Photos). */
+    static void partials(List<UiState.Film> six, Ui.Menu m, Shelf shelf) throws Exception {
         for (int f : new int[] { 2, 4 }) for (int l = 0; l < 3; l++) {   // UP/DOWN on Choose film
             UiState a = state();
             a.mode = UiState.LOAD; a.films = six; a.filmSel = f; a.lengthSel = l; a.liveCaption = "on";
@@ -407,13 +479,13 @@ public class RenderScreens {
             }
             prev = i;
         }
-        for (int[] t : new int[][] { { 6, 7 }, { 7, 6 }, { 4, 5 }, { 0, 1 }, { 13, 14 } }) {   // the contact sheet, a frame along
-            UiState a = state();
-            a.mode = UiState.SHEET; a.film = six.get(3); a.rollNumber = 3; a.thumbs = thumbs; a.sheetSel = t[0];
-            UiState b = a.copy();
-            b.sheetSel = t[1];
-            partial(a, b, "contact sheet, frame " + t[0] + " to " + t[1]);
+        for (int[] t : new int[][] { { 2, 3 }, { 3, 2 }, { 0, 1 }, { 1, 6 }, { 6, 1 }, { 4, 5 }, { 8, 9 }, { 10, 9 } }) {   // Photos, a frame along or a row within a roll
+            UiState a = photos(shelf, t[0]), b = photos(shelf, t[1]);
+            a.photoDate = "12 Oct 2026"; b.photoDate = "9 Oct 2026";   // when each was taken: in the redrawn part too
+            partial(a, b, "Photos, frame " + t[0] + " to " + t[1]);
         }
+        for (int[] t : new int[][] { { 6, 7 }, { 7, 6 }, { 14, 19 }, { 11, 12 } })   // into another roll (its title) or onto another page: all of it
+            if (Ui.dirty(photos(shelf, t[0]), photos(shelf, t[1])) != null) problems.add("Photos, frame " + t[0] + " to " + t[1] + ": another roll or page redrawn only in part");
         System.out.println("partial redraws: " + partials + " key changes checked, " + Math.round(partialShare * 100 / Math.max(1, partials)) + "% of the screen redrawn on average");
     }
 
@@ -749,7 +821,7 @@ public class RenderScreens {
     /** The screens to judge side by side: an earlier version's camera render (left) and this one's (right). */
     static final String[] COMPARE = { "1-home-choose-classic", "1b-home-choose-trix-endless", "1e-home-first-run", "3-home-roll", "2b-home-settling",
             "5-home-finished-lowbattery", "6-menu", "6c-menu-photos", "8-vf-ready", "8c-vf-locked", "8d-vf-cant-focus", "8s-vf-exposure-plus-third",
-            "8q-vf-endless-film-card", "8y-vf-coach", "8z-vf-fatal", "8l-vf-roll-finished", "8-darkroom", "9-sheet", "10-view-fit" };
+            "8q-vf-endless-film-card", "8y-vf-coach", "8z-vf-fatal", "8l-vf-roll-finished", "8-darkroom", "9-photos", "10-view-fit" };
 
     /** compare/NAME.png: before | after, labelled, at the camera's look. */
     static void compare(File base) throws Exception {
