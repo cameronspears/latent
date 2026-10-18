@@ -3329,12 +3329,19 @@ static ycc_entry *ycc_keep(const char *lut, const int *params, ycc_look *Y) {
  * into the film cache, its grain tile made, its Y'CbCr table made into g_ycc. The same functions make the
  * same tables a develop would, so the picture can't change; it only no longer waits for them (setup was
  * ~690 ms when the film changed). The caches are locked, so nothing else has to wait for it; a block
- * develop does (warm_wait), to use the table it is making rather than make another, and so does the next
- * fl_prewarm: one at a time.
+ * develop does (warm_wait), to use the table it is making rather than make another.
+ *
+ * Since v0.46.0 a develop's first frame has its own film made ready too, as the darkroom picks the frame
+ * (on the UI thread), while the worker opens the catalogue and Sony decodes the photo (~1 s). So fl_prewarm
+ * never waits: a film asked for while another is being made is made right after it by the same thread
+ * (only the latest asked for: an earlier one still waiting is no longer the next develop's). The thread
+ * lets go of the decoded previews first, as a block develop does, so it never holds more memory than the
+ * develop's own setup would.
  */
 static pthread_mutex_t g_warm_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_warm_cv = PTHREAD_COND_INITIALIZER;
-static int g_warm_running;     /* a prewarm thread is at work (detached; it clears this as it ends) */
+static int g_warm_running;     /* the prewarm thread is at work, or about to be (detached; it clears this as it ends) */
+static int g_warm_asked;       /* a film waits for it in g_warm_lut and g_warm_params */
 static char g_warm_lut[512];
 static int g_warm_params[FL_PARAM_COUNT];
 
@@ -3344,60 +3351,87 @@ static void warm_wait(void) {
     pthread_mutex_unlock(&g_warm_mu);
 }
 
-static void warm_done(void) {
-    pthread_mutex_lock(&g_warm_mu);
+/* Under g_warm_mu: the thread ends, and whatever still waits for it with it (the develop makes its own). */
+static void warm_end(void) {
+    g_warm_asked = 0;
     g_warm_running = 0;
     pthread_cond_broadcast(&g_warm_cv);
-    pthread_mutex_unlock(&g_warm_mu);
 }
 
 static void *warm_main(void *arg) {
     fl_look L;
-    char err[160];
-    const char *lut = g_warm_lut[0] ? g_warm_lut : NULL;   /* stays as it is until warm_done */
+    char err[160], path[sizeof g_warm_lut];
+    int params[FL_PARAM_COUNT];
+    const char *lut;
     ycc_entry *e;
     (void)arg;
 #ifdef __linux__
     {
-        unsigned long want = 1UL << HELPER_CORES[0];
-        if (syscall(__NR_sched_setaffinity, my_tid(), sizeof want, &want) == 0) setpriority(PRIO_PROCESS, my_tid(), HELPER_NICE);
+        /* core 1 or nothing, as a develop helper: a prewarm that can't have it doesn't run (never core 0, the
+           camera's), and the develop makes the same tables itself */
+        unsigned long want = 1UL << HELPER_CORES[0], got = 0;
+        if (syscall(__NR_sched_setaffinity, my_tid(), sizeof want, &want) != 0
+                || syscall(__NR_sched_getaffinity, my_tid(), sizeof got, &got) < 0 || got != want) {
+            pthread_mutex_lock(&g_warm_mu);
+            warm_end();
+            pthread_mutex_unlock(&g_warm_mu);
+            return NULL;
+        }
+        setpriority(PRIO_PROCESS, my_tid(), HELPER_NICE);
     }
 #endif
+    prev_forget();   /* the darkroom needs the memory more than the screen's decoded previews (up to 1.4 MB) */
     yc_tables();
-    if (look_init(&L, lut, g_warm_params, err, sizeof err) == 0) {
-        if (g_warm_params[FL_PARAM_GRAIN] > 0) {
-            int size = g_warm_params[FL_PARAM_GRAINSIZE];
-            grain_tile(size < 1 ? 1 : size > 4 ? 4 : size);
+    for (;;) {
+        pthread_mutex_lock(&g_warm_mu);
+        if (!g_warm_asked) break;   /* nothing more asked for: ends below, still holding the lock */
+        g_warm_asked = 0;
+        strcpy(path, g_warm_lut);
+        memcpy(params, g_warm_params, sizeof params);
+        pthread_mutex_unlock(&g_warm_mu);
+        lut = path[0] ? path : NULL;
+        if (look_init(&L, lut, params, err, sizeof err) == 0) {
+            if (params[FL_PARAM_GRAIN] > 0) {
+                int size = params[FL_PARAM_GRAINSIZE];
+                grain_tile(size < 1 ? 1 : size > 4 ? 4 : size);
+            }
+            if (!(e = ycc_get(lut, params))) {
+                ycc_look Y;
+                memset(&Y, 0, sizeof Y);
+                if (ycc_make(&L, &Y) == 0) e = ycc_keep(lut, params, &Y);
+            }
+            if (e) ycc_put(e);
+            look_free(&L);
         }
-        if (!(e = ycc_get(lut, g_warm_params))) {
-            ycc_look Y;
-            memset(&Y, 0, sizeof Y);
-            if (ycc_make(&L, &Y) == 0) e = ycc_keep(lut, g_warm_params, &Y);
-        }
-        if (e) ycc_put(e);
-        look_free(&L);
     }
-    warm_done();
+    warm_end();
+    pthread_mutex_unlock(&g_warm_mu);
     return NULL;
 }
 
 void fl_prewarm(const char *lut_path, const int *params) {
     pthread_t th;
     pthread_attr_t at;
-    int started = 0;
+    int start, started = 0;
     if (lut_path && strlen(lut_path) >= sizeof g_warm_lut) return;
     pthread_mutex_lock(&g_warm_mu);
-    while (g_warm_running) pthread_cond_wait(&g_warm_cv, &g_warm_mu);   /* the last one finished first */
     strcpy(g_warm_lut, lut_path ? lut_path : "");
     memcpy(g_warm_params, params, sizeof g_warm_params);
+    g_warm_asked = 1;
+    start = !g_warm_running;   /* else the thread at work makes it next */
     g_warm_running = 1;
     pthread_mutex_unlock(&g_warm_mu);
+    if (!start) return;
     if (pthread_attr_init(&at) == 0) {
         pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
         started = pthread_create(&th, &at, warm_main, NULL) == 0;
         pthread_attr_destroy(&at);
     }
-    if (!started) warm_done();
+    if (!started) {
+        pthread_mutex_lock(&g_warm_mu);
+        warm_end();
+        pthread_mutex_unlock(&g_warm_mu);
+    }
 }
 
 /*

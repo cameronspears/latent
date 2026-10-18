@@ -38,8 +38,9 @@ final class FilmCore {
 
     /**
      * The next develop's film (lutPath, highlight, shadow, grain, grain size from params) made ready on a
-     * thread of its own while this thread waits on something else: Sony's encoder. Returns at once (once an
-     * earlier one is done); the next develop waits for it if it isn't done. The picture is the same either way.
+     * thread of its own (on core 1) while this thread waits on something else: Sony's decoder or encoder.
+     * Returns at once, always (asked for while another is being made, it is made right after that one, the
+     * latest asked for only); the next develop waits for it if it isn't done. The picture is the same either way.
      */
     static native void prewarm(String lutPath, int[] params);
 

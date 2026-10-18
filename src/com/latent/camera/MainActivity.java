@@ -1318,6 +1318,7 @@ public class MainActivity extends Activity {
         samplesFor = "";
         if (!quiet) heroGen++;
         devViewOf = null;   // the roll asked about afresh (frames may have developed on an earlier visit)
+        devWarmed = null;   // the first frame's film is always made ready as it starts (developNext), whatever came before
         developing = r;
         developNow = false;   // the restart's 'at once' is spent: a waiting roll after this waits its 4 s untouched
         paused = false;
@@ -1403,6 +1404,7 @@ public class MainActivity extends Activity {
     private volatile File[] devView = new File[0];   // per frame: its developed file, or null
     private volatile Roll devViewOf;
     private volatile File devSource;                // the photo of the frame in the tray
+    private volatile String devWarmed;              // the photo whose film the last save made ready (FilmCore.prewarm)
 
     /**
      * Progress redraws during a develop: at most one per DEV_REDRAW_MS, and in the darkroom only of what
@@ -1537,6 +1539,7 @@ public class MainActivity extends Activity {
             nextParams[FilmCore.GRAIN] = 4; nextParams[FilmCore.GRAIN_SIZE] = 1;   // as params() gives a frame with no film
         }
         final boolean prepareNext = after >= 0;
+        final String nextPhoto = prepareNext ? r.frames.get(after) : null;
         final String film = r.stockFor(frame);   // on an endless roll, the film this frame was shot in
         final Stock stock = Stock.byId(films, film);
         devFrame = frame;
@@ -1553,6 +1556,11 @@ public class MainActivity extends Activity {
                 : params(src, stock.highlight, stock.shadow, stock.grain, stock.grainSize);
         p[FilmCore.SEED] = (int) (src.lastModified() ^ new File(r.frames.get(frame)).getName().hashCode());
         final String lut = stock == null ? null : stock.lut.getPath();
+        // this frame's own film made ready now (on core 1; the call never waits) unless the frame before made it
+        // ready while Sony saved: a develop's first frame, or one after a frame that never reached its save. It has
+        // the worker's catalogue, Sony's decode and the scaler (~1 s) to be made in, where the develop's setup would
+        // wait for it (675 ms on a film change in v0.43.0, an estimated 0.2-0.4 s more with v0.46.0's grain)
+        if (!r.frames.get(frame).equals(devWarmed)) FilmCore.prewarm(lut, p);
         screen.invalidate();
         final boolean behind = devQuiet;   // developing behind the screen: the screen always comes first
         worker.execute(new Runnable() {
@@ -1576,7 +1584,7 @@ public class MainActivity extends Activity {
                         int[] hp = p.clone();
                         hp[FilmCore.THREADS] = DEVELOP_THREADS;   // the look's threads (the software fallback keeps its own)
                         final long draws0 = drawCount, drawMs0 = drawMs, stateMs0 = drawStateMs;
-                        h.beforeSave = !prepareNext ? null : new Runnable() { public void run() { FilmCore.prewarm(nextLut, nextParams); } };
+                        h.beforeSave = !prepareNext ? null : new Runnable() { public void run() { FilmCore.prewarm(nextLut, nextParams); devWarmed = nextPhoto; } };
                         HardwareDevelop.Print print = h.develop(src, lut, hp, progress);
                         h.beforeSave = null;
                         final String draws = " setup=" + h.look[FilmCore.T_SETUP] + (h.look[FilmCore.T_WARM] != 0 ? " (ready)" : "") + " draws=" + (drawCount - draws0) + "/" + (drawMs - drawMs0) + "ms"

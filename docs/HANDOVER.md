@@ -159,6 +159,19 @@ from scratch, and a new look, Painterly, after the photographer Alex Kittoe (ale
   level, none by more (v0.45.0's looks: about 4%). The table's mean error stays at most 1.24/255 (limit
   1.5). `JniTest` and `frametest.c` allowed 6%; they now allow 8%, and JniTest also fails any value off
   by more than a level. The user was told; a finer live table is the fix if it ever shows.
+- **The first frame's film made ready early** (`MainActivity.developNext`, `fl_prewarm`): a develop's
+  first frame, or one after a frame that never reached its save, has its film read, its grain tile and
+  its Y'CbCr table made on core 1 as the darkroom picks it, while the worker opens the catalogue and
+  Sony decodes and scales the photo (~1 s), not in the develop's setup. Until now only a frame after a
+  save had that (v0.43.0). `fl_prewarm` never waits any more (it's called on the UI thread): one asked
+  for while another is being made runs right after it on the same thread, the latest only. The thread
+  runs on core 1 or not at all (the pin is checked, as the develop helpers' are), and it lets go of
+  Choose film's decoded previews first, as a block develop does. So memory never peaks above the
+  develop's own setup: a new grain tile's workings are ~3.2 MB (1 MB of it the tile, kept), the film
+  30 KB, the Y'CbCr table 94 KB, all in Latent's heap, while Sony's decode sits in its image memory, as
+  the next frame's prewarm has sat beside Sony's encoder since v0.43.0. No Sony calls; every develop
+  identical (`sony-test.sh` now also asks for the right film while the wrong one is still being made,
+  and checks that the develop used it).
 - The APK is 2.17 MB (five looks, down from six).
 
 ## What v0.45.0 changes (Mac-tested only)
@@ -439,9 +452,11 @@ The looks (v0.46.0):
 - `LATENT/LUTS/` on the card: the five built-ins' first lines read `# Latent look 2.` once Latent has
   run (the old four replaced, `PAINTRLY.CUB` added); `CLASSNEG.CUB` and `PARTY800.CUB` stay, unused
   unless a roll is in them. "Looks not installed: …" as a toast means the replacement failed.
-- `TIMING.TXT`'s `setup=` on the first frame of a develop: v0.46.0's grain tile costs more to build
-  than v0.45.0's (an estimated 0.2-0.4 s more, once per session and grain size). Later frames should
-  show `(ready)` as before.
+- `TIMING.TXT`'s `setup=` on the first frame of a develop: `(ready)` and tens of ms, as on later
+  frames. v0.46.0's grain tile costs more to build than v0.45.0's (an estimated 0.2-0.4 s more, once
+  per session and grain size), but the first frame's film is now made while Sony decodes it. A
+  `setup=` of hundreds of ms with `(ready)` is the part the decode didn't cover. That frame's
+  `decode=` and `image=` should stay ~0.55 and ~0.44 s (the prewarm runs beside them on core 1).
 - By eye, on the user's own photos: every look, and Painterly's paper on a phone or computer at full
   size. The user judges these; the numbers in `make_luts.py` and `Stock.java` are where to change them.
 

@@ -136,9 +136,9 @@ int fl_cache_lut(const char *lut_path, char *err, int errlen);
  * ms[1] ms with the fast reader, ms[2] rows the fast reader took, ms[3] rows it left to sscanf. 0 = identical tables
  * and identical floats in every row it took, 1 = not, -1 = error. */
 int fl_cube_check(const char *path, int *ms, char *err, int errlen);
-/* The next develop's film made ready on a thread of its own (file read, grain tile, Y'CbCr table), while
- * the caller waits on something else (Sony's encoder). Returns at once (once an earlier one is done); the
- * next block develop waits for it. */
+/* The next develop's film made ready on a thread of its own on core 1 (file read, grain tile, Y'CbCr table), while
+ * the caller waits on something else (Sony's decoder or encoder). Returns at once, always: asked for while another is
+ * being made, it is made right after that one (only the latest asked for). The next block develop waits for both. */
 void fl_prewarm(const char *lut_path, const int *params);
 /* Threads the last fl_develop_blocks used; note gets why a helper didn't join, if one didn't. */
 int fl_last_threads(char *note, int len);

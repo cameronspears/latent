@@ -121,10 +121,20 @@ int main(int argc, char **argv) {
             dst.size = dg[7]; dst.type = 2; dst.mem = malloc(dst.size);
             memset(dst.mem, 0xA5, dst.size);        /* sentinel: padding must stay 0xA5 */
             calls_read = calls_write = refused = 0;
-            if (warm) { if (b % 2) fl_forget_lut(); fl_prewarm(b % 3 == 2 ? other : argv[2], params); }   /* odd: from cold; every third: the wrong film */
+            if (warm) {   /* odd: from cold; every third: the wrong film; 1 and 4: the right one asked for while the wrong one is */
+                if (b % 2) fl_forget_lut();   /* still being made (it waits its turn, never the caller), and 4 asks once more between */
+                if (b == 1 || b == 4) fl_prewarm(other, params);
+                if (b == 4) fl_prewarm(other, params);
+                fl_prewarm(b % 3 == 2 ? other : argv[2], params);
+            }
             if (sb_develop(from, fromg, &dst, dg, blocks[b], argv[2], params, NULL, NULL) != 0) {
                 printf("  FAIL  canvas %s block %d: %s\n", i == 1 ? "padded" : i == 2 ? "same" : "contiguous", blocks[b], sb_last_error());
                 pass = 0; free(dst.mem); continue;
+            }
+            if (warm && b % 3 != 2) {   /* the right film was asked for last: the develop used its table */
+                int t[FL_TIME_COUNT];
+                fl_last_timing(t);
+                if (!t[FL_TIME_WARM]) { printf("  FAIL  canvas %d block %d: the film made ready wasn't used\n", i, blocks[b]); pass = 0; }
             }
             /* gather the picture, check padding */
             unsigned char *pic = malloc((size_t)w * 2 * h);

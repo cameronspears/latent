@@ -382,8 +382,11 @@ as it can:
 - **256 KB reads and writes** instead of 4 KB. Each one is a round trip through Sony's card layer.
 - **Grain texture cached** per grain size, so it's built once per session instead of once per save
   or preview. v0.46.0's grain takes more work to build than v0.45.0's noise (an estimated 0.2–0.4 s
-  on the camera, once per session, before the first frame or while Sony saves one); `setup=` in
-  `TIMING.TXT` will show it.
+  on the camera, once per session).
+- **Each frame's film made ready ahead,** on core 1: its look file read, its grain texture and its
+  colour table made while Sony saves the frame before, or, for a develop's first frame, while Sony
+  decodes it (about a second), so the develop starts at once. `setup=` in `TIMING.TXT` shows
+  `(ready)` when it did.
 - **The backlight** is the largest share of the camera's power while a screen is up (the panel is a
   backlit LCD, so Latent's black saves nothing by itself). The darkroom runs at about 5%, a screen
   left alone rests at about 30%, and an unattended roll stays dim when it's done. Whether the A5100
