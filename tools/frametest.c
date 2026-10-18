@@ -305,6 +305,41 @@ static void test_versus_reference(frame_jpg *fr, int nfr) {
     free(a); free(b); free(ov);
 }
 
+/* ---- screens of odd sizes and rows that don't start on a word (the pairs then go through a row of their own),
+ * with an overlay of that size: within a level of v0.44.1's, and nothing written outside each row */
+static void test_odd_sizes(frame_jpg *fr) {
+    static const int SIZES[5][3] = { { 541, 479, 541 }, { 539, 201, 542 }, { 540, 480, 543 }, { 17, 9, 20 }, { 2, 2, 3 } };
+    fl_frame_ctx *c = fl_frame_new();
+    int k, ok = 1, worst = 0, info[FL_FRAME_INFO], tm[FL_FRAME_TIMES];
+    char err[256];
+    for (k = 0; k < 5; k++) {
+        int ow = SIZES[k][0], oh = SIZES[k][1], stride = SIZES[k][2], x, y, o;
+        unsigned short *a = (unsigned short *)malloc(sizeof(unsigned short) * (stride * oh + 1)), *b = (unsigned short *)malloc(sizeof(unsigned short) * (stride * oh + 1));
+        unsigned int *ov = (unsigned int *)calloc((size_t)ow * oh, sizeof(unsigned int));
+        for (y = 0; y < oh; y++) for (x = 0; x < ow; x++) ov[y * ow + x] = y < oh / 4 ? 0x80000000u : (x % 5 == 0 ? 0xFFF4F1EAu : (x % 5 == 1 ? 0x60FFFFFFu : 0));
+        for (o = 0; o < 2; o++) {
+            fl_set_overlay(o ? ov : NULL, ow, oh);
+            /* rows start at odd halfwords: the output offset by one */
+            for (x = 0; x < stride * oh + 1; x++) a[x] = b[x] = 0xBEEF;
+            if (fl_frame(c, fr->jpg, fr->len, FILMS[2], PARAMS, FL_F_LEVEL, 3, a + 1, ow, oh, stride, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)
+                    || fl_frame(c, fr->jpg, fr->len, FILMS[2], PARAMS, FL_F_REFERENCE, 3, b + 1, ow, oh, stride, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)) { ok = 0; continue; }
+            if (a[0] != 0xBEEF) ok = 0;
+            for (y = 0; y < oh; y++) {
+                for (x = 0; x < ow; x++) {
+                    int la[3], lb[3], ch;
+                    lv(a[1 + y * stride + x], la); lv(b[1 + y * stride + x], lb);
+                    for (ch = 0; ch < 3; ch++) if (abs(la[ch] - lb[ch]) > worst) worst = abs(la[ch] - lb[ch]);
+                }
+                for (x = ow; x < stride && 1 + y * stride + x < stride * oh + 1; x++) if (a[1 + y * stride + x] != 0xBEEF) ok = 0;   /* the gap after each row untouched */
+            }
+        }
+        free(a); free(b); free(ov);
+    }
+    fl_set_overlay(NULL, 0, 0);
+    check(ok && worst <= 1, "screens of odd sizes, rows not on a word, with overlays: within %d level of v0.44.1's, nothing written between rows", worst);
+    fl_frame_free(c);
+}
+
 /* ---- the still scene: each frame's signature as computed here from its decode, F_STILL stopping on it */
 static void test_still(frame_jpg *fr, int nfr) {
     fl_frame_ctx *c = fl_frame_new();
@@ -507,6 +542,7 @@ int main(int argc, char **argv) {
     }
     test_versus_reference(fr, nfr);
     test_still(fr, nfr);
+    test_odd_sizes(&fr[0]);
     if (do_bench) bench(fr, nfr);
     if (dir) renders(dir, fr, nfr);
     for (i = 0; i < nfr; i++) free(fr[i].jpg);
