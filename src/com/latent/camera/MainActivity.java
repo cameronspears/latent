@@ -889,7 +889,7 @@ public class MainActivity extends Activity {
             if (!current.endless() && exposed >= current.length) { toast("Roll finished"); return; }
             mode = PHOTO;
             readBattery();
-            vf.show();
+            vf.show();   // frames again at once; its surface back on the screen with the first of them
             if (s1Held) vf.halfDown();
             screen.invalidate();
             return;
@@ -906,16 +906,19 @@ public class MainActivity extends Activity {
                 liveSurface.setVisibility(on ? View.VISIBLE : View.GONE);
                 screen.invalidate();
             }
-            public void changed() {
-                screen.invalidate();
-                if (vf != null && vf.onSurface()) presentPicture();
+            public void changed() { vfChanged(); }
+            public void frame() {   // a new live frame: only the picture's area (or its own surface, under the last state)
+                if (mode != PHOTO || vf == null) return;   // hidden behind MENU: nothing of it is on screen
+                if (vf.onSurface()) { presentPicture(false); return; }
+                invalidatePicture();
             }
-            public void frame() {   // a new live frame: only the picture's area (or its own surface)
-                if (vf != null && vf.onSurface()) { presentPicture(); return; }
-                int w = screen.getWidth(), side = Math.round((logicalWidth - 720) / 2 * w / logicalWidth);
-                if (w <= 0 || side <= 0) screen.invalidate(); else screen.invalidate(side - 1, 0, w - side + 1, screen.getHeight());
+            public void animate() {   // what's over the picture moves: a fresh state over it
+                if (mode != PHOTO || vf == null) return;
+                if (vf.onSurface()) { presentPicture(true); return; }
+                invalidatePicture();
             }
             public void pictureGone() { dropPictureSurface(); screen.invalidate(); }
+            public void picturePlace(boolean on) { placePicture(on); }
             public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
             public void shot(File photo, String film) { vfShot(photo, film); }
             public void hud(boolean on) { screen.setVisibility(on ? View.VISIBLE : View.INVISIBLE); }
@@ -925,11 +928,16 @@ public class MainActivity extends Activity {
                 restarting = false;
                 relaunchWhenClosed = false;
                 unprepare();
-                status = what;   // stays up: nothing else can happen until the camera is switched off
+                // nothing else can happen until the camera is switched off: the viewfinder says so, full screen
+                // (UiState.fatal; it was a toast that never cleared), and MENU no longer leaves it
+                mode = PHOTO;
+                status = "";
                 ui.removeCallbacks(clearToast);
                 screen.invalidate();
+                if (vf != null && vf.onSurface()) presentPicture(true);
             }
             public void closed(String why) {
+                flushFilmSave();   // the wheel's last film onto the card first
                 vf = null;
                 dropPictureSurface();   // the camera given back first
                 screen.setVisibility(View.VISIBLE);
@@ -942,6 +950,9 @@ public class MainActivity extends Activity {
                 screen.invalidate();
             }
         });
+        // the roll's film and the wheel's next ones read ahead into the image core's film cache
+        int i = Math.max(0, stocks.indexOf(st)), n = stocks.size();
+        if (st != null && n > 0) vf.prewarm(st.lut.getPath(), stocks.get((i + 1) % n).lut.getPath(), stocks.get((i + n - 1) % n).lut.getPath());
         // the picture's area on screen in real pixels: the 3:2 area (720 x 480 of the design space)
         final int liveW = Math.round(720f * screen.getWidth() / logicalWidth);
         if (screen.getWidth() > 0) vf.setLiveSize(liveW, screen.getHeight());
@@ -953,9 +964,12 @@ public class MainActivity extends Activity {
                 screen.invalidate();
             }
         };
-        int path = prefs.getInt(ScreenTest.P_PATH, 0);
-        if ((path == 2 || path == 3) && liveLook() && liveW > 0) {
-            // the picture on a 16-bit surface of its own, as the Screen test chose (31.5 frames a second against 20.9):
+        // The picture on a 16-bit surface of its own is the proven way (the Screen test chose it, 31.5 frames a second
+        // against 20.9; on the camera since v0.43.1), so it is the default in code, not only the Screen test's pref:
+        // that only overrides it with Latent's own screen (0, or 1: a 16-bit window, which does nothing on this body).
+        // Its quarter-size surface (4) isn't a way the viewfinder has, so it gets the whole surface too.
+        int path = prefs.getInt(ScreenTest.P_PATH, 2);
+        if (path != 0 && path != 1 && liveLook() && liveW > 0) {
             // made before the camera opens, which waits for it (at most 2 s, then the picture goes through Latent's screen)
             try {
                 final android.view.SurfaceView pv = new android.view.SurfaceView(this);
@@ -971,9 +985,11 @@ public class MainActivity extends Activity {
                     public void surfaceDestroyed(android.view.SurfaceHolder holder) { if (vf != null) vf.pictureSurface(null); }
                 });
                 android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(liveW, screen.getHeight());
-                lp.leftMargin = (screen.getWidth() - liveW) / 2;
+                pictureLeft = (screen.getWidth() - liveW) / 2;
+                lp.leftMargin = pictureLeft;
                 lp.gravity = android.view.Gravity.LEFT | android.view.Gravity.TOP;
                 pictureView = pv;
+                pictureOnScreen = true;
                 root.addView(pv, lp);
                 ui.postDelayed(open, 2000);
                 return;
@@ -986,24 +1002,85 @@ public class MainActivity extends Activity {
     }
 
     private android.view.SurfaceView pictureView;   // the viewfinder's picture surface, while there is one
-    private final Runnable dropSurface = new Runnable() { public void run() { if (mode != PHOTO) { dropPictureSurface(); screen.invalidate(); } } };
+    private int pictureLeft;                        // its place on the screen
+    private boolean pictureOnScreen;                // there, or moved off it (hidden, the look off)
+    private final Runnable dropSurface = new Runnable() {
+        public void run() {
+            if (mode == PHOTO) return;
+            if (vf != null) placePicture(false);   // the viewfinder kept open behind: moved off the screen, kept
+            else dropPictureSurface();
+            screen.invalidate();
+        }
+    };
 
     private void dropPictureSurface() {
         if (pictureView == null) return;
         if (vf != null) vf.pictureSurface(null);
         try { root.removeView(pictureView); } catch (Throwable ignored) { }
         pictureView = null;
+        pictureOnScreen = false;
     }
 
-    /** The viewfinder's state to its picture surface: what moves over the newest picture. UI thread. */
-    private void presentPicture() {
+    /**
+     * The picture's surface on the screen, or moved off it to the right (a SurfaceView's window may lie outside
+     * the screen, FLAG_LAYOUT_NO_LIMITS; nothing of it is then shown or composed), so it is kept, not made again,
+     * with the camera open. Its own scroll is nudged too: a SurfaceView moves its window when the view tree
+     * reports a scroll (as one in a scrolling list follows it), so the move doesn't wait on it being drawn, which a
+     * view outside its parent may not be.
+     */
+    private void placePicture(boolean on) {
+        on &= mode == PHOTO;
+        if (pictureView == null || on == pictureOnScreen) return;
+        try {
+            android.widget.FrameLayout.LayoutParams lp = (android.widget.FrameLayout.LayoutParams) pictureView.getLayoutParams();
+            lp.leftMargin = on ? pictureLeft : screen.getWidth() + 64;
+            pictureView.setLayoutParams(lp);
+            pictureView.scrollTo(on ? 0 : 1, 0);   // its content isn't drawn by the view, so this only reports the move
+            pictureOnScreen = on;
+        } catch (Throwable e) {   // it can't move: away with it (the picture then goes through Latent's screen)
+            devLog("viewfinder: picture surface not moved (" + Probe.why(e) + ")");
+            dropPictureSurface();
+        }
+    }
+
+    /** The picture's area of Latent's screen drawn again (the picture through it, not on its own surface). */
+    private void invalidatePicture() {
+        int w = screen.getWidth(), side = Math.round((logicalWidth - 720) / 2 * w / logicalWidth);
+        if (w <= 0 || side <= 0) screen.invalidate(); else screen.invalidate(side - 1, 0, w - side + 1, screen.getHeight());
+    }
+
+    /**
+     * Something in the viewfinder changed (UI thread). On its own surface, a fresh state goes to the presenter,
+     * and Latent's screen (the side bars) is drawn again only when what it shows changed (Ui.windowKey: focus
+     * events, the lamp, notes and shots mostly leave the bars as they were); else the whole screen.
+     */
+    private void vfChanged() {
+        if (mode != PHOTO || vf == null) return;   // hidden behind MENU: nothing of it is on screen
+        if (!vf.onSurface()) { screen.invalidate(); return; }
+        UiState s = presentPicture(true);
+        if (!Ui.windowKey(s).equals(windowDrawn)) screen.invalidate();
+    }
+
+    private String windowDrawn;   // Ui.windowKey of what Latent's screen last drew of the viewfinder (null: something else)
+    private UiState presented;    // the state the presenter has
+
+    /**
+     * The viewfinder's state to its picture surface: what moves over the newest picture. UI thread. Without
+     * rebuild, the newest picture goes up under the state it has, unless that no longer fits (v0.44 built a
+     * whole state for every frame). The state handed over is never changed afterwards.
+     */
+    private UiState presentPicture(boolean rebuild) {
+        if (!rebuild && presented != null && vf.presentAgain()) return presented;
         UiState s = state();
         vf.layer(s);
         vf.present(s);
+        presented = s;
+        return s;
     }
 
     /** One picture stored (photo is its file, or null when the catalogue didn't name it). */
     private void vfShot(final File photo, final String shotFilm) {
+        flushFilmSave();   // a film the wheel chose is the roll's on the card before this frame is noted
         vfWaiting++;
         exposed++;
         final Roll r = current;
@@ -1029,7 +1106,7 @@ public class MainActivity extends Activity {
         }
         readBattery();
         saveSnapshot();
-        screen.invalidate();
+        if (mode == PHOTO && vf != null) vfChanged(); else screen.invalidate();   // the counter: in the type over the picture
     }
 
     private final Runnable closeWhenFinished = new Runnable() { public void run() { hideViewfinder(); } };
@@ -1101,13 +1178,17 @@ public class MainActivity extends Activity {
      * Latent is left.
      */
     private void hideViewfinder() {
-        if (vf == null) return;
+        if (vf == null || vf.held()) return;   // a picture that won't save: its screen stays until the camera is off
         ui.removeCallbacks(closeWhenFinished);
+        flushFilmSave();   // the wheel's last film onto the card (the darkroom reads it there)
         int taken = Math.max(vfWaiting, vf.shots);   // listed or not yet: the hand-back waits for them
-        dropPictureSurface();   // it's on top of everything: the camera back and the darkroom show at once
-        if (taken > 0) { restartToDevelop(taken + " picture(s) to develop"); return; }
-        vf.hide();
+        if (taken > 0) {
+            dropPictureSurface();   // it's on top of everything: the darkroom shows at once
+            restartToDevelop(taken + " picture(s) to develop");
+            return;
+        }
         if (mode == PHOTO) mode = BACK;
+        vf.hide();   // its surface moved off the screen (kept for the return), the camera back shows at once
         screen.invalidate();
     }
 
@@ -1133,21 +1214,40 @@ public class MainActivity extends Activity {
                 for (File f : current.exposures(photos)) if (!current.looks.containsKey(Roll.number(f))) current.lookFor(f, current.stock);
             }
             current.stock = next.id;
-            final Roll r = current;
-            prefs.edit().putString("lastStock", next.id).commit();
-            worker.execute(new Runnable() {
-                public void run() {
-                    try { r.save(); } catch (Exception e) { devLog(r.label() + ": film not changed on the card (" + Probe.why(e) + ")"); }
-                }
-            });
+            prefs.edit().putString("lastStock", next.id).apply();   // written behind (API 9), not on this thread
+            filmToSave = current;   // the roll's film onto the card once the wheel settles (and at the next frame, MENU, closing)
+            ui.removeCallbacks(saveFilm);
+            ui.postDelayed(saveFilm, FILM_SAVE_MS);
             vf.setFilm(next);
-            saveSnapshot();
+            int j = Math.max(0, stocks.indexOf(next)), n = stocks.size();   // and the films either side of it read ahead
+            vf.prewarm(stocks.get((j + 1) % n).lut.getPath(), stocks.get((j + n - 1) % n).lut.getPath());
         }
         vf.showCard();
     }
 
+    /** After the wheel stops: one card write for a turn through several films (v0.44 wrote ROLL.TXT at every click). */
+    static final long FILM_SAVE_MS = 1000;
+    private Roll filmToSave;   // the roll whose film the wheel changed, not yet on the card
+    private final Runnable saveFilm = new Runnable() { public void run() { flushFilmSave(); } };
+
+    /** The wheel's film onto the card now (ROLL.TXT, on the worker, as before) and into the snapshot, if one waits. */
+    private void flushFilmSave() {
+        ui.removeCallbacks(saveFilm);
+        final Roll r = filmToSave;
+        if (r == null) return;
+        filmToSave = null;
+        Runnable save = new Runnable() {
+            public void run() {
+                try { r.save(); } catch (Exception e) { devLog(r.label() + ": film not changed on the card (" + Probe.why(e) + ")"); }
+            }
+        };
+        try { worker.execute(save); } catch (java.util.concurrent.RejectedExecutionException e) { save.run(); }   // Latent closing down
+        saveSnapshot();
+    }
+
     /** Keys while the viewfinder is open. */
     private void vfKey(int keyCode, KeyEvent e, boolean down) {
+        vf.touched();   // any key: live view back to its full rate at once
         int sc = e.getScanCode();
         boolean half = sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS, full = sc == SC_S2 || keyCode == KeyEvent.KEYCODE_CAMERA;
         if (half) {
@@ -2392,7 +2492,7 @@ public class MainActivity extends Activity {
                 break;
             case PHOTO: {
                 if (vf != null) vf.fill(s);
-                for (Stock st : stocks) s.looks.add(film(st));
+                s.looks = vfLooks();   // made once, not for every frame (Ui only reads it)
                 s.lookSel = Math.max(0, stocks.indexOf(cur));
                 s.exposed = vfBase + (vf != null ? vf.shots : 0);
                 if (current != null) { s.length = current.length; s.endless = current.endless(); }
@@ -2512,6 +2612,20 @@ public class MainActivity extends Activity {
         return s;
     }
 
+    private List<UiState.Film> looksMade;   // the viewfinder's films, as made from looksOf
+    private List<Stock> looksOf;
+
+    /** The films as the viewfinder shows them, made again only when the films do (a new list from the card). */
+    private List<UiState.Film> vfLooks() {
+        if (looksMade == null || looksOf != stocks) {
+            List<UiState.Film> l = new ArrayList<UiState.Film>();
+            for (Stock st : stocks) l.add(film(st));
+            looksMade = l;
+            looksOf = stocks;
+        }
+        return looksMade;
+    }
+
     private UiState.Film film(Stock st) {
         if (st == null) return null;
         UiState.Film f = new UiState.Film();
@@ -2557,7 +2671,8 @@ public class MainActivity extends Activity {
                 vf.layer(s);   // the type over the picture comes in the frames themselves
                 if (vf.onSurface()) s.vfPart = UiState.PART_WINDOW;   // the picture and what's over it are on its own surface
             }
-            if (pictureView != null && mode != PHOTO) ui.post(dropSurface);   // it's on top: away with it off the viewfinder
+            windowDrawn = mode == PHOTO && s.vfPart == UiState.PART_WINDOW ? Ui.windowKey(s) : null;
+            if (pictureOnScreen && mode != PHOTO) ui.post(dropSurface);   // it's on top: off the screen, away from the viewfinder
             Ui.draw(gfx, s);
             c.restore();
             drawCount++;
