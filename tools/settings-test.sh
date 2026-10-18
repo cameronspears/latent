@@ -11,6 +11,6 @@ clang -O1 -g -Wall -Wno-unused-parameter -dynamiclib -DSETTINGS_HOST_TEST -I"$JH
   -o "$O/liblatent.dylib" jni/settings_bridge.c
 "$JH/bin/javac" -nowarn -cp "$AJ" -d "$O/classes" src/com/latent/camera/CameraSettings.java src/com/latent/camera/NeutralSettings.java \
   src/com/latent/camera/HardwareDevelop.java src/com/latent/camera/CpuGate.java src/com/latent/camera/Probe.java src/com/latent/camera/Library.java \
-  src/com/latent/camera/SonyMemory.java src/com/latent/camera/FilmCore.java src/com/latent/camera/Stock.java \
+  src/com/latent/camera/SonyMemory.java src/com/latent/camera/FilmCore.java src/com/latent/camera/Stock.java src/com/latent/camera/Roll.java \
   tests/com/latent/camera/SettingsTest.java 2>&1 | grep -v "^Note" || true
 cd "$O" && DYLD_LIBRARY_PATH="$PWD" "$JH/bin/java" -Djava.library.path="$PWD" -cp "classes:$AJ" com.latent.camera.SettingsTest "$PWD/card"
