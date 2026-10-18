@@ -80,7 +80,8 @@ public class MainActivity extends Activity {
 
     // card state, refreshed on resume
     private List<File> photos = new ArrayList<File>();
-    private List<Stock> stocks = new ArrayList<Stock>();
+    private List<Stock> stocks = new ArrayList<Stock>();   // the films offered for a new roll
+    private List<Stock> films = new ArrayList<Stock>();    // and every film a roll can be in: retired ones too (Stock.all)
     private List<Roll> rolls = new ArrayList<Roll>();
     private Roll current;              // the loaded roll, if any
     private int exposed;               // photos on it so far
@@ -328,7 +329,8 @@ public class MainActivity extends Activity {
                     public void run() {
                         refreshing--;
                         highestOnCard = Math.max(highestOnCard, highest);
-                        stocks = st;
+                        films = st;
+                        stocks = Stock.offered(st);
                         rolls = ro;
                         photos = ph;
                         cameraRoll = listedPaths;
@@ -551,7 +553,7 @@ public class MainActivity extends Activity {
      */
     private void saveSnapshot(boolean now) {
         SharedPreferences.Editor e = prefs.edit();
-        Stock st = current == null ? null : Stock.byId(stocks, current.stock);
+        Stock st = current == null ? null : Stock.byId(films, current.stock);
         if (st == null) e.remove("snap");
         else e.putString("snap", st.title + "|" + st.iso + "|" + st.body + "|" + st.band + "|" + st.accent + "|"
                 + current.number + "|" + exposed + "|" + current.length + "|" + current.state);
@@ -701,7 +703,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (!current.endless() && exposed >= current.length) { toast("Roll finished. Press \u2299 to develop."); return; }
-        Stock st = Stock.byId(stocks, current.stock);
+        Stock st = Stock.byId(films, current.stock);
         mode = PHOTO;
         s1Opened = s1Held;
         vfBase = exposed;
@@ -824,7 +826,7 @@ public class MainActivity extends Activity {
             vfHighestAtOpen = highestOnCard;
             devLog("viewfinder: shown again on " + current.label() + " (" + exposed + " exposed): the roll changed behind MENU");
         }
-        Stock st = Stock.byId(stocks, current.stock);
+        Stock st = Stock.byId(films, current.stock);
         vf.setFilm(st);   // the roll's film on live view and the next picture (UI thread, as the wheel's; none if its look has gone, as at opening)
         if (st == null) return;
         int i = Math.max(0, stocks.indexOf(st)), n = stocks.size();   // read ahead, as at opening (films already read: nothing)
@@ -965,7 +967,7 @@ public class MainActivity extends Activity {
         restarting = true;
         devLog("restarting to develop: " + why);
         prepared = new Intent();
-        Stock st = r == null ? null : Stock.byId(stocks, r.stock);
+        Stock st = r == null ? null : Stock.byId(films, r.stock);
         if (st != null) {
             prepared.putExtra(Relaunch.EXTRA_FILM, st.title).putExtra(Relaunch.EXTRA_ISO, st.iso).putExtra(Relaunch.EXTRA_ACCENT, st.accent)
                     .putExtra(Relaunch.EXTRA_BODY, st.body).putExtra(Relaunch.EXTRA_BAND, st.band);
@@ -1042,9 +1044,9 @@ public class MainActivity extends Activity {
     private void vfFilm(int step) {
         if (vf == null) return;
         if (current != null && (current.endless() || filmFresh()) && stocks.size() > 1) {
-            Stock now = Stock.byId(stocks, current.stock);
-            int i = Math.max(0, stocks.indexOf(now));
-            final Stock next = stocks.get((i + step + stocks.size()) % stocks.size());
+            Stock now = Stock.byId(films, current.stock);
+            int i = stocks.indexOf(now), n0 = stocks.size();   // from a retired film (not offered): to the first or the last
+            final Stock next = stocks.get(i < 0 ? (step > 0 ? 0 : n0 - 1) : (i + step + n0) % n0);
             if (current.endless()) {   // what's shot already keeps the film it was shot in
                 for (String f : current.frames) if (!current.looks.containsKey(Roll.number(new File(f)))) current.lookFor(new File(f), current.stock);
                 for (File f : current.exposures(photos)) if (!current.looks.containsKey(Roll.number(f))) current.lookFor(f, current.stock);
@@ -1525,7 +1527,7 @@ public class MainActivity extends Activity {
         // the frame after this one: its film is made ready while Sony saves this one (FilmCore.prewarm)
         int after = -1;
         for (int i = 0; i < view.length && after < 0; i++) if (i != frame && !failed.contains(i) && view[i] == null) after = i;
-        Stock nextStock = after < 0 ? null : Stock.byId(stocks, r.stockFor(after));
+        Stock nextStock = after < 0 ? null : Stock.byId(films, r.stockFor(after));
         final String nextLut = after < 0 || nextStock == null ? null : nextStock.lut.getPath();
         final int[] nextParams = new int[FilmCore.COUNT];
         if (nextStock != null) {
@@ -1536,7 +1538,7 @@ public class MainActivity extends Activity {
         }
         final boolean prepareNext = after >= 0;
         final String film = r.stockFor(frame);   // on an endless roll, the film this frame was shot in
-        final Stock stock = Stock.byId(stocks, film);
+        final Stock stock = Stock.byId(films, film);
         devFrame = frame;
         devPct = 0;
         devTrayShown = 0;   // the full redraw below draws the tray at step 0 (empty): no tray redraw until step 1
@@ -2073,7 +2075,7 @@ public class MainActivity extends Activity {
     /** How a frame's film is shown: its own (an endless roll's frames each have theirs), or its name alone when the look has left the card. */
     private UiState.Film shotFilm(Roll.Shot shot) {
         String id = shot.roll.stockFor(shot.number - 1);
-        UiState.Film f = Ui.film(Stock.byId(stocks, id));
+        UiState.Film f = Ui.film(Stock.byId(films, id));
         if (f == null) {
             f = new UiState.Film();
             f.title = id;
@@ -3085,7 +3087,7 @@ public class MainActivity extends Activity {
         s.battery = battery;
         s.toast = status;
         s.width = logicalWidth;
-        Stock cur = current == null ? null : Stock.byId(stocks, current.stock);
+        Stock cur = current == null ? null : Stock.byId(films, current.stock);
         switch (mode) {
             case BACK:
                 if (!ready) {   // the card is still being read: show the roll as last seen, no controls yet
@@ -3116,8 +3118,8 @@ public class MainActivity extends Activity {
                 break;
             case PHOTO: {
                 if (vf != null) vf.fill(s);
-                s.looks = vfLooks();   // made once, not for every frame (Ui only reads it)
-                s.lookSel = Math.max(0, stocks.indexOf(cur));
+                s.looks = vfLooks(cur);   // made once, not for every frame (Ui only reads it)
+                s.lookSel = cur != null && cur.retired ? s.looks.size() - 1 : Math.max(0, stocks.indexOf(cur));
                 s.exposed = vfBase + (vf != null ? vf.shots : 0);
                 if (current != null) { s.length = current.length; s.endless = current.endless(); }
                 // what MENU does (hideViewfinder): with nothing shot it goes back; with pictures shot Latent restarts, and
@@ -3162,8 +3164,8 @@ public class MainActivity extends Activity {
                 }
                 if (r == null) break;
                 // the film of the frame in the tray: on an endless roll each frame has its own (the wheel, per frame)
-                Stock st = Stock.byId(stocks, devFrame < r.frames.size() ? r.stockFor(devFrame) : r.stock);
-                if (st == null) st = Stock.byId(stocks, r.stock);
+                Stock st = Stock.byId(films, devFrame < r.frames.size() ? r.stockFor(devFrame) : r.stock);
+                if (st == null) st = Stock.byId(films, r.stock);
                 s.film = st == null ? null : film(st);
                 // an endless roll develops in batches: this batch counts from its own first frame ("01 of 3"), not
                 // from the roll's first (frame 29 of 31 read as 90% done before anything had developed)
@@ -3221,14 +3223,21 @@ public class MainActivity extends Activity {
 
     private List<UiState.Film> looksMade;   // the viewfinder's films, as made from looksOf
     private List<Stock> looksOf;
+    private Stock looksRetired;
 
-    /** The films as the viewfinder shows them, made again only when the films do (a new list from the card). */
-    private List<UiState.Film> vfLooks() {
-        if (looksMade == null || looksOf != stocks) {
+    /**
+     * The films as the viewfinder shows them, made again only when the films do (a new list from the card), and the
+     * roll's own film after them when it's one Latent no longer offers (a roll shot in it before it was retired).
+     */
+    private List<UiState.Film> vfLooks(Stock cur) {
+        Stock retired = cur != null && cur.retired ? cur : null;
+        if (looksMade == null || looksOf != stocks || looksRetired != retired) {
             List<UiState.Film> l = new ArrayList<UiState.Film>();
             for (Stock st : stocks) l.add(film(st));
+            if (retired != null) l.add(film(retired));
             looksMade = l;
             looksOf = stocks;
+            looksRetired = retired;
         }
         return looksMade;
     }

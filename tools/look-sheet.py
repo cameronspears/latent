@@ -16,12 +16,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 # id, label, highlight, shadow, grain, grain size: as in src/com/latent/camera/Stock.java
 LOOKS = [
-    ('PORTRA4W', 'Portra 400', -1, -1, 4, 1),
-    ('CLASSNEG', 'Classic Neg', 1, 1, 3, 1),
-    ('CUBANNEG', 'Cuban Neg', -2, 1, 5, 2),
-    ('TRIX400', 'Tri-X 400', 0, 1, 8, 2),
-    ('PARTY800', 'Afterparty 800', -1, 2, 7, 3),
-    ('NATURAL', 'Natural', 0, 0, 1, 1),
+    ('NATURAL', 'Natural', 0, 0, 2, 1),
+    ('PORTRA4W', 'Portra 400', 0, 0, 4, 1),
+    ('CUBANNEG', 'Cuban Neg', 0, 0, 5, 2),
+    ('PAINTRLY', 'Painterly', 0, 0, 5, 4),
+    ('TRIX400', 'Tri-X 400', 0, 0, 7, 3),
 ]
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TILE = 330

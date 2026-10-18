@@ -4,13 +4,13 @@
 
 An in-camera app that develops your photos like a roll of film. On film, a photo you've taken is a
 *latent image* until it's developed; this works the same way. Load a film stock, shoot the roll,
-then develop it. Each frame gets a **3D LUT** (the colour look), a **highlight / shadow tone curve**,
-and **film grain**, and lands in the camera's own playback. Latent shows your developed photos too,
-without a trip to the camera's Playback.
+then develop it. Each frame is printed through its film's **look** (colour and tone, from a model of
+film printed on paper) with the film's own **grain**, and lands in the camera's own playback. Latent
+shows your developed photos too, without a trip to the camera's Playback.
 
 | | |
 |---|---|
-| ![Choose film: your last photo in Classic Neg, the roll length beside it](docs/images/choose-film.jpg) | ![The viewfinder: live view in the film look, focus locked in green](docs/images/viewfinder.jpg) |
+| ![Choose film: your last photo in Cuban Neg, the roll length beside it](docs/images/choose-film.jpg) | ![The viewfinder: live view in the film look, focus locked in green](docs/images/viewfinder.jpg) |
 | **Choose film** on your own photo | **The viewfinder**, the film look live |
 | ![The darkroom: frame 5 of 12 developing under a red safelight](docs/images/darkroom.jpg) | ![Photos: every developed frame, grouped by roll](docs/images/photos.jpg) |
 | **The darkroom**, developing the roll | **Photos**, every developed frame |
@@ -18,12 +18,13 @@ without a trip to the camera's Playback.
 *The screens as Latent draws them, rendered on a Mac from the same code the camera runs
 (`tools/readme-images.sh`). The photos in them are the test photos credited below.*
 
-Status: **v0.45.0**. v0.44.1 is the last version run on the A5100: rolls (12, 24, 36 or ∞), Latent's
+Status: **v0.46.0**. v0.44.1 is the last version run on the A5100: rolls (12, 24, 36 or ∞), Latent's
 own viewfinder with the film look live, the darkroom into the camera roll on three cores, negatives
-and the six looks all work there. v0.45.0 is lighter (no Lab, no settings, no camera tests) and adds
-Photos, a faster viewfinder and a screen that saves the battery. It's tested on a Mac, not yet on
-the camera, so its speed and battery figures below are estimates until the camera's logs confirm
-them. See `docs/HANDOVER.md` for where things stand.
+and the looks all work there. v0.45.0 is lighter (no Lab, no settings, no camera tests) and adds
+Photos, a faster viewfinder and a screen that saves the battery. v0.46.0 rebuilds the looks: five
+films on a new film model, with new grain (below). Both are tested on a Mac, not yet on the camera,
+so their speed and battery figures below are estimates until the camera's logs confirm them. See
+`docs/HANDOVER.md` for where things stand.
 
 ## Install (about 2 minutes)
 
@@ -56,7 +57,7 @@ roll's last three frames in the film's colour).
   set it to neutral, and shooting sooner restarts the A5100. The camera back counts it down
   ("Shooting in 4 s") and then opens the viewfinder.
 
-<img src="docs/images/camera-back.jpg" width="426" alt="The camera back: frame 09 of 24 in Classic Neg, the roll's ticks below">
+<img src="docs/images/camera-back.jpg" width="426" alt="The camera back: frame 09 of 24 in Cuban Neg, the roll's ticks below">
 
 Every photo you take is an exposure on the roll. Rolls count by the camera's photo numbers
 (DSC04592, DSC04593, …), because file times can shift by hours between power-ons.
@@ -226,24 +227,59 @@ can't, and the original stays in the camera roll.
 The icon is the camera back's frame counter: shot frames in white, the frame in hand in orange.
 `tools/make_icon.py` draws it.
 
-## Your own looks
+## The looks
+
+Five looks, each one whole: no strength to set, no settings.
+
+| Look | Character | Texture |
+|---|---|---|
+| **Natural 100** | True colour with depth, true whites, a long soft roll into the highlights. For anything. | Very fine grain |
+| **Portra 400** | Soft and warm: golden skin, creamy highlights, olive greens, gentle blues, a matte black. For people. | Fine grain |
+| **Cuban Neg 400** | Fuji's Classic Negative pushed warm: hard tone, deep teal shadows, golden highlights, brick reds, mustard yellows. For sunny days. | Medium grain |
+| **Painterly** | After Alex Kittoe's photographs and collages: a matte, luminous print with colour kept in every shadow, azure skies, amber light, sage greens and lavender twilight. For travel. | A watercolour paper's tooth |
+| **Tri-X 400** | Black and white through an orange filter: dark skies, glowing skin, inky blacks, bright paper whites. For people and night. | Coarse, gritty grain |
+
+**How they're made.** Each look is a small model of a film printed on paper (`tools/make_luts.py`),
+not a grade. The camera's picture is turned back into light, passed through the film's colour
+sensitivity, exposed onto a negative whose layers push colours apart, then printed: a curve for each
+dye layer (toe, straight line, shoulder), in dyes that each absorb a little of the others' colours, on
+paper with its own white and black. So contrast and colour move together as they do on film: colours
+are richest in the midtones and quieten into the highlights and shadows, saturated colours deepen
+instead of glowing, and a film's colour cast sits in the midtones while its whites stay clean.
+
+**Painterly** comes from a study of Alex Kittoe's work (236 photographs and 77 collages, measured
+against the A5100's own JPEGs): his blacks sit well above black and his whites below paper white,
+his shadows and midtones carry about half again a camera's colour, warm in the shadows, and his skies
+lean from the camera's purple-blue toward azure. Painterly prints that way, then finishes like a
+painter, lifting muted colours more than strong ones so nothing turns neon. Its texture is the tooth
+of cold-press paper, lit from the upper left, with a fibre here and there, as his collages are printed.
+
+**Grain** is made the way film forms it: grains of many sizes, scattered at random, overlap, and how
+much of each point they cover is the grain. It clumps and has crisp edges as film's does, shows most
+in the lower midtones, eases into the shadows and fades through the highlights. It's monochrome.
+
+Classic Neg and Afterparty were retired in v0.46.0. Rolls already shot in them still develop in them
+and show their names, but they're no longer offered. The first time v0.46.0 runs, each look an
+earlier Latent put on the card is replaced by the new one; a look you've made yourself is never
+touched.
+
+### Your own looks
 
 Any `.cube` 3D LUT works (sizes 2–65). Rename it to 8 characters or fewer with a `.CUB` extension,
 for example `KODAK.CUB`, because the camera's card system only accepts short names. Then copy it
 into `LATENT/LUTS/` on the card. Your own looks develop with a little fine grain and no change to
 the highlights or shadows.
 
-The six bundled looks (Natural, Portra, Classic Neg, Cuban Neg, Tri-X, Afterparty) come from
-`tools/make_luts.py`, a small film model with white balance,
-curve, per-hue shifts and split toning. Each has its own tone and grain, set in `Stock.java`. Change
-the numbers in `make_luts.py` and rebuild:
+The bundled looks come from `tools/make_luts.py`; their grain is set in `Stock.java`. Change the
+numbers in `make_luts.py` and rebuild:
 
 ```bash
 python3 tools/make_luts.py assets/luts
 ```
 
 You can then copy the new `.CUB` files to the card. You only need to rebuild the app for new
-looks to ship inside it.
+looks to ship inside it. When you do, raise `LOOKS_VERSION` in `make_luts.py`: a card keeps the
+looks an earlier version put there until their first line says they're older.
 
 To preview a look on your Mac without the camera:
 
@@ -252,8 +288,11 @@ tools/build-host.sh
 ```
 
 ```bash
-out/host/fltool process IN.JPG OUT.JPG --lut assets/luts/CUBANNEG.CUB --hl -2 --sh 1 --grain 6 --size 2
+out/host/fltool process IN.JPG OUT.JPG --lut assets/luts/CUBANNEG.CUB --grain 5 --size 2
 ```
+
+`tools/look-sheet.py OUT.png` develops every look on the test photos side by side, with a 100%
+crop of each for the grain.
 
 ## Build from source
 
@@ -303,13 +342,16 @@ stops using the hardware until it is restarted.
 
 - The tone curve and the LUT are combined into one 25-point table on the camera's own YCbCr values,
   once per roll. Each pixel then needs no conversion to RGB and back. Grain is a change to
-  brightness alone.
+  brightness alone. (The bundled looks carry their whole tone in the LUT; the tone curve is flat.)
 - Up to eight parsed films are kept in memory, shared by every part of the app, so a film is read
   from the card once rather than once per frame or per preview.
 - The LUT uses tetrahedral interpolation in integer maths.
-- Grain comes from a precomputed, seamlessly tiling 1024×1024 noise texture. It is
-  brightness-weighted: strongest in the midtones, lighter in the shadows, lightest in the
-  highlights. It's monochrome, like real film grain.
+- Grain comes from a seamlessly tiling 1024×1024 texture, made once per grain size: grains of many
+  sizes scattered at random and overlapping (fine, medium and coarse), or Painterly's paper tooth.
+  It's weighted by brightness: grain strongest in the lower midtones, lighter in the shadows,
+  lightest in the highlights; the paper strongest in the light midtones and staying on into the
+  highlights. It's monochrome, like real film grain. Integer maths and fixed tables make it the
+  same on every machine.
 
 **Software develop** (the fallback):
 
@@ -339,7 +381,9 @@ as it can:
   finished file.
 - **256 KB reads and writes** instead of 4 KB. Each one is a round trip through Sony's card layer.
 - **Grain texture cached** per grain size, so it's built once per session instead of once per save
-  or preview.
+  or preview. v0.46.0's grain takes more work to build than v0.45.0's noise (an estimated 0.2–0.4 s
+  on the camera, once per session, before the first frame or while Sony saves one); `setup=` in
+  `TIMING.TXT` will show it.
 - **The backlight** is the largest share of the camera's power while a screen is up (the panel is a
   backlit LCD, so Latent's black saves nothing by itself). The darkroom runs at about 5%, a screen
   left alone rests at about 30%, and an unattended roll stays dim when it's done. Whether the A5100
@@ -402,7 +446,11 @@ Latent itself is MIT-licensed (`LICENSE`). The parts below keep their own licenc
 - Fonts: Inter and IBM Plex Mono (SIL Open Font License, `assets/fonts/OFL-*.txt`), subset by
   `tools/make_fonts.py`.
 - The looks are original values. They're inspired by Osan Bilgi's "Classic Cuban Neg" Fujifilm
-  recipe and Fuji X Weekly's "Kodak Portra 400" recipe.
+  recipe, Fuji X Weekly's "Kodak Portra 400" recipe and, for Painterly, the photographs and collages
+  of Alex Kittoe (alexkittoe.com), studied for their tone and colour; none of his images are used or
+  shipped. Colour moves are made in Björn Ottosson's Oklab colour space. The grain follows the idea of
+  film grain as overlapping random grains (Newson, Delon and Galerne's Boolean model); no code was
+  copied.
 - The camera-app approach (Android 2.3 / API 10, armeabi, v1 signing, scan codes, 8.3 card names)
   follows what the OpenMemories, Recipe Lab and Grain Lab projects documented. No code was copied
   from them.

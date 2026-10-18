@@ -15,12 +15,12 @@
 
 #include "filmcore.h"
 
-#define NFILMS 6
-#define NPATHS 12                /* each film under two names: more than the cache's eight */
+#define NFILMS 5
+#define NPATHS 15                /* each film under three names: more than the cache's eight */
 #define OW 540
 #define OH 480
 
-static const char *FILMS[NFILMS] = { "NATURAL.CUB", "PORTRA4W.CUB", "CLASSNEG.CUB", "CUBANNEG.CUB", "TRIX400.CUB", "PARTY800.CUB" };
+static const char *FILMS[NFILMS] = { "NATURAL.CUB", "PORTRA4W.CUB", "CUBANNEG.CUB", "PAINTRLY.CUB", "TRIX400.CUB" };
 static char g_paths[NPATHS][1024];
 static const char *g_photo;
 static unsigned char *g_jpeg;
@@ -109,7 +109,7 @@ int main(int argc, char **argv) {
     if (argc < 4) { fprintf(stderr, "cachetest PHOTO.JPG LUTDIR TMPDIR [rounds]\n"); return 2; }
     g_photo = argv[1];
     if (argc > 4) g_rounds = atoi(argv[4]);
-    /* the films, each under two names (copies in TMPDIR) */
+    /* the films, each under three names (copies in TMPDIR) */
     for (i = 0; i < NPATHS; i++) {
         if (i < NFILMS) snprintf(g_paths[i], sizeof g_paths[i], "%s/%s", argv[2], FILMS[i]);
         else {

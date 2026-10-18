@@ -988,7 +988,7 @@ final class Ui {
     private static void darkroom(Gfx g, UiState s) {
         float R = right(s);
         UiState.Film f = s.film;
-        g.text("Darkroom" + (f != null ? "  \u00b7  " + f.title + " " + f.iso : ""), L, TOP, Gfx.MEDIUM, T_BODY, RED2, Gfx.LEFT, 0);
+        g.text("Darkroom" + (f != null ? "  \u00b7  " + f.title + (f.iso.length() > 0 ? " " + f.iso : "") : ""), L, TOP, Gfx.MEDIUM, T_BODY, RED2, Gfx.LEFT, 0);
         battery(g, s.battery, R, RED, RED4);
 
         // the frame number, large

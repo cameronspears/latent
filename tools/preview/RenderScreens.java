@@ -53,14 +53,13 @@ public class RenderScreens {
         tokens();
 
         // the films as the camera shows them: Stock's built-ins
-        List<UiState.Film> six = new ArrayList<UiState.Film>();
-        for (Stock st : Stock.builtIn()) six.add(Ui.film(st));
-        UiState.Film natural = six.get(0), portra = six.get(1), classic = six.get(2), cuban = six.get(3), trix = six.get(4), party = six.get(5);
+        List<UiState.Film> builtIn = new ArrayList<UiState.Film>();
+        for (Stock st : Stock.builtIn()) builtIn.add(Ui.film(st));
+        UiState.Film natural = builtIn.get(0), portra = builtIn.get(1), cuban = builtIn.get(2), painterly = builtIn.get(3), trix = builtIn.get(4);
         cuban.sample = img(samples, "STREET-CUBANNEG.png");
-        portra.sample = img(samples, "STREET-PORTRA4W.png");
-        classic.sample = img(samples, "STREET-CLASSNEG.png");
+        portra.sample = img(samples, "PEOPLE-PORTRA4W.png");
+        painterly.sample = img(samples, "HOUSE-PAINTRLY.png");
         trix.sample = img(samples, "PEOPLE-TRIX400.png");
-        party.sample = img(samples, "PEOPLE-PARTY800.png");
         natural.sample = img(samples, "HOUSE-NATURAL.png");
         List<Object> thumbs = new ArrayList<Object>();
         String[] names = { "STREET", "HOUSE", "PEOPLE" };
@@ -69,12 +68,12 @@ public class RenderScreens {
         UiState s;
         // ---- home: choosing film when the camera is empty; the frame counter with a roll in; MENU holds the rest
         s = state();
-        s.mode = UiState.LOAD; s.films = six; s.filmSel = 2; s.lengthSel = 1; s.liveCaption = "on";
-        render(s, "1-home-choose-classic");
+        s.mode = UiState.LOAD; s.films = builtIn; s.filmSel = 2; s.lengthSel = 1; s.liveCaption = "on";
+        render(s, "1-home-choose-cuban");
         s.filmSel = 4; s.lengthSel = 3;
         render(s, "1b-home-choose-trix-endless");
-        s.cancelable = true; s.filmSel = 5;
-        render(s, "1c-change-film-party");
+        s.cancelable = true; s.filmSel = 3;
+        render(s, "1c-change-film-painterly");
         s.loading = true;
         render(s, "1d-loading");
         s = state();
@@ -84,7 +83,7 @@ public class RenderScreens {
         s = state();
         s.mode = UiState.LOAD; s.films = new ArrayList<UiState.Film>(); s.liveCaption = "";
         render(s, "1f-home-no-looks");
-        List<UiState.Film> many = manyLooks(six, 20);   // six of Latent's and fourteen of your own on the card
+        List<UiState.Film> many = manyLooks(builtIn, 20);   // Latent's five and fifteen of your own on the card
         s = state();
         s.mode = UiState.LOAD; s.films = many; s.filmSel = 13; s.lengthSel = 1; s.liveCaption = "on";
         render(s, "1g-home-many-looks");
@@ -94,10 +93,10 @@ public class RenderScreens {
             audit(s, "1-home-choose " + n + " looks, film " + f + (cancel ? ", changing" : ""));
         }
         canisterRows();
-        for (int f = 0; f < six.size(); f++) for (int l = 0; l < 4; l++) {   // every film at every length: nothing collides
+        for (int f = 0; f < builtIn.size(); f++) for (int l = 0; l < 4; l++) {   // every film at every length: nothing collides
             s = state();
-            s.mode = UiState.LOAD; s.films = six; s.filmSel = f; s.lengthSel = l; s.liveCaption = "on";
-            audit(s, "1-home-choose " + six.get(f).title + " length " + l);
+            s.mode = UiState.LOAD; s.films = builtIn; s.filmSel = f; s.lengthSel = l; s.liveCaption = "on";
+            audit(s, "1-home-choose " + builtIn.get(f).title + " length " + l);
         }
 
         s = state();
@@ -108,14 +107,14 @@ public class RenderScreens {
         s.readyIn = 0;
         render(s, "2c-home-getting-ready");
         s = state();
-        s.film = classic; s.rollNumber = 12; s.exposed = 9; s.length = 24;
+        s.film = cuban; s.rollNumber = 12; s.exposed = 9; s.length = 24;
         render(s, "3-home-roll");
         UiState s10 = s.copy();
         s10.exposed = 10;
         render(s10, "3b-home-roll-10");
         same(s, s10, "the camera back's 'of 24' at frames 9 and 10", 600, 230, 853, 310);
         s = state();
-        s.film = classic; s.rollNumber = 12; s.exposed = 22; s.length = 24;
+        s.film = cuban; s.rollNumber = 12; s.exposed = 22; s.length = 24;
         render(s, "3c-home-roll-end");
         s = state();
         s.film = trix; s.rollNumber = 13; s.exposed = 23; s.endless = true; s.developing = 2;
@@ -132,7 +131,7 @@ public class RenderScreens {
         s.film = portra; s.rollNumber = 4; s.exposed = 12; s.length = 12; s.developLater = true; s.waiting = 3; s.developMs = 12 * 7000;
         render(s, "5b-home-finished-develop-later");
         s = state();
-        s.film = classic; s.rollNumber = 12; s.exposed = 24; s.length = 24; s.developed = 9; s.developMs = 15 * 7000;
+        s.film = cuban; s.rollNumber = 12; s.exposed = 24; s.length = 24; s.developed = 9; s.developMs = 15 * 7000;
         render(s, "5c-home-paused");
         s = state();
         s.film = trix; s.rollNumber = 13; s.exposed = 29; s.endless = true; s.developLater = true; s.waiting = 6;
@@ -141,29 +140,29 @@ public class RenderScreens {
 
         // ---- the menu, its rows from Ui.menuRows (as MainActivity builds them): a roll loaded, 9 shot
         Ui.Menu m = new Ui.Menu();
-        m.roll = true; m.developNow = true; m.changeFilm = true; m.exposed = 9; m.photos = true; m.version = "0.45.0";
-        s = menu(m, 1, classic);
+        m.roll = true; m.developNow = true; m.changeFilm = true; m.exposed = 9; m.photos = true; m.version = "0.46.0";
+        s = menu(m, 1, cuban);
         render(s, "6-menu");
-        s = menu(m, 3, classic);
+        s = menu(m, 3, cuban);
         render(s, "6c-menu-photos");
         Ui.Menu endless = new Ui.Menu();   // an endless roll: no Develop now (it develops as you go)
-        endless.roll = true; endless.changeFilm = true; endless.endless = true; endless.exposed = 23; endless.photos = true; endless.version = "0.45.0";
+        endless.roll = true; endless.changeFilm = true; endless.endless = true; endless.exposed = 23; endless.photos = true; endless.version = "0.46.0";
         s = menu(endless, 1, trix);
         render(s, "6b-menu-endless");
         Ui.Menu empty = new Ui.Menu();   // no roll, nothing developed yet: the photos grey, and the footer says why
-        empty.version = "0.45.0";
+        empty.version = "0.46.0";
         s = menu(empty, 1, null);
         render(s, "6e-menu-no-photos");
         Ui.Menu developing = new Ui.Menu();   // a roll developing (paused): nothing of the roll's to do here, so no "This roll"
-        developing.roll = true; developing.exposed = 24; developing.photos = true; developing.version = "0.45.0";
-        s = menu(developing, 1, classic);
+        developing.roll = true; developing.exposed = 24; developing.photos = true; developing.version = "0.46.0";
+        s = menu(developing, 1, cuban);
         render(s, "6f-menu-roll-developing");
         menuHeadings();
 
         // ---- the viewfinder (in-app shooting): every focus state, a look change, a shot developing
         int[] hist = new int[64];
         for (int i = 0; i < 64; i++) hist[i] = (int) (30 + 100 * Math.exp(-Math.pow((i - 22) / 9.0, 2)) + 60 * Math.exp(-Math.pow((i - 47) / 6.0, 2)));
-        s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
+        s = vf(builtIn, 2, img(samples, "STREET-CUBANNEG.png"));
         render(s, "8-vf-ready");
         UiState coach = s.copy();
         coach.coach = true;
@@ -176,52 +175,52 @@ public class RenderScreens {
         s.afState = 2; s.afLamp = false;
         s.afAreas = new float[][] { { 0.44f, 0.40f, 0.05f, 0.075f }, { 0.50f, 0.40f, 0.05f, 0.075f }, { 0.44f, 0.48f, 0.05f, 0.075f }, { 0.56f, 0.52f, 0.05f, 0.075f } };
         render(s, "8c-vf-locked");
-        s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
+        s = vf(builtIn, 2, img(samples, "PEOPLE-CUBANNEG.png"));
         s.afState = 3; s.afNote = "Too dark to focus"; s.shutter = "1/30"; s.aperture = "F3.5"; s.iso = "6400"; s.isoAuto = true; s.ev = -2; s.afLamp = true;
         render(s, "8d-vf-cant-focus");
-        s = vf(six, 4, img(samples, "HOUSE-TRIX400.png"));
+        s = vf(builtIn, 4, img(samples, "HOUSE-TRIX400.png"));
         s.lookShown = true;
         render(s, "8e-vf-look-trix");
-        s = vf(six, 4, img(samples, "HOUSE-TRIX400.png"));
+        s = vf(builtIn, 4, img(samples, "HOUSE-TRIX400.png"));
         s.exposed = 10; s.printImage = img(samples, "PEOPLE-TRIX400.png"); s.printProgress = 0.45f; s.developing = 2; s.grid = true; s.hist = hist;
         render(s, "8f-vf-print-developing");
-        s = vf(six, 5, img(samples, "PEOPLE-PARTY800.png"));
-        s.endless = true; s.exposed = 37; s.flash = true; s.printImage = img(samples, "STREET-PARTY800.png"); s.printProgress = 0.1f; s.developing = 1; s.menuDevelops = true;
+        s = vf(builtIn, 1, img(samples, "PEOPLE-PORTRA4W.png"));
+        s.endless = true; s.exposed = 37; s.flash = true; s.printImage = img(samples, "STREET-PORTRA4W.png"); s.printProgress = 0.1f; s.developing = 1; s.menuDevelops = true;
         render(s, "8g-vf-endless-shot");
-        s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
+        s = vf(builtIn, 2, img(samples, "HOUSE-CUBANNEG.png"));
         s.clean = true; s.vfNote = "Clean";
         render(s, "8j-vf-clean");
         // centre: the camera's own live view (drawn here under the screen, as the camera's video plane is)
-        s = vf(six, 2, null);
+        s = vf(builtIn, 2, null);
         s.liveThrough = true; s.lookLive = false; s.vfNote = "Film look off  \u00b7  the camera's own view";
         renderOver(s, "8k-vf-camera-view", img(samples, "HOUSE-NATURAL.png"));
-        s = vf(six, 0, img(samples, "PEOPLE-NATURAL.png"));
+        s = vf(builtIn, 0, img(samples, "PEOPLE-NATURAL.png"));
         s.exposed = 12; s.length = 12; s.vfNote = "Roll finished"; s.printImage = img(samples, "PEOPLE-NATURAL.png"); s.printProgress = 0.6f; s.developing = 3; s.menuDevelops = true;
         render(s, "8l-vf-roll-finished");
-        s = vf(six, 0, img(samples, "PEOPLE-NATURAL.png"));
+        s = vf(builtIn, 0, img(samples, "PEOPLE-NATURAL.png"));
         s.exposed = 22; s.length = 24; s.developing = 4; s.printImage = img(samples, "HOUSE-NATURAL.png"); s.printProgress = 1;
         render(s, "8la-vf-two-left");
-        s = vf(six, 4, img(samples, "HOUSE-TRIX400.png"));
+        s = vf(builtIn, 4, img(samples, "HOUSE-TRIX400.png"));
         s.lookShown = true; s.cardNote = "Loaded for the whole roll";
         render(s, "8m-vf-card-locked");
         // v0.32.0 on the camera: its own live view with Latent's drawing over it, prints waiting for the darkroom
-        s = vf(six, 2, null);
+        s = vf(builtIn, 2, null);
         s.liveThrough = true; s.lookLive = false; s.exposed = 11; s.developing = 2; s.afState = 2;
         renderOver(s, "8o-vf-camera-live-view", img(samples, "STREET-NATURAL.png"));
         s.afState = 1; s.afTry = 2; s.afLamp = true; s.vfNote = "";
         renderOver(s, "8p-vf-camera-live-view-trying", img(samples, "PEOPLE-NATURAL.png"));
-        s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
+        s = vf(builtIn, 2, img(samples, "PEOPLE-CUBANNEG.png"));
         s.afState = 1; s.afTry = 3; s.afLamp = true; s.shutter = "1/30"; s.aperture = "F3.5"; s.iso = "6400"; s.isoAuto = true;
         render(s, "8n-vf-trying-again");
 
         // v0.35: the look on live view again; the wheel on an endless roll; DOWN opens the exposure scale
-        s = vf(six, 3, img(samples, "STREET-CUBANNEG.png"));
+        s = vf(builtIn, 2, img(samples, "STREET-CUBANNEG.png"));
         s.endless = true; s.exposed = 41; s.lookShown = true; s.cardNote = "From this frame on";
         render(s, "8q-vf-endless-film-card");
         s = vf(many, 17, img(samples, "STREET-CUBANNEG.png"));
         s.endless = true; s.exposed = 41; s.lookShown = true; s.cardNote = "From this frame on";
         render(s, "8qb-vf-film-card-many-looks");
-        s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
+        s = vf(builtIn, 2, img(samples, "HOUSE-CUBANNEG.png"));
         s.evEdit = true; s.ev = 0; s.shutter = "1/125"; s.aperture = "F5.6"; s.iso = "200";
         render(s, "8r-vf-exposure-open");
         s.ev = 1;
@@ -229,21 +228,21 @@ public class RenderScreens {
         UiState e2 = s.copy();
         e2.ev = 2;
         if (!Ui.overlayKey(s).equals(Ui.overlayKey(e2))) problems.add("overlayKey changes with the exposure while its scale is open (it's drawn in the side bar)");
-        s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
+        s = vf(builtIn, 2, img(samples, "PEOPLE-CUBANNEG.png"));
         s.evEdit = true; s.ev = -5;
         render(s, "8t-vf-exposure-minus");
-        s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
-        s.ev = -2; s.exposed = 7; s.printImage = img(samples, "HOUSE-CLASSNEG.png"); s.printProgress = 0.7f;
+        s = vf(builtIn, 2, img(samples, "STREET-CUBANNEG.png"));
+        s.ev = -2; s.exposed = 7; s.printImage = img(samples, "HOUSE-CUBANNEG.png"); s.printProgress = 0.7f;
         s.shutter = "1/250"; s.aperture = "F8"; s.iso = "400"; s.isoAuto = true;
         render(s, "8u-vf-live-look-print");
         layers(s, "8w-vf-layers");
-        s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
+        s = vf(builtIn, 2, img(samples, "STREET-CUBANNEG.png"));
         s.evEdit = true; s.ev = 4; s.afState = 2; s.grid = true; s.hist = new int[64];
         for (int i = 0; i < 64; i++) s.hist[i] = 20 + (i * 37 % 50);
         layers(s, "8x-vf-layers-ev-grid");
-        windowKeys(six, img(samples, "STREET-CLASSNEG.png"));
+        windowKeys(builtIn, img(samples, "STREET-CUBANNEG.png"));
         sideBarText();
-        readouts(six);
+        readouts(builtIn);
 
         s = state();
         s.mode = UiState.DARKROOM; s.film = cuban; s.devFrame = 4; s.devTotal = 12; s.devDone = 4;
@@ -306,10 +305,10 @@ public class RenderScreens {
         s.viewMap = new float[] { (6000 - 854) / 2f / 6000, (4000 - 480) / 2f / 4000, 854 / 6000f, 480 / 4000f, 1.5f };
         render(s, "11c-view-100-middle-only");
 
-        partials(six, m, shelf);
+        partials(builtIn, m, shelf);
 
         s = state();
-        s.film = classic; s.rollNumber = 12; s.exposed = 9; s.length = 24;
+        s.film = cuban; s.rollNumber = 12; s.exposed = 9; s.length = 24;
         s.toast = "Could not load film: the card is write-protected, or full. Check the switch on its side, or make room on it.";
         render(s, "18-toast-long");
 
@@ -410,12 +409,12 @@ public class RenderScreens {
         System.out.println("canister rows: " + rows + " rows checked, at most " + Ui.CAN_MAX + " shown, the chosen one centred");
     }
 
-    /** Latent's six films, then n - 6 of your own (.CUB files: their own names, Latent's colours in turn). */
-    static List<UiState.Film> manyLooks(List<UiState.Film> six, int n) {
-        List<UiState.Film> out = new ArrayList<UiState.Film>(six);
-        for (int i = six.size(); i < n; i++) {
-            UiState.Film o = six.get(i % six.size()), f = new UiState.Film();
-            f.title = "My look " + (i - six.size() + 1); f.iso = ""; f.tagline = "";
+    /** Latent's films, then your own up to n in all (.CUB files: their own names, Latent's colours in turn). */
+    static List<UiState.Film> manyLooks(List<UiState.Film> builtIn, int n) {
+        List<UiState.Film> out = new ArrayList<UiState.Film>(builtIn);
+        for (int i = builtIn.size(); i < n; i++) {
+            UiState.Film o = builtIn.get(i % builtIn.size()), f = new UiState.Film();
+            f.title = "My look " + (i - builtIn.size() + 1); f.iso = ""; f.tagline = "";
             f.accent = o.accent; f.body = o.body; f.band = o.band; f.sample = o.sample;
             out.add(f);
         }
@@ -535,10 +534,10 @@ public class RenderScreens {
     }
 
     /** The keys that redraw only part of the screen, each checked (Choose film, the menu, Photos). */
-    static void partials(List<UiState.Film> six, Ui.Menu m, Shelf shelf) throws Exception {
+    static void partials(List<UiState.Film> builtIn, Ui.Menu m, Shelf shelf) throws Exception {
         for (int f : new int[] { 2, 4 }) for (int l = 0; l < 3; l++) {   // UP/DOWN on Choose film
             UiState a = state();
-            a.mode = UiState.LOAD; a.films = six; a.filmSel = f; a.lengthSel = l; a.liveCaption = "on";
+            a.mode = UiState.LOAD; a.films = builtIn; a.filmSel = f; a.lengthSel = l; a.liveCaption = "on";
             UiState b = a.copy();
             b.lengthSel = l + 1;
             partial(a, b, "Choose film, length " + l + " to " + (l + 1));
@@ -994,7 +993,7 @@ public class RenderScreens {
     }
 
     /** The screens to judge side by side: an earlier version's camera render (left) and this one's (right). */
-    static final String[] COMPARE = { "1-home-choose-classic", "1b-home-choose-trix-endless", "1e-home-first-run", "3-home-roll", "2b-home-settling",
+    static final String[] COMPARE = { "1-home-choose-cuban", "1b-home-choose-trix-endless", "1e-home-first-run", "3-home-roll", "2b-home-settling",
             "5-home-finished-lowbattery", "6-menu", "6c-menu-photos", "8-vf-ready", "8c-vf-locked", "8d-vf-cant-focus", "8s-vf-exposure-plus-third",
             "8q-vf-endless-film-card", "8y-vf-coach", "8z-vf-fatal", "8l-vf-roll-finished", "8-darkroom", "9-photos", "10-view-fit" };
 
@@ -1015,8 +1014,8 @@ public class RenderScreens {
             g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
             g.setFont(Font.createFont(Font.TRUETYPE_FONT, new File(fonts, "inter-medium.ttf")).deriveFont(16f));
             g.setColor(new Color(0xBBBBBB));
-            g.drawString("before (v0.44.1)  \u00b7  " + name, 10, 23);
-            g.drawString("after (v0.45.0)", bi.getWidth() + gap + 10, 23);
+            g.drawString("before  \u00b7  " + name, 10, 23);
+            g.drawString("after (v0.46.0)", bi.getWidth() + gap + 10, 23);
             g.drawImage(bi, 0, top, null);
             g.drawImage(ai, bi.getWidth() + gap, top, null);
             g.dispose();

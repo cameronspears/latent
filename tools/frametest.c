@@ -35,9 +35,9 @@ static double now_s(void) {
     return tv.tv_sec + tv.tv_usec / 1e6;
 }
 
-static const char *const FILMS[] = { "assets/luts/NATURAL.CUB", "assets/luts/PORTRA4W.CUB", "assets/luts/CLASSNEG.CUB",
-                                     "assets/luts/CUBANNEG.CUB", "assets/luts/TRIX400.CUB", "assets/luts/PARTY800.CUB" };
-#define NFILMS 6
+static const char *const FILMS[] = { "assets/luts/NATURAL.CUB", "assets/luts/PORTRA4W.CUB", "assets/luts/CUBANNEG.CUB",
+                                     "assets/luts/PAINTRLY.CUB", "assets/luts/TRIX400.CUB" };
+#define NFILMS 5
 
 typedef struct { const char *name; unsigned char *jpg; unsigned long len; } frame_jpg;
 
@@ -261,7 +261,9 @@ static void test_ycc(frame_jpg *fr, int nfr) {
     check(worst_mean < 1.5,
           "Y'CbCr decode and table against v0.44.1's RGB, %d frames x %d films x 2 tone settings: mean |difference| at worst %.2f/255 "
           "(rounded to 4 bits, at worst %.1f%% of samples change; over 12/255, %.3f%%)", nfr, NFILMS, worst_mean, worst_levels * 100, 100.0 * big / (all ? all : 1));
-    check(worst_composed < 0.06, "and composed for the screen, against the RGB decode through the same composer: at worst %.1f%% of 4-bit channel values changed", worst_composed * 100);
+    /* v0.46.0's looks bend colour more (Cuban Neg's and Painterly's tables put more values at a level's edge): up to ~7%,
+     * one level each, where v0.45.0's looks stayed under 6%; the mean above is what bounds the table's error */
+    check(worst_composed < 0.08, "and composed for the screen, against the RGB decode through the same composer: at worst %.1f%% of 4-bit channel values changed", worst_composed * 100);
     fl_frame_free(c);
     free(a); free(b);
 }

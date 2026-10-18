@@ -1,7 +1,8 @@
 # Latent: notes for the next session
 
-Written 2026-10-17 at **v0.45.0**, built and tested on the Mac but not yet installed. The camera has
-**v0.44.1** (the viewfinder shoots with the look at ~11 frames a second, and the next open develops).
+Written 2026-10-17 at **v0.45.0** and brought up to **v0.46.0** on 2026-10-18 (the looks rebuilt), built
+and tested on the Mac but not yet installed. The camera has **v0.44.1** (the viewfinder shoots with the
+look at ~11 frames a second, and the next open develops).
 `README.md` is the user guide and explains the develop pipeline. This file is the working context.
 
 ## The project in one paragraph
@@ -98,7 +99,8 @@ line it misses.
 - `tools/preview/RenderScreens.java`, `CameraTrue.java`: the previews and their checks.
 - `docs/DEVELOP-SPEED.md`: every darkroom speed idea since v0.38, with the camera's numbers.
 - `docs/CALLBACK-FINDINGS.md`: why capture-time processing is closed.
-- `tools/make_luts.py`: the six looks (Natural, Portra, Classic Neg, Cuban Neg, Tri-X, Afterparty).
+- `tools/make_luts.py`: the five looks (Natural, Portra, Cuban Neg, Painterly, Tri-X), each a model of
+  film printed on paper; `tools/look-sheet.py` develops them all on the test photos through the core.
 
 ## What works on the camera today (v0.44.1)
 
@@ -114,6 +116,50 @@ line it misses.
   0.2–0.4 s to the first frame.
 - Latent's own viewfinder with the film look live: ~11 frames a second (up to ~15).
 - Test shots are kept off rolls through `LATENT/IGNORE.TXT`.
+
+## What v0.46.0 changes (Mac-tested only): the looks
+
+The user asked for the best film emulation Latent can have, few options and no settings: they liked
+Tri-X, Cuban Neg and Natural, not the others. They chose the lineup: those three rebuilt, Portra rebuilt
+from scratch, and a new look, Painterly, after the photographer Alex Kittoe (alexkittoe.com).
+
+- **A new film model** (`tools/make_luts.py`): the camera's sRGB back to light; hue moves in Oklab (the
+  film's sensitivity); log exposure with interlayer effects; a print curve per dye layer (line, shoulder,
+  toe, an eased slope above middle grey); dye crosstalk in density; a tinted paper black (`fade`) and
+  white. Each print is scaled by the same film printed neutral, so its colour balance sits in the
+  midtones. Cuban Neg's and Tri-X's tone curves and casts were fitted to v0.45.0's (which the user
+  liked) and their colour now comes from the model. Painterly adds a `finish`: Oklab vibrance and tint
+  by lightness. All tone is in the LUT now; every built-in's highlight and shadow are 0.
+- **Painterly** was designed from measurements of 236 of Kittoe's photographs and 77 collages (Oklab
+  percentiles, colour by tone band and hue, against the A5100 JPEGs in `testdata/` and the user's own):
+  lifted blacks, whites below paper white, about 1.5x a camera's chroma in shadows and midtones,
+  warm shadows, skies toward azure. No image of his is in the repository or the app. Its look file is
+  `PAINTRLY.CUB` (8.3), and it has no ISO.
+- **New grain** (`grain_tile_make` in `jni/filmcore.c`): overlapping random discs (lognormal radii,
+  fixed per-size tables, a fixed count to each 16 px cell so writes stay in cache), a 3-tap blur, and a
+  share of per-pixel noise; 1 fine, 2 medium, 3 coarse. Size 4 is Painterly's paper (`paper_finish`):
+  rounded bumps lit from the upper left, fibres, a 32 px mottle. The amplitude by brightness changed too
+  (`grain_init`; the paper has its own). Integer maths and fixed tables: the same tile on every machine.
+  The hot loops are untouched (`asm-budget.sh`); only the tiles and the amplitude table changed, so
+  every develop path still matches the others bit for bit.
+- **Retired:** Classic Neg and Afterparty (`Stock.RETIRED`). `Stock.all` lists them last when their
+  look is on the card, `Stock.offered` leaves them out of Choose film and the wheel, and MainActivity
+  keeps two lists: `stocks` (offered) and `films` (every film a roll can be in, for `Stock.byId`). A
+  roll in a retired film shows it in the viewfinder after the offered ones (`vfLooks`), and the wheel
+  leaves it for the first or last offered film.
+- **Looks on the card are upgraded once:** `Library.installLuts` replaces a bundled look whose first line
+  is an earlier Latent's (`# Latent look.` or `# Film Lab look.`) but not this version's
+  (`# Latent look 2.`, `LOOKS_VERSION` in `make_luts.py`); anything else is the user's and stays. Raise
+  `LOOKS_VERSION` whenever the looks change, or cameras keep the old files.
+- Choose film, the viewfinder's wheel and the previews show five films; the test tools use the five
+  (the cache test puts each under three names, 15 files through its 8 slots).
+- **Live view against the full lookup:** the composer is unchanged, but Cuban Neg's and Painterly's tables
+  bend colour more, so the viewfinder's Y'CbCr table (17 points across colour) puts more values at a 4-bit
+  level's edge than v0.45.0's looks did: up to 7.2% of screen values differ from the RGB lookup by one
+  level, none by more (v0.45.0's looks: about 4%). The table's mean error stays at most 1.24/255 (limit
+  1.5). `JniTest` and `frametest.c` allowed 6%; they now allow 8%, and JniTest also fails any value off
+  by more than a level. The user was told; a finer live table is the fix if it ever shows.
+- The APK is 2.17 MB (five looks, down from six).
 
 ## What v0.45.0 changes (Mac-tested only)
 
@@ -388,7 +434,18 @@ Each thread has its own last error (a pthread key: Android 2.3 has no `__thread`
 
 ## The next camera visit: what to check, and the lines that answer it
 
-Look first, before anything else:
+The looks (v0.46.0):
+
+- `LATENT/LUTS/` on the card: the five built-ins' first lines read `# Latent look 2.` once Latent has
+  run (the old four replaced, `PAINTRLY.CUB` added); `CLASSNEG.CUB` and `PARTY800.CUB` stay, unused
+  unless a roll is in them. "Looks not installed: …" as a toast means the replacement failed.
+- `TIMING.TXT`'s `setup=` on the first frame of a develop: v0.46.0's grain tile costs more to build
+  than v0.45.0's (an estimated 0.2-0.4 s more, once per session and grain size). Later frames should
+  show `(ready)` as before.
+- By eye, on the user's own photos: every look, and Painterly's paper on a phone or computer at full
+  size. The user judges these; the numbers in `make_luts.py` and `Stock.java` are where to change them.
+
+Then, before anything else:
 
 - **MENU from a viewfinder with nothing shot**, then about 20 s on the camera back and the menu. No
   frozen picture may sit over the camera back (the surface is moved off the screen, not removed;
@@ -531,7 +588,8 @@ Also by eye:
 
 ## Card housekeeping
 
-`LATENT/` holds what Latent needs: `LUTS/`, the `ROLLnnn/` folders, `NEUTRAL.TXT` (the user's own
+`LATENT/` holds what Latent needs: `LUTS/` (with the retired `CLASSNEG.CUB` and `PARTY800.CUB` while a
+roll in them may still develop), the `ROLLnnn/` folders, `NEUTRAL.TXT` (the user's own
 settings while a roll is loaded: never delete it then), `SHOTS.TXT`, `IGNORE.TXT` (test photos kept
 off rolls; still read), and the logs `VIEWFIND.TXT`, `TIMING.TXT` and `DEVELOP.TXT`.
 

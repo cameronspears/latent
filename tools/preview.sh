@@ -16,19 +16,20 @@ SUN=""; [ "${1:-}" = "-sun" ] && SUN="-Dlatent.sun=1"
 O=out/preview
 mkdir -p "$O/classes" "$O/samples"
 tools/build-host.sh >/dev/null
-# sample photos in each look, as the camera would show them
+# sample photos in each look, as the camera would show them (made again when the look or the image core is newer)
 for img in STREET HOUSE PEOPLE; do
-  for lut in CUBANNEG PORTRA4W CLASSNEG TRIX400 PARTY800 NATURAL; do
+  for lut in NATURAL PORTRA4W CUBANNEG PAINTRLY TRIX400; do
     s="$O/samples/$img-$lut"
-    [ -e "$s.png" ] || { out/host/fltool preview "testdata/$img.JPG" "$s.ppm" --lut "assets/luts/$lut.CUB" 2>/dev/null \
+    [ "$s.png" -nt "assets/luts/$lut.CUB" ] && [ "$s.png" -nt jni/filmcore.c ] || { out/host/fltool preview "testdata/$img.JPG" "$s.ppm" --lut "assets/luts/$lut.CUB" 2>/dev/null \
       && sips -s format png "$s.ppm" --out "$s.png" >/dev/null; }
   done
 done
-# the viewer's screen preview, as developing makes it, and the middle of the developed photo at 100% (854 x 480)
-[ -e "$O/samples/HOUSE-PRV.png" ] && [ -e "$O/samples/HOUSE-DEV.JPG" ] || { out/host/fltool process testdata/HOUSE.JPG "$O/samples/HOUSE-DEV.JPG" \
-  --lut assets/luts/CUBANNEG.CUB --grain 5 --preview "$O/samples/HOUSE-PRV.JPG" 2>/dev/null \
+# the viewer's screen preview, as developing makes it, and the middle of the developed photo at 100% (854 x 480), in Cuban Neg
+[ "$O/samples/HOUSE-PRV.png" -nt assets/luts/CUBANNEG.CUB ] && [ "$O/samples/HOUSE-PRV.png" -nt jni/filmcore.c ] && [ -e "$O/samples/HOUSE-DEV.JPG" ] \
+  || { out/host/fltool process testdata/HOUSE.JPG "$O/samples/HOUSE-DEV.JPG" \
+  --lut assets/luts/CUBANNEG.CUB --grain 5 --size 2 --preview "$O/samples/HOUSE-PRV.JPG" 2>/dev/null \
   && sips -s format png "$O/samples/HOUSE-PRV.JPG" --out "$O/samples/HOUSE-PRV.png" >/dev/null; }
-[ -e "$O/samples/HOUSE-100.png" ] || sips -s format png -c 480 854 "$O/samples/HOUSE-DEV.JPG" --out "$O/samples/HOUSE-100.png" >/dev/null
+[ "$O/samples/HOUSE-100.png" -nt "$O/samples/HOUSE-DEV.JPG" ] || sips -s format png -c 480 854 "$O/samples/HOUSE-DEV.JPG" --out "$O/samples/HOUSE-100.png" >/dev/null
 rm -f "$O"/*.png "$O"/camera/*.png "$O"/camera-sun/*.png "$O"/compare/*.png
 "$JH/bin/javac" -encoding UTF-8 -d "$O/classes" src/com/latent/camera/Gfx.java src/com/latent/camera/UiState.java \
   src/com/latent/camera/Ui.java src/com/latent/camera/Photos.java src/com/latent/camera/Stock.java src/com/latent/camera/Library.java src/com/latent/camera/Roll.java \

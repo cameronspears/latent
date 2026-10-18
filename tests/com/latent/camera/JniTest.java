@@ -83,10 +83,16 @@ public class JniTest {
         check(opaque, "every 4444 pixel opaque");
         // as the viewfinder asks for it, the frame is decoded as Y'CbCr and looked up in the film's Y'CbCr table (v0.45.0)
         rc = FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 1, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
-        int changed = 0;
-        for (int i = 0; i < ow * oh; i++) { int[] la = levels(a[i], FilmCore.FMT_4444), lb = levels(b[i], FilmCore.FMT_4444); for (int k = 0; k < 3; k++) if (la[k] != lb[k]) changed++; }
-        check(rc == 0 && changed < ow * oh * 3 * 0.06, "decoded as Y'CbCr: "
-                + String.format("%.1f%%", changed * 100.0 / (ow * oh * 3)) + " of 4-bit values changed (RGB's within 6%)");
+        int changed = 0, far = 0;
+        for (int i = 0; i < ow * oh; i++) {
+            int[] la = levels(a[i], FilmCore.FMT_4444), lb = levels(b[i], FilmCore.FMT_4444);
+            for (int k = 0; k < 3; k++) { if (la[k] != lb[k]) changed++; if (Math.abs(la[k] - lb[k]) > 1) far++; }
+        }
+        // v0.46.0's looks bend colour more than v0.45.0's, so more values sit at a level's edge (v0.45.0's looks: up to
+        // ~4%; Cuban Neg and Painterly now ~7%); the table's own error stays small (tools/frame-test.sh: under 1.5/255)
+        check(rc == 0 && changed < ow * oh * 3 * 0.08 && far < ow * oh * 3 * 0.001, "decoded as Y'CbCr: "
+                + String.format("%.1f%%", changed * 100.0 / (ow * oh * 3)) + " of 4-bit values changed (RGB's within 8%), "
+                + String.format("%.3f%%", far * 100.0 / (ow * oh * 3)) + " by more than a level (within 0.1%)");
         System.arraycopy(b, 0, a, 0, a.length);
         FilmCore.frame(c, null, 0, lut, p, 0, 1, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
         check(java.util.Arrays.equals(a, b), "the last frame again (no JPEG): the same picture");
@@ -247,7 +253,7 @@ public class JniTest {
     /** The shared, locked caches (v0.45.0): several films kept at once, decoded previews reused, used from any thread. */
     static void sharedCaches(final String photo, final byte[] jpeg, String lut, final int[] p) throws Exception {
         java.io.File dir = new java.io.File(lut).getParentFile();
-        String[] names = { "NATURAL.CUB", "PORTRA4W.CUB", "CLASSNEG.CUB", "CUBANNEG.CUB", "TRIX400.CUB", "PARTY800.CUB" };
+        String[] names = { "NATURAL.CUB", "PORTRA4W.CUB", "CUBANNEG.CUB", "PAINTRLY.CUB", "TRIX400.CUB" };
         final String[] films = new String[names.length];
         for (int i = 0; i < names.length; i++) films[i] = new java.io.File(dir, names[i]).getPath();
         final int w = 420, h = 280, n = films.length;
@@ -265,7 +271,7 @@ public class JniTest {
         FilmCore.forgetLut();
         boolean read = true;
         for (String f : films) read &= FilmCore.cacheLut(f) == 0;
-        check(read, "all six films read ahead (cacheLut) " + FilmCore.lastError());
+        check(read, "every film read ahead (cacheLut) " + FilmCore.lastError());
         boolean same = true;
         for (int round = 0; round < 3; round++) for (int i = 0; i < n; i++) {
             int[] px = new int[w * h];
@@ -274,7 +280,7 @@ public class JniTest {
             tKept += System.nanoTime() - t;
             if (!java.util.Arrays.equals(px, fresh[(i * 5 + round) % n])) same = false;
         }
-        check(same, "six films kept at once, in rotation: every preview exactly as from a fresh read ("
+        check(same, "the films kept at once, in rotation: every preview exactly as from a fresh read ("
                 + tRead / n / 1000000 + " ms a film read and decoded, " + tKept / (3 * n) / 1000000 + " ms kept)");
         check(FilmCore.cacheLut(lut + ".missing") == -1 && FilmCore.lastError().contains("cannot open look"), "a missing film refused: " + FilmCore.lastError());
         check(FilmCore.cacheLut(null) == 0, "no film: nothing to read");

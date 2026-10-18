@@ -489,18 +489,18 @@ static unsigned int hash32(unsigned int x) {     /* lowbias32 */
     return x;
 }
 
-/* triangular-distributed value in about -32768..32767 (std ~ 13377) */
+/* triangular-distributed value in -65535..65535 (std 65536 / sqrt(6), about 26755) */
 static int lattice(int x, int y, unsigned int seed) {
     unsigned int h = hash32((unsigned int)x * 0x8da6b343U ^ (unsigned int)y * 0xd8163841U ^ seed);
     return (int)(h & 0xffff) + (int)(h >> 16) - 65535;
 }
 
 /* The noise tile depends only on the grain size, so it is built once per size and kept for the
- * life of the process (1 MB each): every preview and save after the first skips ~1M hashes and
- * divisions. Each photo still gets its own pattern from a random offset into the tile. Any thread:
- * a tile is built under g_tile_mu (so two threads never build one at once, with 4 MB of workings
- * each) and never freed, so a tile once handed out stays good. */
-static signed char *g_tiles[4];
+ * life of the process (1 MB each): every preview and save after the first skips building it. Each
+ * photo still gets its own pattern from a random offset into the tile. Any thread: a tile is built
+ * under g_tile_mu (so two threads never build one at once, with 2 MB of workings each) and never
+ * freed, so a tile once handed out stays good. */
+static signed char *g_tiles[5];
 static pthread_mutex_t g_tile_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static const signed char *grain_tile_make(int size);
@@ -513,52 +513,246 @@ static const signed char *grain_tile(int size) {
     return tile;
 }
 
+/*
+ * Grain as film forms it (v0.46.0): grains of a spread of sizes, scattered at random, overlap, and how much of
+ * each point they cover, seen through a little blur, is the grain. It clumps and has crisp edges as film's does,
+ * where noise on a lattice (until v0.45.0) looked like a sensor's. The radii are the 32 quantiles of a lognormal
+ * spread, in 1/16 px (tools/make_luts.py's grain notes); count: grains covering a point on average (x 100);
+ * blur: the 3-tap weight either side (/256); fine: a share of per-pixel noise for grains too small to resolve (%);
+ * dome: the grains are rounded bumps (heights), not flat discs (cover). Integer maths and fixed tables, so every
+ * machine makes the same tile.
+ */
+typedef struct { unsigned char r16[32]; int count, blur, fine, dome; } grain_kind;
+static const grain_kind GRAIN_KINDS[5] = {
+    { { 0 }, 0, 0, 0, 0 },
+    /* 1: fine, a colour film's dye clouds (median 0.7 px, spread 0.3) */
+    { { 6, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10, 10, 11, 11, 11, 11, 12, 12, 12, 12, 13, 13, 14, 14, 14, 15, 15, 16, 17,
+        19, 21 }, 200, 10, 20, 0 },
+    /* 2: medium, a 400 colour film's (median 1 px, spread 0.4) */
+    { { 7, 8, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 20, 21, 21, 22, 23, 25, 26,
+        28, 31, 38 }, 300, 19, 30, 0 },
+    /* 3: coarse, Tri-X's silver pushed (median 1.4 px, spread 0.5) */
+    { { 8, 10, 11, 12, 13, 14, 15, 16, 16, 17, 18, 19, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32, 34, 36, 38, 41,
+        46, 52, 66 }, 350, 19, 30, 0 },
+    /* 4: Painterly's paper, a cold-press sheet's tooth (bumps of median 3.5 px, spread 0.35; see paper_finish) */
+    { { 26, 31, 34, 36, 38, 40, 42, 43, 45, 46, 48, 49, 51, 52, 54, 55, 57, 58, 60, 62, 64, 65, 67, 70, 72, 75, 78, 82,
+        86, 92, 101, 119 }, 160, 0, 30, 1 },
+};
+#define GRAIN_CELL 16   /* grains are scattered a fixed number to each 16 x 16 cell, cell by cell: the writes stay in cache */
+
+/*
+ * Painterly's paper (grain size 4, v0.46.0), from its tooth (acc: the bumps' heights): lit from the upper left so the
+ * bumps stand up off the sheet, with fibres here and there, a soft mottle and a little fine grain, scaled to
+ * GRAIN_STD into tile. In units of 1/1024 of a standard deviation until the last step. Not periodic in anything but
+ * the tile, so no moire when a photo is shown small.
+ */
+#define PAPER_FIBRES 1165    /* strands on the tile: one to every 900 pixels */
+#define PAPER_FIBRE 166      /* a strand's weight (a third of the tooth's spread, as the weights below) */
+static const short FIBRE_DIR[16][2] = {   /* (cos, sin) x 1024 of k x 180 / 16 degrees */
+    { 1024, 0 }, { 1004, 200 }, { 946, 392 }, { 851, 569 }, { 724, 724 }, { 569, 851 }, { 392, 946 }, { 200, 1004 },
+    { 0, 1024 }, { -200, 1004 }, { -392, 946 }, { -569, 851 }, { -724, 724 }, { -851, 569 }, { -946, 392 }, { -1004, 200 } };
+
+static void paper_finish(unsigned short *acc, unsigned short *bufs, signed char *tile, unsigned int seed, int fine) {
+    short *v = (short *)acc;   /* the heights become the paper's light, in place (signed from here) */
+    unsigned short *first = bufs, *prev = bufs + TILE, *keep = bufs + 2 * TILE, *was;
+    long long sh = 0, shh = 0, sll = 0, sum = 0, sumsq = 0, AH, AL, BH, A, B;
+    int x, y, i, t, mot[33], sm[32];
+    double mh, sdh, sdl, mean, sd;
+    const double N = (double)TILE * TILE;
+
+    /* the heights' spread, and the slopes': rising toward the lower right faces the light */
+    for (y = 0; y < TILE; y++) {
+        const unsigned short *row = acc + (size_t)y * TILE, *up = acc + (size_t)((y - 1) & TILE_MASK) * TILE,
+                             *dn = acc + (size_t)((y + 1) & TILE_MASK) * TILE;
+        for (x = 0; x < TILE; x++) {
+            int lit = row[(x + 1) & TILE_MASK] - row[(x - 1) & TILE_MASK] + dn[x] - up[x];
+            sh += row[x];
+            shh += (long long)row[x] * row[x];
+            sll += (long long)lit * lit;
+        }
+    }
+    mh = sh / N;
+    sdh = sqrt(shh / N - mh * mh);
+    sdl = sqrt(sll / N);
+    if (sdh <= 0 || sdl <= 0) { memset(tile, 0, TILE * TILE); return; }
+    /* 0.35 of the height and 1.2 of the light, each standardised (x 2^16); the slopes read the rows above and below
+       as they were, so those are kept aside as the rows are written */
+    AH = (long long)(0.35 * 1024.0 / sdh * 65536.0 + 0.5);
+    AL = (long long)(1.2 * 1024.0 / sdl * 65536.0 + 0.5);
+    BH = 32768 - (long long)(mh * 0.35 * 1024.0 / sdh * 65536.0 + 0.5);
+    memcpy(first, acc, sizeof *first * TILE);
+    memcpy(prev, acc + (size_t)(TILE - 1) * TILE, sizeof *prev * TILE);
+    for (y = 0; y < TILE; y++) {
+        unsigned short *row = acc + (size_t)y * TILE, *next = y + 1 < TILE ? row + TILE : first;
+        memcpy(keep, row, sizeof *keep * TILE);
+        for (x = 0; x < TILE; x++) {
+            int lit = keep[(x + 1) & TILE_MASK] - keep[(x - 1) & TILE_MASK] + next[x] - prev[x];
+            v[(size_t)y * TILE + x] = (short)((keep[x] * AH + lit * AL + BH) >> 16);
+        }
+        was = prev; prev = keep; keep = was;
+    }
+
+    /* fibres: short strands at sixteen angles, each 24 points softened over 3 x 3 pixels */
+    for (i = 0; i < PAPER_FIBRES; i++) {
+        unsigned int h = hash32((unsigned int)i * 0x9e3779b1u ^ seed ^ 0x51ed2701u), h2 = hash32(h);
+        int x0 = (int)(h & TILE_MASK), y0 = (int)(h >> 10 & TILE_MASK), dir = (int)(h >> 20 & 15), len = 6 + (int)(h2 & 15);
+        for (t = 0; t < 24; t++) {
+            int px = ((x0 + TILE) * 1024 + FIBRE_DIR[dir][0] * len * (2 * t - 23) / 48 + 512) >> 10;
+            int py = ((y0 + TILE) * 1024 + FIBRE_DIR[dir][1] * len * (2 * t - 23) / 48 + 512) >> 10;
+            int dx, dy;
+            for (dy = -1; dy <= 1; dy++) for (dx = -1; dx <= 1; dx++)
+                v[(size_t)((py + dy) & TILE_MASK) * TILE + ((px + dx) & TILE_MASK)] +=
+                    (short)(PAPER_FIBRE * (dx ? 1 : 2) * (dy ? 1 : 2));
+        }
+    }
+
+    /* a soft mottle (noise on a 32 px lattice, eased between its points) and fine grain; then the spread of it all */
+    for (i = 0; i < 32; i++) sm[i] = (i * i * (96 - 2 * i)) >> 7;   /* smoothstep(i / 32) x 256 */
+    for (y = 0; y < TILE; y++) {
+        int ly = y >> 5, sy = sm[y & 31];
+        for (x = 0; x <= 32; x++) {   /* this row's mottle at each lattice column */
+            int a = lattice(x & 31, ly, seed ^ 0x2d358dccu), b = lattice(x & 31, (ly + 1) & 31, seed ^ 0x2d358dccu);
+            mot[x] = a + (int)(((long long)(b - a) * sy) >> 8);
+        }
+        for (x = 0; x < TILE; x++) {
+            int lx = x >> 5, m = mot[lx] + (int)(((long long)(mot[lx + 1] - mot[lx]) * sm[x & 31]) >> 8);
+            int val = v[(size_t)y * TILE + x] + (int)(((long long)m * 1254) >> 16)
+                      + (int)(((long long)lattice(x, y, seed) * fine * 25) >> 16);   /* 0.35 and fine% of a deviation */
+            val = val < -32767 ? -32767 : val > 32767 ? 32767 : val;
+            v[(size_t)y * TILE + x] = (short)val;
+            sum += val;
+            sumsq += (long long)val * val;
+        }
+    }
+    mean = sum / N;
+    sd = sqrt(sumsq / N - mean * mean);
+    A = sd > 0 ? (long long)(GRAIN_STD / sd * 1048576.0 + 0.5) : 0;
+    B = 524288 - (long long)(mean * GRAIN_STD / sd * 1048576.0 + 0.5);
+    for (i = 0; i < TILE * TILE; i++) {
+        long long q = (v[i] * A + B) >> 20;
+        tile[i] = (signed char)(q > 127 ? 127 : q < -127 ? -127 : q);
+    }
+}
+
 /* Under g_tile_mu. */
 static const signed char *grain_tile_make(int size) {
     const unsigned int seed = 0x2545f491U;
-    int *raw, x, y, v, cells, step, wrap;
-    long long sumsq = 0;
-    double stdv, scale;
+    const grain_kind *k = &GRAIN_KINDS[size];
+    unsigned char *stamps;
+    int off[32][16], side[32];
+    unsigned short *acc, *bufs, *first, *prev, *keep;
     signed char *tile;
-    raw = (int *)malloc(sizeof(int) * TILE * TILE);
-    tile = (signed char *)malloc(TILE * TILE);
-    if (!raw || !tile) { free(raw); free(tile); return NULL; }
-    cells = TILE / size + (TILE % size ? 1 : 0);
-    step = 256 / size;               /* fx advances by this per pixel ... */
-    wrap = 256 - 256 % size;         /* ... and wraps to the next lattice cell here */
+    long long sum = 0, sumsq = 0, rsq = 0, total = 0, A, B, C;
+    int i, q, x, y, per, cells = TILE / GRAIN_CELL;
+    double mean, var, norm, a, fine = k->fine / 100.0;
 
-    /* noise is periodic over the tile so it wraps without a seam */
-    for (y = 0; y < TILE; y++) {
-        int ly = y / size, fy = (y % size) * 256 / size, ly1 = (ly + 1) % cells;
-        int lx = 0, fx = 0;
-        for (x = 0; x < TILE; x++, fx += step) {
-            int fine = lattice(x, y, seed);
-            if (fx >= wrap) { fx = 0; lx++; }   /* x / size and x % size without dividing */
-            if (size == 1) {
-                v = fine;
-            } else {
-                /* value noise on a lattice of 'size' px (bilinear), plus some per-pixel fine grain */
-                int lx1 = lx + 1 == cells ? 0 : lx + 1;
-                int a = lattice(lx, ly, seed ^ 0x5bd1e995U), b = lattice(lx1, ly, seed ^ 0x5bd1e995U);
-                int c = lattice(lx, ly1, seed ^ 0x5bd1e995U), d = lattice(lx1, ly1, seed ^ 0x5bd1e995U);
-                int top = a + (((b - a) * fx) >> 8), bot = c + (((d - c) * fx) >> 8);
-                int coarse = top + (((bot - top) * fy) >> 8);
-                v = coarse + (size == 2 ? fine / 2 : fine / 3);
+    /* a stamp for every radius and quarter-pixel position: the 1/16ths of each pixel the disc covers (4 x 4 samples),
+       or for a dome its height there (0..128), kept a row at a time as the span it covers (first column, length, then
+       the values) */
+    for (i = 0; i < 32; i++) { side[i] = 2 * (k->r16[i] >> 4) + 3; total += 16 * side[i] * (side[i] + 2); rsq += k->r16[i] * k->r16[i]; }
+    stamps = (unsigned char *)malloc((size_t)total);
+    acc = (unsigned short *)calloc((size_t)TILE * TILE, sizeof *acc);
+    bufs = (unsigned short *)malloc(sizeof *bufs * 3 * TILE);   /* rows for the blur */
+    tile = (signed char *)malloc(TILE * TILE);
+    if (!stamps || !acc || !bufs || !tile) { free(stamps); free(acc); free(bufs); free(tile); return NULL; }
+    first = bufs; prev = bufs + TILE; keep = bufs + 2 * TILE;
+    total = 0;
+    for (i = 0; i < 32; i++) {
+        int r2 = k->r16[i] * k->r16[i], h = side[i] / 2;
+        for (q = 0; q < 16; q++) {
+            int cx = 16 * h + 4 * (q & 3) + 2, cy = 16 * h + 4 * (q >> 2) + 2;   /* the centre, in 1/16 px of the stamp */
+            off[i][q] = (int)total;
+            for (y = 0; y < side[i]; y++) {
+                unsigned char cov[32], *st = stamps + total;
+                int lo = side[i], hi = -1;
+                for (x = 0; x < side[i]; x++) {
+                    int s, t, n = 0;
+                    for (t = 0; t < 4; t++) for (s = 0; s < 4; s++) {
+                        int dx = 16 * x + 4 * s + 2 - cx, dy = 16 * y + 4 * t + 2 - cy, d2 = dx * dx + dy * dy;
+                        if (d2 > r2) continue;
+                        if (k->dome) { int u = 256 - d2 * 256 / r2; n += u * u >> 13; }   /* (1 - (d/r)^2)^2, 0..8 a sample */
+                        else n++;
+                    }
+                    cov[x] = (unsigned char)n;
+                    if (n) { if (x < lo) lo = x; hi = x; }
+                }
+                if (hi < 0) lo = 0;
+                st[0] = (unsigned char)lo;
+                st[1] = (unsigned char)(hi + 1 - lo);
+                memcpy(st + 2, cov + lo, (size_t)st[1]);
+                total += 2 + st[1];
             }
-            raw[y * TILE + x] = v;
-            sumsq += (long long)v * v;
         }
     }
-    stdv = sqrt((double)sumsq / (TILE * TILE));
-    scale = stdv > 0 ? GRAIN_STD / stdv : 0;
-    for (x = 0; x < TILE * TILE; x++) {
-        double t = raw[x] * scale;
-        tile[x] = (signed char)(t > 127 ? 127 : t < -127 ? -127 : (int)(t < 0 ? t - 0.5 : t + 0.5));
+
+    /* the grains: count x (cell area) / (pi x mean r^2) to each cell */
+    per = (int)(k->count / 100.0 * GRAIN_CELL * GRAIN_CELL * 256.0 * 32.0 / (3.14159265358979 * (double)rsq) + 0.5);
+    for (y = 0; y < cells; y++) for (x = 0; x < cells; x++) {
+        unsigned int cell = (unsigned int)(y * cells + x);
+        for (i = 0; i < per; i++) {
+            unsigned int h = hash32((cell * 1024u + (unsigned int)i) * 0x9e3779b1u ^ seed);
+            int ri = (int)(h >> 12 & 31), sd = side[ri], half = sd / 2, r, s;
+            const unsigned char *st = stamps + off[ri][(h >> 4 & 3) | (h >> 10 & 3) << 2];
+            int x0 = x * GRAIN_CELL + (int)(h & 15) - half, y0 = y * GRAIN_CELL + (int)(h >> 6 & 15) - half;
+            for (r = 0; r < sd; r++, st += 2 + st[1]) {
+                unsigned short *row = acc + (size_t)((y0 + r) & TILE_MASK) * TILE;
+                int xs = x0 + st[0], n = st[1];
+                for (s = 0; s < n; s++) row[(xs + s) & TILE_MASK] += st[2 + s];
+            }
+        }
     }
-    free(raw);
+    free(stamps);
+    if (k->dome) {
+        paper_finish(acc, bufs, tile, seed, k->fine);
+        free(acc);
+        free(bufs);
+        g_tiles[size] = tile;
+        return tile;
+    }
+
+    /* a little blur, as the grain is seen through a lens (units of 1/256 of a grain from here, at most ~16 x 320),
+       across each row, then down the rows a row at a time (a column at a time would miss the cache on every pixel) */
+    for (y = 0; y < TILE; y++) {
+        unsigned short *row = acc + (size_t)y * TILE;
+        memcpy(keep, row, sizeof *keep * TILE);
+        for (x = 0; x < TILE; x++)
+            row[x] = (unsigned short)((k->blur * (keep[(x - 1) & TILE_MASK] + keep[(x + 1) & TILE_MASK])
+                                       + (256 - 2 * k->blur) * keep[x]) >> 4);
+    }
+    memcpy(first, acc, sizeof *first * TILE);
+    memcpy(prev, acc + (size_t)(TILE - 1) * TILE, sizeof *prev * TILE);
+    for (y = 0; y < TILE; y++) {
+        unsigned short *row = acc + (size_t)y * TILE, *next = y + 1 < TILE ? row + TILE : first, *was;
+        memcpy(keep, row, sizeof *keep * TILE);
+        for (x = 0; x < TILE; x++) {
+            int v = (k->blur * (prev[x] + next[x]) + (256 - 2 * k->blur) * keep[x]) >> 8;
+            row[x] = (unsigned short)v;
+            sum += v;
+            sumsq += (long long)v * v;
+        }
+        was = prev; prev = keep; keep = was;   /* this row as it was: the next row's previous */
+    }
+
+    /* standardised, with the fine share, scaled to GRAIN_STD: t = v * a + b + lattice * c, in fixed point (x 2^20) */
+    mean = (double)sum / (TILE * TILE);
+    var = (double)sumsq / (TILE * TILE) - mean * mean;
+    norm = sqrt(1.0 + fine * fine);
+    a = var > 0 ? GRAIN_STD / (sqrt(var) * norm) : 0;
+    A = (long long)(a * 1048576.0 + 0.5);
+    B = (long long)(-mean * a * 1048576.0 - 0.5) + 524288;   /* + 1/2: rounds to nearest */
+    C = (long long)(fine * GRAIN_STD / (26754.59 * norm) * 1048576.0 + 0.5);
+    for (y = 0; y < TILE; y++) for (x = 0; x < TILE; x++) {
+        long long t = (acc[(size_t)y * TILE + x] * A + lattice(x, y, seed) * C + B) >> 20;
+        tile[y * TILE + x] = (signed char)(t > 127 ? 127 : t < -127 ? -127 : t);
+    }
+    free(acc);
+    free(bufs);
     g_tiles[size] = tile;
     return tile;
 }
+
+#define GRAIN_PEAK 0.42   /* the output brightness where grain shows most */
+#define PAPER_PEAK 0.65   /* and a paper's tooth */
 
 static int grain_init(fl_grain *G, const int *params, char *err, int errlen) {
     int strength = params[FL_PARAM_GRAIN], size = params[FL_PARAM_GRAINSIZE], v;
@@ -567,16 +761,21 @@ static int grain_init(fl_grain *G, const int *params, char *err, int errlen) {
     if (strength <= 0) return 0;
     if (strength > 10) strength = 10;
     if (size < 1) size = 1;
-    if (size > 3) size = 3;
+    if (size > 4) size = 4;
     G->tile = grain_tile(size);
     if (!G->tile) { set_err(err, errlen, "out of memory for grain"); return -1; }
 
-    /* Film grain shows most in the midtones, less in deep shadow, least in highlights.
-     * Strength 10 -> about 9 levels of std deviation at mid grey. */
+    /* As on a print from a negative, grain shows most in the lower midtones, eases into the shadows (0.38 of it
+     * at black) and fades through the highlights (0.08 at white). A paper's tooth (size 4) shows most in the light
+     * midtones, where ink lies thinnest, and stays on into the highlights (0.35 at black, 0.7 at white). Strength 10:
+     * about 9 levels of standard deviation at its peak. */
     for (v = 0; v < 256; v++) {
-        double l = v / 255.0;
-        double w = sqrt(4.0 * l * (1.0 - l));
-        if (l < 0.5) w = 0.15 + 0.85 * w; else w = w * (1.0 - 0.3 * (l - 0.5));
+        double l = v / 255.0, u, w;
+        if (size == 4) {
+            if (l < PAPER_PEAK) { u = (PAPER_PEAK - l) / PAPER_PEAK; w = 1 - 0.65 * u * u * (3 - 2 * u); }
+            else { u = (l - PAPER_PEAK) / (1 - PAPER_PEAK); w = 1 - 0.3 * u * u * (3 - 2 * u); }
+        } else if (l < GRAIN_PEAK) { u = (GRAIN_PEAK - l) / GRAIN_PEAK; w = 1 - 0.62 * u * u * (3 - 2 * u); }
+        else { u = (l - GRAIN_PEAK) / (1 - GRAIN_PEAK); w = 1 - 0.92 * u * u * (3 - 2 * u); }
         G->amp[v] = (int)(strength * 0.9 / GRAIN_STD * 256.0 * w + 0.5);
     }
     G->ox = (int)(hash32(seed ^ 0x1234567U) & TILE_MASK);
@@ -3168,7 +3367,7 @@ static void *warm_main(void *arg) {
     if (look_init(&L, lut, g_warm_params, err, sizeof err) == 0) {
         if (g_warm_params[FL_PARAM_GRAIN] > 0) {
             int size = g_warm_params[FL_PARAM_GRAINSIZE];
-            grain_tile(size < 1 ? 1 : size > 3 ? 3 : size);
+            grain_tile(size < 1 ? 1 : size > 4 ? 4 : size);
         }
         if (!(e = ycc_get(lut, g_warm_params))) {
             ycc_look Y;

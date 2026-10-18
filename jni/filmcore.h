@@ -10,7 +10,7 @@
 #define FL_PARAM_HIGHLIGHT 0   /* -4 .. +4, Fuji-style: + brighter highlights        */
 #define FL_PARAM_SHADOW    1   /* -4 .. +4, Fuji-style: + deeper shadows             */
 #define FL_PARAM_GRAIN     2   /*  0 .. 10, strength                                 */
-#define FL_PARAM_GRAINSIZE 3   /*  1 .. 3                                            */
+#define FL_PARAM_GRAINSIZE 3   /*  1 .. 4: fine, medium, coarse film; 4 paper        */
 #define FL_PARAM_QUALITY   4   /* 50 .. 100, output JPEG quality                     */
 #define FL_PARAM_SEED      5   /* any int: varies the grain pattern between frames   */
 #define FL_PARAM_THREADS   6   /* 1 = single-threaded; 2+ = decode/look/encode pipeline */

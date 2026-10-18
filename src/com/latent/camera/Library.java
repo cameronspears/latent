@@ -3,6 +3,7 @@ package com.latent.camera;
 import android.content.res.AssetManager;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -179,11 +180,13 @@ final class Library {
         return out;
     }
 
-    /** The looks bundled in the APK, copied to the card on first run so they can be edited or swapped. */
-    /** The looks shipped inside the app (assets/luts). */
-    static final String[] BUNDLED = { "NATURAL.CUB", "PORTRA4W.CUB", "CLASSNEG.CUB", "CUBANNEG.CUB", "TRIX400.CUB", "PARTY800.CUB" };
+    /**
+     * The looks shipped inside the app (assets/luts), copied to the card so they can be read there. A look an earlier
+     * Latent put on the card is replaced by this version's (see stale); your own looks are never touched.
+     */
+    static final String[] BUNDLED = { "NATURAL.CUB", "PORTRA4W.CUB", "CUBANNEG.CUB", "PAINTRLY.CUB", "TRIX400.CUB" };
 
-    private static volatile boolean installed;   // checked once per run: six stats on the card every resume otherwise
+    private static volatile boolean installed;   // checked once per run: five small reads on the card every resume otherwise
 
     static void installBundledLuts(AssetManager assets, File card) throws IOException {
         if (installed) return;
@@ -194,14 +197,10 @@ final class Library {
     private static void installLuts(AssetManager assets, File card) throws IOException {
         File dir = lutDir(card);
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cannot create " + dir);
-        boolean all = true;
-        for (String name : BUNDLED) all &= new File(dir, name).exists();
-        if (all) return;   // the usual case: no need to open the app's own file list (slow on the camera)
-        String[] names = assets.list("luts");
-        if (names == null) return;
-        for (String name : names) {
+        for (String name : BUNDLED) {
             File target = new File(dir, name);
-            if (target.exists()) continue;
+            String shipped = firstLine(assets.open("luts/" + name));
+            if (target.exists() && !stale(firstLine(new FileInputStream(target)), shipped)) continue;
             File tmp = new File(dir, "SAVING.TMP");
             InputStream in = assets.open("luts/" + name);
             FileOutputStream out = new FileOutputStream(tmp);
@@ -213,10 +212,32 @@ final class Library {
                 in.close();
                 out.close();
             }
-            if (!tmp.renameTo(target)) {
+            // the old look goes only once the new one is whole: a power cut between the two leaves no look, and the
+            // next run installs it again
+            if ((target.exists() && !target.delete()) || !tmp.renameTo(target)) {
                 tmp.delete();
                 throw new IOException("cannot write " + target);
             }
+        }
+    }
+
+    /**
+     * Whether a look on the card (its first line) is one an earlier Latent wrote and this one ships anew (shipped: the
+     * first line of this version's): make_luts.py starts every look with a line naming its version, and Latent's looks
+     * before it began "# Latent look." or "# Film Lab look.". Anything else is yours, and stays.
+     */
+    static boolean stale(String onCard, String shipped) {
+        if (onCard == null || onCard.equals(shipped)) return false;
+        return onCard.startsWith("# Latent look") || onCard.startsWith("# Film Lab look");
+    }
+
+    /** The first line of a file, or null; the stream is closed. */
+    static String firstLine(InputStream in) throws IOException {
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(in, "UTF-8"), 256);
+            return r.readLine();
+        } finally {
+            in.close();
         }
     }
 

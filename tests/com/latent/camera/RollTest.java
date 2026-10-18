@@ -24,12 +24,28 @@ public class RollTest {
         touch(new File(card, "LATENT/LUTS/CUBANNEG.CUB"), 0);
         touch(new File(card, "LATENT/LUTS/PORTRA4W.CUB"), 0);
         touch(new File(card, "LATENT/LUTS/MYLOOK.CUB"), 0);
+        touch(new File(card, "LATENT/LUTS/CLASSNEG.CUB"), 0);   // a film retired in v0.46.0, its look still on the card
         long t = 1700000000000L;
         for (int i = 1; i <= 3; i++) touch(new File(dcim, "DSC0100" + i + ".JPG"), t + i * 10000);   // before the roll
 
-        List<Stock> stocks = Stock.all(card);
+        List<Stock> every = Stock.all(card), stocks = Stock.offered(every);
         check(stocks.size() == 3 && stocks.get(0).id.equals("PORTRA4W") && stocks.get(1).id.equals("CUBANNEG")
                 && stocks.get(2).name.equals("MYLOOK"), "stocks: built-ins in their order, then custom");
+        Stock retired = Stock.byId(every, "CLASSNEG");
+        check(every.size() == 4 && retired != null && retired.retired && retired.name.equals("Classic Neg 400") && retired.lut != null
+                && Stock.byId(stocks, "CLASSNEG") == null, "a retired film: not offered, yet found by its id with its own name and look");
+        {   // the looks on the card: an earlier Latent's are replaced by this version's, anything else stays
+            String shipped = Library.firstLine(new java.io.FileInputStream("assets/luts/NATURAL.CUB"));
+            boolean same = true;
+            for (String n : Library.BUNDLED) same &= shipped.equals(Library.firstLine(new java.io.FileInputStream("assets/luts/" + n)));
+            check(same && shipped.startsWith("# Latent look ") && !Library.stale(shipped, shipped), "the shipped looks share one first line, Latent's");
+            check(Library.stale("# Latent look. Input: Sony Standard creative style JPEG (sRGB), shot neutral.", shipped)
+                    && Library.stale("# Film Lab look. Input: Sony Standard creative style JPEG (sRGB).", shipped),
+                    "the looks of v0.45.0 and of Film Lab are replaced");
+            check(!Library.stale("TITLE \"Mine\"", shipped) && !Library.stale("# My own look", shipped) && !Library.stale(null, shipped)
+                    && !Library.stale("", shipped), "your own looks, and an empty file, are left alone");
+            for (String n : Library.BUNDLED) check(new File("assets/luts/" + n).exists(), n + " is in the app");
+        }
 
         List<File> photos = Library.photos(card);
         Roll r = Roll.create(card, "CUBANNEG", 12, photos.get(0).lastModified());
