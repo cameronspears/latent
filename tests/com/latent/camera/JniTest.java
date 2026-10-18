@@ -324,7 +324,8 @@ public class JniTest {
         for (Thread t : th) t.join();
         check(ok[0] && ok[1], "two composers on two threads, overlays swapped meanwhile: every picture right");
         String pr = FilmCore.probe(null);
-        check(pr.contains("multiply-adds") && pr.contains("MB/s"), "the speed probe: " + pr);
+        check(pr.contains("multiply-adds") && pr.contains("MB/s") && pr.matches(".*256 KB: \\d+/\\d+/\\d+/\\d+/\\d+/\\d+ ns$") && !pr.contains("\n"),
+                "the speed probe, one line: " + pr);
         System.out.println("  composer times (Mac): decode " + tm[0] + ", read " + tm[1] + ", look " + tm[2] + ", compose " + tm[3] + " ms");
         FilmCore.setOverlay(null, 0, 0);
         FilmCore.frameFree(c);

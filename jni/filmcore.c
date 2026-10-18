@@ -2375,15 +2375,48 @@ static int still_matches(const int *sig) {
     return still;
 }
 
+/* ns a load, following a chain of pointers one cache line (32 bytes) apart in random order through 'kb' KB of
+ * mem: each load waits for the last, so it shows how far the data is (level-1 cache, level 2, memory). */
+static unsigned char *volatile g_chase_end;
+
+static long chase_ns(unsigned char *mem, int kb) {
+    const int n = kb * 1024 / 32, steps = 32768;
+    unsigned int r = 0x9e3779b9u, i;
+    unsigned char *p;
+    long t;
+    for (i = 0; i < (unsigned)n; i++) *(unsigned int *)(mem + i * 32) = i;
+    for (i = (unsigned)n - 1; i > 0; i--) {   /* Sattolo: one cycle through every line */
+        unsigned int j, tmp;
+        r = r * 1664525u + 1013904223u;
+        j = (unsigned int)(((unsigned long long)r * i) >> 32);
+        tmp = *(unsigned int *)(mem + i * 32);
+        *(unsigned int *)(mem + i * 32) = *(unsigned int *)(mem + j * 32);
+        *(unsigned int *)(mem + j * 32) = tmp;
+    }
+    for (i = 0; i < (unsigned)n; i++) {   /* line i -> the line its number names, as a pointer */
+        unsigned int next = *(unsigned int *)(mem + i * 32);
+        *(unsigned char **)(mem + i * 32 + 8) = mem + next * 32;
+    }
+    p = mem;
+    for (i = 0; i < 1024; i++) p = *(unsigned char **)(p + 8);   /* warm */
+    t = now_us();
+    for (i = 0; i < (unsigned)steps; i++) p = *(unsigned char **)(p + 8);
+    t = now_us() - t;
+    g_chase_end = p;   /* where the chase ended: kept, so it is run */
+    return (t * 1000 + steps / 2) / steps;
+}
+
 /* How fast this core and its memory really are, for the log (once a visit, ~0.1 s): a chain of dependent
  * multiply-adds, then 1 MB filled, read and copied in ordinary memory, and filled in 'px' (a screen
- * bitmap's pixels, 'bytes' long) when given. */
+ * bitmap's pixels, 'bytes' long) when given; then a load chased through 8 to 256 KB (where it slows, the
+ * level-1 cache ends, and whether there is a level 2). One line. */
 int fl_probe(unsigned char *px, int bytes, char *out, int len) {
+    static const int KB[6] = { 8, 16, 32, 64, 128, 256 };
     const int MB = 1 << 20;
     unsigned char *a = (unsigned char *)malloc(MB), *b = (unsigned char *)malloc(MB);
     unsigned int x = 1, sum = 0, i;
-    long t, alu, fill, rd, cpy, bm = -1;
-    int k;
+    long t, alu, fill, rd, cpy, bm = -1, ns[6];
+    int k, at;
     if (!a || !b) { free(a); free(b); snprintf(out, len, "no memory"); return -1; }
     memset(a, 1, MB); memset(b, 2, MB);   /* touched once: no page faults below */
     t = now_us();
@@ -2403,11 +2436,15 @@ int fl_probe(unsigned char *px, int bytes, char *out, int len) {
         for (k = 0; k < 4; k++) memset(px, 0, (size_t)bytes);
         bm = now_us() - t;
     }
-    snprintf(out, len, "4M multiply-adds %ld ms (~%ld M a second); 4 MB filled %ld ms (%ld MB/s), read %ld ms (%ld MB/s, a word in 8), "
-             "copied %ld ms (%ld MB/s)%s%ld%s [%u]",
-             alu / 1000, alu > 0 ? 4000000L / alu : 0, fill / 1000, fill > 0 ? 4L * 1000000 / fill : 0, rd / 1000, rd > 0 ? 4L * 1000000 / rd : 0,
-             cpy / 1000, cpy > 0 ? 4L * 1000000 / cpy : 0, bm >= 0 ? "; a screen bitmap filled at " : "",
-             bm > 0 ? (long)((4.0 * bytes / (1 << 20)) * 1000000 / bm) : 0L, bm >= 0 ? " MB/s" : "", (x + sum) & 1);
+    for (k = 0; k < 6; k++) ns[k] = chase_ns(b, KB[k]);
+    at = snprintf(out, len, "4M multiply-adds %ld ms (~%ld M a second); 4 MB filled %ld ms (%ld MB/s), read %ld ms (%ld MB/s, a word in 8), "
+                  "copied %ld ms (%ld MB/s)%s%ld%s [%u]",
+                  alu / 1000, alu > 0 ? 4000000L / alu : 0, fill / 1000, fill > 0 ? 4L * 1000000 / fill : 0, rd / 1000, rd > 0 ? 4L * 1000000 / rd : 0,
+                  cpy / 1000, cpy > 0 ? 4L * 1000000 / cpy : 0, bm >= 0 ? "; a screen bitmap filled at " : "",
+                  bm > 0 ? (long)((4.0 * bytes / (1 << 20)) * 1000000 / bm) : 0L, bm >= 0 ? " MB/s" : "", (x + sum) & 1);
+    if (at > 0 && at < len)
+        snprintf(out + at, (size_t)(len - at), "; a load chased through 8/16/32/64/128/256 KB: %ld/%ld/%ld/%ld/%ld/%ld ns",
+                 ns[0], ns[1], ns[2], ns[3], ns[4], ns[5]);
     free(a); free(b);
     return 0;
 }
