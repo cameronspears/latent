@@ -16,6 +16,8 @@ LOCAL_C_INCLUDES := $(LOCAL_PATH) $(LOCAL_PATH)/turbo $(LOCAL_PATH)/$(JPEG_DIR)
 # full 32-bit ARM instructions: faster than Thumb for this pixel-heavy code
 LOCAL_ARM_MODE := arm
 LOCAL_CFLAGS := -O3 -std=gnu99 -fvisibility=hidden -Wno-main -Wno-shift-negative-value
+# No -mtune (v0.45.0, tools/asm-budget.sh): gcc 4.9's default (cortex-a8's) is never worse; cortex-a5 saved 1-3
+# instructions in the live loops but cost the darkroom's pair loop 4-5 a pair, cortex-a7/a9/a15 likewise traded.
 # The camera runs Android 2.3.7: its linker only reads SysV hash tables.
 LOCAL_LDFLAGS := -Wl,--hash-style=sysv -Wl,--gc-sections -Wl,--no-undefined
 LOCAL_LDLIBS := -lm -ldl
