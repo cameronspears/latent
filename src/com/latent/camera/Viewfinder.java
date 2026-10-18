@@ -1586,7 +1586,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      */
     private void applyEvNow() {
         ui.removeCallbacks(applyEv);
-        if (camera == null || cameraEx == null || closed || ev == evApplied) return;
+        // not once closing (leaving Latent, or a restart): the camera goes back, and its own mode may shoot soon after;
+        // a wheel turn in the last 150 ms before that is dropped, never written on the way out
+        if (camera == null || cameraEx == null || closed || closing || ev == evApplied) return;
         try {
             Camera.Parameters p = (Camera.Parameters) cameraEx.getClass().getMethod("createEmptyParameters").invoke(cameraEx);
             p.setExposureCompensation(evIndex(ev, evStep));

@@ -78,6 +78,37 @@ public class LogicTest {
                 && Photos.exposure("1/0", "Infinity", "abc").equals(""), "odd tags say nothing");
         check(Photos.shutter(1 / 4000.0).equals("1/4000") && Photos.shutter(0.25).equals("1/4") && Photos.shutter(0.3).equals("0.3\"") && Photos.shutter(1).equals("1\""),
                 "the shutter's steps");
+        // Android 2.3's ExifInterface (jhead): the time as a float printed "%6.4f" below 0.010 s, else "%5.3f". Each of
+        // the camera's speeds from 1/4000 to 1/4 as it would come back, and what the caption must say
+        String[][] jhead = { { "0.0003", "1/4000" }, { "0.0004", "1/2500" }, { "0.0005", "1/2000" }, { "0.0006", "1/1600" },
+                { "0.0008", "1/1250" }, { "0.0010", "1/1000" }, { "0.0012", "1/800" }, { "0.0016", "1/640" }, { "0.0020", "1/500" },
+                { "0.0025", "1/400" }, { "0.0031", "1/320" }, { "0.0040", "1/250" }, { "0.0050", "1/200" }, { "0.0063", "1/160" },
+                { "0.0080", "1/125" }, { "0.0100", "1/100" }, { "0.013", "1/80" }, { "0.017", "1/60" }, { "0.020", "1/50" },
+                { "0.025", "1/40" }, { "0.033", "1/30" }, { "0.040", "1/25" }, { "0.050", "1/20" }, { "0.067", "1/15" },
+                { "0.077", "1/13" }, { "0.100", "1/10" }, { "0.125", "1/8" }, { "0.167", "1/6" }, { "0.200", "1/5" }, { "0.250", "1/4" },
+                { "0.333", "0.3\"" }, { "0.400", "0.4\"" }, { "0.625", "0.6\"" }, { "1.300", "1.3\"" }, { "3.200", "3.2\"" }, { "30.000", "30\"" } };
+        StringBuilder wrong = new StringBuilder();
+        for (String[] c : jhead) { String got = Photos.shutter(Photos.number(c[0])); if (!got.equals(c[1])) wrong.append(c[0]).append(" -> ").append(got).append("; "); }
+        check(wrong.length() == 0, "jhead's rounded decimals back on the camera's scale (0.0003 1/4000, 0.0031 1/320, 0.017 1/60 ...) " + wrong);
+        // what each wrong reading of v0.45.0's first caption was, now the camera's speed
+        check(Photos.shutter(1 / 3333.0).equals("1/4000") && Photos.shutter(1 / 1667.0).equals("1/1600") && Photos.shutter(1 / 833.0).equals("1/800")
+                && Photos.shutter(1 / 625.0).equals("1/640") && Photos.shutter(1 / 323.0).equals("1/320") && Photos.shutter(1 / 159.0).equals("1/160")
+                && Photos.shutter(1 / 77.0).equals("1/80") && Photos.shutter(1 / 59.0).equals("1/60"),
+                "1/3333 1/4000, 1/1667 1/1600, 1/833 1/800, 1/625 1/640, 1/323 1/320, 1/159 1/160, 1/77 1/80, 1/59 1/60");
+        // its decimal for every speed of the camera's, made as jhead makes it, comes back as that speed (1/3200 shares
+        // 1/4000's "0.0003": the one the caption can't tell apart), and exact times as given stay as they are
+        int[] den = { 4000, 3200, 2500, 2000, 1600, 1250, 1000, 800, 640, 500, 400, 320, 250, 200, 160, 125, 100, 80, 60, 50, 40, 30, 25, 20, 15, 13, 10, 8, 6, 5, 4 };
+        StringBuilder off = new StringBuilder();
+        for (int d : den) {
+            float t = 1f / d;
+            String text = String.format(java.util.Locale.US, t < 0.010 ? "%6.4f" : "%5.3f", (double) t).trim();
+            String got = Photos.shutter(Photos.number(text)), want = d == 3200 ? "1/4000" : "1/" + d;
+            if (!got.equals(want)) off.append(d).append(": ").append(text).append(" -> ").append(got).append("; ");
+            if (!Photos.shutter(Photos.number("1/" + d)).equals("1/" + d)) off.append("1/").append(d).append(" as a rational; ");
+        }
+        check(off.length() == 0, "every speed through jhead's format, and as a rational " + off);
+        check(Photos.shutter(1 / 8000.0).equals("1/8000") && Photos.shutter(60).equals("60\"") && Photos.shutter(0.0001).equals("1/10000"),
+                "a time off the camera's scale shows as it is");
     }
 
     /** The exporter's thread ends no sooner than EXPORT_SETTLE_MS after its release was posted, however the time is spent. */

@@ -491,12 +491,34 @@ final class Roll {
         return out;
     }
 
-    /** Endless rolls with frames still to develop (in the camera, or just replaced), oldest first. */
-    static List<Roll> undevelopedEndless(List<Roll> rolls) {
+    /**
+     * Rolls with frames still to develop that aren't the film in the camera (that one's develop is the camera
+     * back's: a finished roll, Develop now): endless rolls' new photos, in the camera or replaced, and rolls of
+     * 12, 24 or 36 closed part-shot by Change film or tidy (v0.44.1 developed those only from their contact sheet,
+     * which Photos replaced; Change film says it keeps their frames for developing). The roll in the camera is left
+     * out by which roll it is, not by isOpen(): a closed roll left part-developed by v0.44.1's sheet is marked
+     * developing, so "open", and still waits. A frame whose original is gone from the camera roll and from NEG can never
+     * develop, so it doesn't count (a roll of only those would start and fail on every visit). Oldest first.
+     */
+    static List<Roll> undeveloped(List<Roll> rolls, Roll inCamera) {
         List<Roll> out = new ArrayList<Roll>();
-        for (Roll r : rolls) if (r.endless() && !DEVELOPED.equals(r.state) && r.developedCount() < r.frames.size()) out.add(0, r);
+        for (Roll r : rolls) {
+            if (DEVELOPED.equals(r.state) || r.frames.isEmpty()) continue;
+            if (!r.endless() && inCamera != null && r.dir.equals(inCamera.dir)) continue;
+            if (r.toDevelop() > 0) out.add(0, r);
+        }
         return out;
     }
+
+    /** Frames not developed yet whose original is still on the card (in the camera roll, or filed in NEG). */
+    int toDevelop() {
+        int n = 0;
+        for (int i = 0; i < frames.size(); i++) if (developed(i) == null && source(i).exists()) n++;
+        return n;
+    }
+
+    /** Replaced by a newer roll (Change film, or tidy): its frames are fixed, and it is no longer the film in the camera. */
+    boolean replaced() { return until != 0 || untilNo != 0; }
 
     /**
      * The newest original Latent shot neutral: a frame of any roll (in the camera roll or filed in

@@ -341,7 +341,7 @@ final class Ui {
         if (s.evEdit) { evTrack(g, s, rc, accent); return; }
         if (!s.clean) sideLabel(g, rc, 214, s.shotsLeft >= 0 ? String.valueOf(s.shotsLeft) : "", "LEFT");
         if (s.afLamp) lamp(g, rc, 268, s.afState == 1 ? INK : INK2);
-        sideHint(g, rc, "menu", s.developing > 0 ? "Develop" : "Back");
+        sideHint(g, rc, "menu", s.menuDevelops ? "Develop" : "Back");
     }
 
     /**
@@ -375,7 +375,7 @@ final class Ui {
             k.append("ev ").append(s.ev).append('|').append(s.ev != 0 && f != null ? f.accent : INK);
         } else {
             if (!s.clean) k.append(s.shotsLeft).append('|');
-            k.append(s.afLamp ? (s.afState == 1 ? "lamp lit" : "lamp") : "").append('|').append(s.developing > 0);
+            k.append(s.afLamp ? (s.afState == 1 ? "lamp lit" : "lamp") : "").append('|').append(s.menuDevelops);
         }
         return k.toString();
     }
@@ -660,7 +660,7 @@ final class Ui {
      * exposure line is (Apple's sparing onboarding). Gone at the first key.
      */
     private static void coach(Gfx g, UiState s) {
-        String[] k = { "wheel", "Film", "up", "Display", "down", "Exposure", "centre", "Look", "menu", s.developing > 0 ? "Develop" : "Back" };
+        String[] k = { "wheel", "Film", "up", "Display", "down", "Exposure", "centre", "Look", "menu", s.menuDevelops ? "Develop" : "Back" };
         float w = 0;
         for (int i = 0; i < k.length; i += 2) w += glyphWidth(g, k[i]) + 8 + g.textWidth(k[i + 1], Gfx.REGULAR, T_SECOND, 0) + (i > 0 ? 24 : 0);
         float ix = (s.width - H * 1.5f) / 2, x = s.width / 2 - w / 2, y = 444;

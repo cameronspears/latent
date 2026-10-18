@@ -186,7 +186,7 @@ public class RenderScreens {
         s.exposed = 10; s.printImage = img(samples, "PEOPLE-TRIX400.png"); s.printProgress = 0.45f; s.developing = 2; s.grid = true; s.hist = hist;
         render(s, "8f-vf-print-developing");
         s = vf(six, 5, img(samples, "PEOPLE-PARTY800.png"));
-        s.endless = true; s.exposed = 37; s.flash = true; s.printImage = img(samples, "STREET-PARTY800.png"); s.printProgress = 0.1f; s.developing = 1;
+        s.endless = true; s.exposed = 37; s.flash = true; s.printImage = img(samples, "STREET-PARTY800.png"); s.printProgress = 0.1f; s.developing = 1; s.menuDevelops = true;
         render(s, "8g-vf-endless-shot");
         s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
         s.clean = true; s.vfNote = "Clean";
@@ -196,7 +196,7 @@ public class RenderScreens {
         s.liveThrough = true; s.lookLive = false; s.vfNote = "Film look off  \u00b7  the camera's own view";
         renderOver(s, "8k-vf-camera-view", img(samples, "HOUSE-NATURAL.png"));
         s = vf(six, 0, img(samples, "PEOPLE-NATURAL.png"));
-        s.exposed = 12; s.length = 12; s.vfNote = "Roll finished"; s.printImage = img(samples, "PEOPLE-NATURAL.png"); s.printProgress = 0.6f; s.developing = 3;
+        s.exposed = 12; s.length = 12; s.vfNote = "Roll finished"; s.printImage = img(samples, "PEOPLE-NATURAL.png"); s.printProgress = 0.6f; s.developing = 3; s.menuDevelops = true;
         render(s, "8l-vf-roll-finished");
         s = vf(six, 0, img(samples, "PEOPLE-NATURAL.png"));
         s.exposed = 22; s.length = 24; s.developing = 4; s.printImage = img(samples, "HOUSE-NATURAL.png"); s.printProgress = 1;
@@ -624,7 +624,7 @@ public class RenderScreens {
         UiState b = vf(looks, 2, live);
         bases.add(b);
         UiState e = b.copy(); e.evEdit = true; e.ev = 2; bases.add(e);
-        UiState l = b.copy(); l.afLamp = true; l.afState = 1; l.developing = 2; bases.add(l);
+        UiState l = b.copy(); l.afLamp = true; l.afState = 1; l.developing = 2; l.menuDevelops = true; bases.add(l);
         UiState c = b.copy(); c.clean = true; bases.add(c);
         int checked = 0;
         for (UiState base : bases) {
@@ -651,7 +651,7 @@ public class RenderScreens {
             if (!lit && !Ui.windowKey(t).equals(Ui.windowKey(base))) problems.add("windowKey changes with a focus step (" + base.afState + " to " + af + ") the window doesn't show");
         }
         UiState ev = e.copy();
-        ev.shotsLeft = 77; ev.developing = 3; ev.afLamp = true;
+        ev.shotsLeft = 77; ev.developing = 3; ev.menuDevelops = true; ev.afLamp = true;
         if (!Ui.windowKey(ev).equals(Ui.windowKey(e))) problems.add("windowKey changes with what the exposure scale covers");
         System.out.println("window key: " + checked + " changes that keep the key draw the same window; focus steps keep it");
     }

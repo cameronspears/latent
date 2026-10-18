@@ -190,6 +190,8 @@ public class MainActivity extends Activity {
         super.onResume();
         resumed = true;
         backFromCamera = true;
+        waitingHeld = false;     // a waiting roll paused with MENU carries on now (developWaiting)
+        waitingFailed.clear();   // and one whose frames wouldn't develop is tried once more
         Display.fullColour(!(vf != null && Viewfinder.SHOOT_16BIT));   // the camera's own 16-bit plane while it's Latent's
         light.shown(SystemClock.uptimeMillis());   // back on screen: lit (the darkroom keeps its own light)
         applyLight();
@@ -304,14 +306,18 @@ public class MainActivity extends Activity {
                         devLog(inCamera.label() + ": new photos not added (" + Probe.why(e) + ")");
                     }
                 }
-                final List<Roll> waiting = Roll.undevelopedEndless(ro);
+                final List<Roll> waiting = Roll.undeveloped(ro, inCamera);   // endless batches, and rolls closed part-shot
                 final List<File> prints = new ArrayList<File>();   // their thumbnails load once the controls are ready (loadPrints)
                 if (inCamera != null && inCamera.endless()) {
                     List<File> dev = inCamera.developed();
                     for (int i = dev.size() - 1; i >= 0 && prints.size() < 8; i--) prints.add(dev.get(i));
                 }
                 final File ref = Roll.reference(ro, inCamera, ph);
-                final String neutralMsg = reconcileNeutral(inCamera != null);   // neutral exactly while a roll is loaded
+                // neutral exactly while a roll is loaded, but never written with Latent away: the camera's own mode may
+                // be in front, and shooting there within ~6 s of a write restarts the A5100 (goShoot's settle guards only
+                // Latent's way to shooting). A card read in the background (a develop ending after you left) leaves
+                // it to the next one in front, onResume's.
+                final String neutralMsg = resumed ? reconcileNeutral(inCamera != null) : null;
                 if (cardReadNote == null) cardReadNote = "card read: first touch " + (r0 - r00) + " ms" + (cardThere ? "" : " (no LATENT)") + ", looks " + (r1 - r0) + " ms, rolls " + (r2 - r1) + " ms, photos "
                         + (r3 - r2) + " ms (" + all.size() + "), the rest " + (SystemClock.uptimeMillis() - r3) + " ms";
                 final String msg = problem;
@@ -325,7 +331,7 @@ public class MainActivity extends Activity {
                         cameraRoll = listedPaths;
                         current = inCamera;
                         reference = ref;
-                        endlessWaiting = waiting;
+                        rollsWaiting = waiting;
                         endlessPrints = prints;
                         exposed = current == null ? 0 : current.frames.isEmpty() ? current.exposures(photos).size() : current.frames.size();
                         if (msg != null) toast(msg);
@@ -424,8 +430,17 @@ public class MainActivity extends Activity {
 
     private void goHome() {
         if (home() == LOAD && !stocks.isEmpty()) openLoad();
-        else mode = BACK;
+        else toBack();
         developWaiting();
+    }
+
+    /**
+     * The camera back, by any way there: an endless roll's prints come back if Photos' pages pushed them out of the
+     * thumbnail cache (each one still cached costs nothing: loadThumb returns at once).
+     */
+    private void toBack() {
+        mode = BACK;
+        loadPrints(endlessPrints);
     }
 
     // ------------------------------------------------------------------------------ the film under the wheel, full screen
@@ -445,14 +460,18 @@ public class MainActivity extends Activity {
         worker.execute(new Runnable() {
             public void run() {
                 if (gen != heroGen) return;   // the wheel moved on
-                int[] px = new int[720 * 480], size = new int[2];
-                int[] p = params(ref, st.highlight, st.shadow, 0, 1);
+                final Bitmap b;
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);   // never ahead of a press
-                int rc;
-                try { rc = FilmCore.preview(ref.getPath(), st.lut.getPath(), p, FilmCore.PREVIEW_FIT, px, 720, 480, size); }
-                finally { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT); }
-                if (rc != 0) return;
-                final Bitmap b = Bitmap.createBitmap(px, size[0], size[1], Bitmap.Config.ARGB_8888);
+                try {
+                    int[] px = new int[720 * 480], size = new int[2];
+                    int[] p = params(ref, st.highlight, st.shadow, 0, 1);
+                    if (FilmCore.preview(ref.getPath(), st.lut.getPath(), p, FilmCore.PREVIEW_FIT, px, 720, 480, size) != 0) return;
+                    b = Bitmap.createBitmap(px, size[0], size[1], Bitmap.Config.ARGB_8888);
+                } catch (OutOfMemoryError e) {   // the sample stays as the stand-in (an error on the worker would end Latent)
+                    return;
+                } finally {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
+                }
                 ui.post(new Runnable() {
                     public void run() {
                         if (gen != heroGen) { b.recycle(); return; }
@@ -664,6 +683,7 @@ public class MainActivity extends Activity {
         if (current == null) return;
         if (vf != null) {   // opened earlier this visit and kept open: the camera is never reopened in one visit
             if (!current.endless() && exposed >= current.length) { toast("Roll finished. Press \u2299 to develop."); return; }
+            vfResync();
             mode = PHOTO;
             s1Opened = s1Held;
             readBattery();
@@ -678,6 +698,7 @@ public class MainActivity extends Activity {
         s1Opened = s1Held;
         vfBase = exposed;
         vfHighestAtOpen = highestOnCard;
+        vfRoll = current.dir;
         readBattery();
         devLog("viewfinder: opening (" + current.label() + ", " + exposed + " exposed)");
         vf = new Viewfinder(this, card, liveSurface, worker, st, highestOnCard, new Viewfinder.Host() {
@@ -776,6 +797,30 @@ public class MainActivity extends Activity {
             }
         }
         screen.post(open);
+    }
+
+    private File vfRoll;   // the roll the viewfinder last showed (its folder: each card read makes new Roll objects)
+
+    /**
+     * The viewfinder kept open behind MENU, shown again: everything it took from the roll is taken again, as the roll
+     * may have changed meanwhile (MENU, This roll, Change film loads a new one with the camera still open; v0.44.1
+     * then showed the old roll's film and frame count, kept the wheel from changing the new film, and locked the
+     * shutter once the old count reached the new roll's length). Nothing is shot while it's hidden (hideViewfinder
+     * restarts Latent once anything has been), so the count starts from the roll's exposures now; the film is the
+     * roll's; pictures are noted on 'current' (vfShot) and, on a new roll, numbered above the card's highest now.
+     */
+    private void vfResync() {
+        vfBase = exposed - vf.shots;
+        if (!current.dir.equals(vfRoll)) {
+            vfRoll = current.dir;
+            vfHighestAtOpen = highestOnCard;
+            devLog("viewfinder: shown again on " + current.label() + " (" + exposed + " exposed): the roll changed behind MENU");
+        }
+        Stock st = Stock.byId(stocks, current.stock);
+        vf.setFilm(st);   // the roll's film on live view and the next picture (UI thread, as the wheel's; none if its look has gone, as at opening)
+        if (st == null) return;
+        int i = Math.max(0, stocks.indexOf(st)), n = stocks.size();   // read ahead, as at opening (films already read: nothing)
+        vf.prewarm(st.lut.getPath(), stocks.get((i + 1) % n).lut.getPath(), stocks.get((i + n - 1) % n).lut.getPath());
     }
 
     private android.view.SurfaceView pictureView;   // the viewfinder's picture surface, while there is one
@@ -904,17 +949,20 @@ public class MainActivity extends Activity {
      * stored), and Latent starts again behind a screen of its own (Relaunch): back in ~3.3 s with the
      * memory free (v0.33.1), where the darkroom takes the new pictures as usual.
      */
-    private void restartToDevelop(String why) {
+    private void restartToDevelop(String why) { restartToDevelop(why, current, Math.max(vfWaiting, vf != null ? vf.shots : 0)); }
+
+    /** r: the roll that develops after the restart, and about how many frames (the getting-ready screen shows its film). */
+    private void restartToDevelop(String why, Roll r, int frames) {
         if (restarting) return;
         restarting = true;
         devLog("restarting to develop: " + why);
         prepared = new Intent();
-        Stock st = current == null ? null : Stock.byId(stocks, current.stock);
+        Stock st = r == null ? null : Stock.byId(stocks, r.stock);
         if (st != null) {
             prepared.putExtra(Relaunch.EXTRA_FILM, st.title).putExtra(Relaunch.EXTRA_ISO, st.iso).putExtra(Relaunch.EXTRA_ACCENT, st.accent)
                     .putExtra(Relaunch.EXTRA_BODY, st.body).putExtra(Relaunch.EXTRA_BAND, st.band);
         }
-        prepared.putExtra(Relaunch.EXTRA_TOTAL, Math.max(1, Math.max(vfWaiting, vf != null ? vf.shots : 0)));
+        prepared.putExtra(Relaunch.EXTRA_TOTAL, Math.max(1, frames));
         prepared.putExtra(Relaunch.EXTRA_BATTERY, battery);
         preparing = true;
         toast("");
@@ -968,6 +1016,7 @@ public class MainActivity extends Activity {
         }
         if (mode == PHOTO) mode = BACK;
         vf.hide();   // its surface moved off the screen (kept for the return), the camera back shows at once
+        loadPrints(endlessPrints);   // Photos (from the camera back, before this) may have pushed them out of the cache
         screen.invalidate();
     }
 
@@ -1128,12 +1177,19 @@ public class MainActivity extends Activity {
                     if (!prefs.edit().putString("roll", made.dir.getName()).commit())
                         devLog("load film: Latent's note of " + made.label() + " couldn't be saved (the card still says it's loaded)");
                     t2 = System.currentTimeMillis();
-                    // the camera shoots neutral while a roll is loaded; yours come back after developing
-                    StringBuilder nl = new StringBuilder();
-                    String why = new NeutralSettings(card, nl).apply();
-                    neutralTried = true;
-                    devLogAll(nl);
-                    msg = stock.name + " loaded" + (why == null ? "  ·  camera set to neutral" : ". Camera " + why);
+                    // the camera shoots neutral while a roll is loaded; yours come back after developing. Only with Latent
+                    // in front (left since the press, the camera's own mode may be): else the next card read in front
+                    // sets it (reconcileNeutral, as for a roll loaded before Latent did this), before any shooting
+                    if (resumed) {
+                        StringBuilder nl = new StringBuilder();
+                        String why = new NeutralSettings(card, nl).apply();
+                        neutralTried = true;
+                        devLogAll(nl);
+                        msg = stock.name + " loaded" + (why == null ? "  ·  camera set to neutral" : ". Camera " + why);
+                    } else {
+                        devLog("load film: " + made.label() + " loaded with Latent away; the camera is set neutral on the next open");
+                        msg = stock.name + " loaded";
+                    }
                 } catch (Exception e) {
                     msg = "Could not load film: " + e.getMessage();
                 }
@@ -1191,9 +1247,39 @@ public class MainActivity extends Activity {
      * which pauses it). Otherwise the darkroom, with the roll on screen.
      */
     private void startDevelop(Roll r, boolean quiet) {
-        if (r == null) return;
+        // never begun with Latent away (a card read's answer landing after you left): its power-save hold is a write
+        // to the camera, and the frames would develop behind the camera's own mode. The next open starts it, in front.
+        if (r == null || !resumed) return;
         if (Viewfinder.opened) {   // the camera has the image memory until this process ends: Latent restarts to develop
-            if (!quiet) restartToDevelop(r.label() + " to develop");
+            if (quiet) return;
+            boolean shotHere = vfWaiting > 0 || (vf != null && vf.shots > 0);
+            if (!r.endless() && Roll.LOADED.equals(r.state) && !r.replaced() && !shotHere) {
+                // Develop now: the roll ends here, on the card (its frames frozen, developing), with the checks the
+                // darkroom makes below, so the restarted Latent finds it developing and goes straight to the darkroom.
+                // (It restarted and found the roll still loaded part-way: the press was lost.) The last card read's
+                // list is current: nothing was shot in this process (a viewfinder hidden with nothing shot; MENU
+                // after a shot restarts at once). Were something shot (the viewfinder closed itself after it), the
+                // list would miss it, and the roll would end without it: then only the restart, as before.
+                boolean froze = r.frames.isEmpty();
+                if (froze) for (File f : r.exposures(photos)) r.frames.add(f.getPath());
+                if (r.frames.isEmpty()) { toast("No exposures on this roll yet. Go shoot."); return; }
+                readBattery();
+                if (batteryLow() && r.developedCount() < r.frames.size()) {   // refused, the roll left as it was
+                    if (froze) r.frames.clear();
+                    toast(BATTERY_LOW);
+                    return;
+                }
+                r.state = Roll.DEVELOPING;
+                try {
+                    r.save();
+                } catch (Exception e) {
+                    r.state = Roll.LOADED;
+                    if (froze) r.frames.clear();
+                    toast("Could not write the roll: " + e.getMessage());
+                    return;
+                }
+            }
+            restartToDevelop(r.label() + " to develop", r, r.frames.isEmpty() ? 1 : r.frames.size() - r.developedCount());
             return;
         }
         if (developing != null) {
@@ -1209,7 +1295,10 @@ public class MainActivity extends Activity {
         readBattery();
         // it waits, as it is, until the camera is charged; a roll with every frame developed finishes (developNext)
         if (batteryLow() && r.developedCount() < r.frames.size()) { toast(BATTERY_LOW); return; }
-        if (!quiet && !r.endless()) r.state = Roll.DEVELOPING;   // an endless roll stays loaded while its photos develop
+        // the film in the camera ends here (its frames frozen, developing). An endless roll stays loaded while its photos
+        // develop, and a roll closed part-shot (Change film, tidy) keeps its state: developing would make it an open
+        // roll, "in the camera" again with nothing else loaded (and the camera set neutral for it). It waits until done.
+        if (!quiet && !r.endless() && !r.replaced()) r.state = Roll.DEVELOPING;
         try { r.save(); } catch (Exception e) { toast("Could not write the roll: " + e.getMessage()); return; }
         r.cleanTemp();
         // nothing of Choose film's goes ahead of the develop on the one worker: samples still waiting are dropped
@@ -1396,16 +1485,29 @@ public class MainActivity extends Activity {
         if (devQuiet && !quietAllowed()) paused = true;
         int next = -1;
         for (int i = 0; i < view.length && next < 0; i++) if (!failed.contains(i) && view[i] == null) next = i;
-        // nothing left: the roll finishes, whatever else holds (a pause asked for on its last frame, the battery
-        // run down during it). The last originals are filed in the background (refresh)
-        if (next < 0) { finishDevelop(); return; }
+        // nothing left, with Latent in front: the roll finishes, whatever else holds (a pause asked for on its last
+        // frame, the battery run down during it). The last originals are filed in the background (refresh). Not in
+        // front (left during the last frame: onPause asked for the pause), it stops below as v0.44.1 did, still
+        // developing, and finishes on the next open: finishing ends the roll, and the card read after it puts your
+        // camera settings back once no roll is loaded, a write that must never land behind the camera's own mode
+        if (next < 0 && resumed) { finishDevelop(); return; }
         readBattery();
         if (batteryLow()) {   // never a frame begun on the last of the battery: the roll stops here, safe, and carries on later
             devLog(r.label() + ": paused, the battery is low (" + batteryNote() + ")");
             stopDevelop(devQuiet ? null : BATTERY_LOW);
             return;
         }
-        if (paused) { stopDevelop(devQuiet ? null : "Paused. Press the centre button to carry on."); return; }
+        if (paused) {
+            // MENU on a waiting roll (an endless batch, a roll closed part-shot): the camera back can't carry it on
+            // (its centre shoots), and the waiting develop would only open the darkroom again at once (MENU isn't a
+            // press it waits on, and the frame in hand took longer than its 4 s). So it waits for the next open.
+            boolean waiting = !devQuiet && waitingRoll(r), held = waiting && resumed && !shootAfterFrame;
+            if (held) waitingHeld = true;
+            stopDevelop(devQuiet ? null : held ? "Paused. It carries on the next time you open Latent."
+                    : waiting ? "Paused" : "Paused. Press the centre button to carry on.");
+            return;
+        }
+        if (next < 0) { finishDevelop(); return; }   // not in front, yet not paused (before onResume): v0.44.1's finish
         final int frame = next;
         final File src = r.source(frame), out = r.output(frame), prv = r.preview(out);
         devSource = src;
@@ -1655,6 +1757,7 @@ public class MainActivity extends Activity {
             if (r.dir.getName().equals(prefs.getString("roll", ""))) prefs.edit().remove("roll").commit();
         }
         try { r.save(); } catch (Exception e) { /* the frames are on the card either way */ }
+        if (devFailed > 0 && waitingRoll(r)) waitingFailed.put(r.dir.getPath(), r.frames.size());   // not by itself again this visit
         if (devQuiet) {   // nothing to announce: the photos are in the camera roll, the next trip's develop next
             final int n = r.frames.size();
             endDarkroom(true);
@@ -1720,11 +1823,42 @@ public class MainActivity extends Activity {
     }
 
     private List<File> endlessPrints = new ArrayList<File>();   // the endless roll in the camera: its prints, newest first
-    private List<Roll> endlessWaiting = new ArrayList<Roll>();   // endless rolls with frames to develop (from the last card read)
+    // rolls with frames to develop that aren't the film in the camera (Roll.undeveloped, from the last card read):
+    // endless rolls' new photos, and rolls of 12, 24 or 36 closed part-shot by Change film or tidy
+    private List<Roll> rollsWaiting = new ArrayList<Roll>();
+    private boolean waitingHeld;   // MENU paused a waiting roll's develop: the waiting rolls wait for the next open (onResume)
+    // a waiting roll whose develop ended with frames that wouldn't develop: its frame count then (by folder). It isn't
+    // started again in this visit unless it has more frames since (an endless roll's new photos): it would only fail
+    // again, the darkroom opening by itself each time the camera was left alone. The next open tries once more.
+    private final Map<String, Integer> waitingFailed = new HashMap<String, Integer>();
 
-    /** An endless roll's new photos start developing as soon as nothing else needs the camera. */
+    /** A roll developing from the waiting list, not the film in the camera (that one is carried on from the camera back). */
+    private boolean waitingRoll(Roll r) {
+        return r.endless() || current == null || !r.dir.equals(current.dir);
+    }
+
+    /** The oldest waiting roll worth starting now, or null. */
+    private Roll nextWaiting() {
+        for (Roll r : rollsWaiting) {
+            Integer failedAt = waitingFailed.get(r.dir.getPath());
+            if (failedAt == null || r.frames.size() > failedAt) return r;
+        }
+        return null;
+    }
+
+    /**
+     * The waiting rolls (an endless roll's new photos, a roll closed part-shot) start developing as soon as nothing
+     * else needs the camera: once the buttons have been left alone for 4 s, never while you're in Photos (it waits
+     * until you leave it: leavePhotos asks again), and not again in this visit after MENU paused one.
+     */
     private void developWaiting() {
-        if (developing != null || restarting || shootPending || shootAfterFrame || !ready || !quietAllowed() || endlessWaiting.isEmpty()) return;
+        if (developing != null || restarting || shootPending || shootAfterFrame || !ready || !quietAllowed() || waitingHeld) return;
+        final Roll next = nextWaiting();
+        if (next == null) return;
+        if (mode == SHEET || mode == VIEW) {   // looking at photos: never pulled out of them into the darkroom
+            ui.removeCallbacks(developWhenIdle);
+            return;
+        }
         if (batteryLow()) {   // (as last read) they wait for a charge rather than start and stop again
             if (developNow) { developNow = false; toast(BATTERY_LOW); }   // started again to develop: say why it doesn't
             return;
@@ -1738,7 +1872,7 @@ public class MainActivity extends Activity {
             return;
         }
         developNow = false;
-        startDevelop(endlessWaiting.get(0), false);   // the red darkroom, as a roll of film develops: you can watch it
+        startDevelop(next, false);   // the red darkroom, as a roll of film develops: you can watch it
     }
 
     static final long IDLE_BEFORE_DEVELOP_MS = 4000;
@@ -1882,10 +2016,15 @@ public class MainActivity extends Activity {
         int from = photosFrom;
         closePhotos();
         photosFrom = -1;
+        // a waiting develop held off while you looked (developWaiting) may go now, after 4 s untouched from here
+        lastPressAt = SystemClock.uptimeMillis();
         if (from == SETTINGS) mode = SETTINGS;
-        else if (from == LOAD && !stocks.isEmpty()) openLoad();
-        else goHome();
-        if (mode == BACK) loadPrints(endlessPrints);   // an endless roll's prints, if Photos' pages pushed them out of the cache
+        else if (from == LOAD && !stocks.isEmpty()) { mode = LOAD; openLoad(); }   // on the film and length you were on, not the last loaded
+        else { goHome(); return; }   // (the camera back loads its prints, and the waiting develop is asked)
+        // an endless roll's prints, if Photos' pages pushed them out of the cache: now, though this isn't the camera
+        // back, so they're there by the time the menu or Choose film goes back to it
+        loadPrints(endlessPrints);
+        developWaiting();
     }
 
     /**
@@ -2122,7 +2261,9 @@ public class MainActivity extends Activity {
             FilmCore.makePreview(f.getPath(), prv.getPath());
         }
         Bitmap d = decodeWhole(prv);
-        if (d != null && d.getHeight() < 470) {   // made before previews filled the panel's height
+        // made before previews filled the panel's height (they fitted 640 x 480): a preview of today fits 720 x 480,
+        // so one side meets it, whatever the photo's shape (a 16:9 one is 720 x 405, and was remade on every view)
+        if (d != null && d.getWidth() < 710 && d.getHeight() < 470) {
             d.recycle();
             FilmCore.makePreview(f.getPath(), prv.getPath());
             d = decodeWhole(prv);
@@ -2368,17 +2509,30 @@ public class MainActivity extends Activity {
         Bitmap b = null;
         String[] note = NO_NOTE;
         try {
-            ExifInterface x = new ExifInterface(f.getPath());
-            try { note = noteOf(x); } catch (Throwable e) { /* odd EXIF: nothing to say about it */ }
-            byte[] data = x.getThumbnail();
-            if (data != null) b = BitmapFactory.decodeByteArray(data, 0, data.length);
-        } catch (Exception e) {
-            // fall back to a heavily subsampled decode below
-        }
-        if (b == null) {
-            BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inSampleSize = 32;
-            b = BitmapFactory.decodeFile(f.getPath(), o);
+            try {
+                ExifInterface x = new ExifInterface(f.getPath());
+                try { note = noteOf(x); } catch (Throwable e) { /* odd EXIF: nothing to say about it */ }
+                byte[] data = x.getThumbnail();
+                if (data != null) b = BitmapFactory.decodeByteArray(data, 0, data.length);
+            } catch (Exception e) {
+                // fall back to a heavily subsampled decode below
+            }
+            if (b == null) {
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inSampleSize = 32;
+                b = BitmapFactory.decodeFile(f.getPath(), o);
+            }
+        } catch (OutOfMemoryError e) {
+            // Android 2.3's "bitmap size exceeds VM budget": on the worker it would end Latent (nothing catches it there,
+            // the camera open in the worst case). The thumbnails go instead (a cell drawn now keeps its own: none is
+            // recycled, the collector frees them), so this cell shows grey and the next page turn asks again; the
+            // fallback isn't tried (its picture is larger). Not cached: tried again later. The caption still says its date.
+            synchronized (thumbs) {
+                thumbs.clear();
+                notes.put(f.getPath(), note);
+            }
+            if (oomNotes++ < 3) devLog("thumbnails: out of memory at " + f.getName() + ", the cache let go");
+            return false;
         }
         synchronized (thumbs) {
             thumbs.put(f.getPath(), b);
@@ -2388,6 +2542,7 @@ public class MainActivity extends Activity {
     }
 
     private static final String[] NO_NOTE = { "", "" };
+    private int oomNotes;   // worker thread
 
     /**
      * {when it was taken, its exposure} from EXIF, by the tags' own names (API 10's ExifInterface has constants for
@@ -2510,6 +2665,8 @@ public class MainActivity extends Activity {
                     int[] p = params(latest, s.highlight, s.shadow, 0, 1);
                     if (FilmCore.preview(on, s.lut.getPath(), p, FilmCore.PREVIEW_FIT, px, 420, 280, size) == 0)
                         made = Bitmap.createBitmap(px, size[0], size[1], Bitmap.Config.ARGB_8888);
+                } catch (OutOfMemoryError e) {   // no stand-in for this film (an error on the worker would end Latent)
+                    made = null;
                 } finally {
                     android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
                 }
@@ -2897,7 +3054,7 @@ public class MainActivity extends Activity {
         if (!menu) return true;
         switch (mode) {
             case BACK: openSettings(); break;
-            case LOAD: if (loading) break; if (current != null) mode = BACK; else openSettings(); break;   // MENU: back to the roll, or the menu
+            case LOAD: if (loading) break; if (current != null) toBack(); else openSettings(); break;   // MENU: back to the roll, or the menu
             case SETTINGS: goHome(); break;
             case DARKROOM: if (!preparing) { paused = true; toast("Pausing after this frame"); } break;
             case SHEET: leavePhotos(); break;
@@ -2952,6 +3109,11 @@ public class MainActivity extends Activity {
                 s.lookSel = Math.max(0, stocks.indexOf(cur));
                 s.exposed = vfBase + (vf != null ? vf.shots : 0);
                 if (current != null) { s.length = current.length; s.endless = current.endless(); }
+                // what MENU does (hideViewfinder): with nothing shot it goes back; with pictures shot Latent restarts, and
+                // the restarted one develops them only on an endless roll or a roll they finished (wantsDeveloping); a roll
+                // of 12, 24 or 36 still part-way lands on the camera back, its frames developing once it's finished
+                int taken = Math.max(vfWaiting, vf != null ? vf.shots : 0);
+                s.menuDevelops = current != null && taken > 0 && (current.endless() || vfBase + taken >= current.length);
                 s.cardNote = current != null && current.endless() ? "From this frame on" : filmFresh() ? "" : "Loaded for the whole roll";
                 break;
             }

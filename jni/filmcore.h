@@ -40,7 +40,7 @@ int fl_process_file(const char *in_path, const char *out_path, const char *lut_p
                     const char *preview_path, const int *params, fl_progress_fn progress, void *ctx,
                     char *err, int errlen);
 
-/* A screen-size (fits 640x480) JPEG preview of an existing JPEG. preview_path in fl_process_file
+/* A screen-size (fits 720x480) JPEG preview of an existing JPEG. preview_path in fl_process_file
  * makes the same thing for free during developing. 0 on success. */
 int fl_make_preview(const char *in_path, const char *out_path, char *err, int errlen);
 

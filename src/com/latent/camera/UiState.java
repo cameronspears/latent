@@ -132,4 +132,7 @@ final class UiState implements Cloneable {
     int readyIn = -1;                  // camera back: a shoot waits for the camera to settle, seconds to go (0: a moment); -1 none
     int readyTotal;                    // ... of this many seconds in all
     long developMs = -1;               // camera back: about how long the roll (or what's left of it) takes to develop; -1 unknown
+
+    // ---- the viewfinder's MENU (v0.45.0, the review's fixes)
+    boolean menuDevelops;              // MENU restarts Latent and the pictures develop (an endless roll, or a roll they finished): "Develop", else "Back"
 }

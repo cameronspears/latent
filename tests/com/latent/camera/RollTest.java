@@ -202,7 +202,9 @@ public class RollTest {
         new File(dcim, "DSC01034.JPG").delete();   // its original filed as a negative after developing
         touch(new File(dcim, "DSC01036.JPG"), t + 36 * 10000);
         check(ec.collect(Roll.exposable(Library.photos(card), re)) == 1 && ec.frames.size() == 3, "the next trip adds only the new photo, though an older one has left the camera roll");
-        check(Roll.undevelopedEndless(Roll.list(card)).size() == 1, "its frames wait to develop");
+        boolean infWaits = false;
+        for (Roll w : Roll.undeveloped(Roll.list(card), ec)) infWaits |= w.dir.equals(inf.dir);
+        check(infWaits, "its frames wait to develop, though it's the roll in the camera");
         check(Roll.tidy(Roll.list(card), Roll.exposable(Library.photos(card), Roll.list(card))) == null, "tidying leaves it alone");
         Roll ec2 = Roll.open(inf.dir);
         touch(new File(dcim, "DSC01037.JPG"), t + 37 * 10000);
@@ -216,7 +218,84 @@ public class RollTest {
         check(Roll.open(a1.dir).prints.isEmpty() && Roll.open(a1.dir).print(0) == null, "rolls without prints read fine");
         photoOrder(new File(card.getParentFile(), "sortcard"));
         developedAll(new File(card.getParentFile(), "photoscard"));
+        waiting(new File(card.getParentFile(), "waitcard"));
         System.out.println("ROLL OK");
+    }
+
+    /**
+     * What develops by itself (Roll.undeveloped): a roll of 24 closed part-shot by Change film waits, as does one whose
+     * develop stopped part-way; the roll in the camera doesn't (the camera back develops it), nor a roll fully developed,
+     * nor frames whose originals have left the card; an endless roll's new photos do, in the camera or not.
+     */
+    static void waiting(File card) throws Exception {
+        File dcim = new File(card, "DCIM/100MSDCF");
+        dcim.mkdirs();
+        long t = 1700000000000L;
+        for (int i = 1; i <= 3; i++) touch(new File(dcim, "DSC0200" + i + ".JPG"), t + i * 10000);
+        Roll a = Roll.create(card, "PORTRA4W", 24, 0, 1002000);   // ROLL001: three shot, then Change film
+        List<File> now = Library.photos(card);
+        a.close(now);
+        Roll b = Roll.create(card, "TRIX400", 24, 0, Roll.highest(now));   // ROLL002: the film in the camera, two shot
+        touch(new File(dcim, "DSC02004.JPG"), t + 40000);
+        touch(new File(dcim, "DSC02005.JPG"), t + 50000);
+        List<Roll> rolls = Roll.list(card);
+        Roll inCamera = Roll.inCamera(rolls, b.dir.getName());
+        List<Roll> w = Roll.undeveloped(rolls, inCamera);
+        Roll a2 = Roll.open(a.dir);
+        check(inCamera != null && inCamera.dir.equals(b.dir) && !a2.isOpen() && a2.replaced() && a2.frames.size() == 3,
+                "Change film closed the roll of 24 with its three frames; the new roll is in the camera");
+        check(w.size() == 1 && w.get(0).dir.equals(a.dir) && w.get(0).toDevelop() == 3, "a roll closed part-shot waits to develop, all three frames");
+        // the roll in the camera, finished or not, is the camera back's to develop: never on this list
+        Roll bFull = Roll.open(b.dir);
+        for (File f : bFull.exposures(Roll.exposable(Library.photos(card), rolls))) bFull.frames.add(f.getPath());
+        bFull.state = Roll.DEVELOPING;
+        bFull.save();
+        rolls = Roll.list(card);
+        inCamera = Roll.inCamera(rolls, b.dir.getName());
+        w = Roll.undeveloped(rolls, inCamera);
+        check(inCamera.dir.equals(b.dir) && w.size() == 1 && w.get(0).dir.equals(a.dir), "the roll in the camera doesn't, even developing");
+        // the closed roll's develop stopped after its first frame (the battery, MENU): it waits on, for the other two
+        Roll a3 = Roll.open(a.dir);
+        touch(a3.output(0), 0);
+        rolls = Roll.list(card);
+        w = Roll.undeveloped(rolls, Roll.inCamera(rolls, b.dir.getName()));
+        check(w.size() == 1 && w.get(0).dir.equals(a.dir) && w.get(0).toDevelop() == 2, "a closed roll half developed still waits, for what's left");
+        a3.state = Roll.DEVELOPING;   // (as v0.44.1's sheet left the rolls it developed: open again, by isOpen)
+        a3.save();
+        rolls = Roll.list(card);
+        w = Roll.undeveloped(rolls, Roll.inCamera(rolls, b.dir.getName()));
+        check(w.size() == 1 && w.get(0).dir.equals(a.dir) && w.get(0).toDevelop() == 2, "... marked developing too");
+        check(Roll.inCamera(rolls, b.dir.getName()).dir.equals(b.dir), "and the camera's roll is still the one the note names");
+        // all three developed: nothing left of it to do, whatever its state says
+        Roll a4 = Roll.open(a.dir);
+        touch(a4.output(1), 0);
+        touch(a4.output(2), 0);
+        rolls = Roll.list(card);
+        check(Roll.undeveloped(rolls, Roll.inCamera(rolls, b.dir.getName())).isEmpty(), "a fully developed roll doesn't wait");
+        // a closed roll whose originals have all gone (deleted on the camera): it could only fail, so it doesn't wait
+        Roll c = Roll.create(card, "CUBANNEG", 12, 0, Roll.highest(Library.photos(card)));
+        File gone = new File(dcim, "DSC02006.JPG");
+        touch(gone, t + 60000);
+        c.close(Library.photos(card));
+        gone.delete();
+        rolls = Roll.list(card);
+        check(Roll.open(c.dir).frames.size() == 1 && Roll.undeveloped(rolls, Roll.inCamera(rolls, b.dir.getName())).isEmpty(),
+                "frames whose originals left the card don't wait");
+        touch(new File(c.negative(0).getPath()), 0);   // ... but one filed in NEG still develops
+        rolls = Roll.list(card);
+        w = Roll.undeveloped(rolls, Roll.inCamera(rolls, b.dir.getName()));
+        check(w.size() == 1 && w.get(0).dir.equals(c.dir), "an original filed as its negative still develops");
+        new File(c.negative(0).getPath()).delete();
+        // an endless roll's new photos wait in the camera too, and the roll of 24 left developing, now not the camera's
+        Roll e = Roll.create(card, "NATURAL", Roll.ENDLESS, 0, Roll.highest(Library.photos(card)));
+        touch(new File(dcim, "DSC02007.JPG"), t + 70000);
+        rolls = Roll.list(card);
+        Roll ein = Roll.inCamera(rolls, e.dir.getName());
+        ein.collect(Roll.exposable(Library.photos(card), rolls));
+        rolls = Roll.list(card);
+        w = Roll.undeveloped(rolls, Roll.inCamera(rolls, e.dir.getName()));
+        check(w.size() == 2 && w.get(0).dir.equals(b.dir) && w.get(1).dir.equals(e.dir),
+                "an endless roll in the camera waits with its new photo, and the roll before it too (oldest first)");
     }
 
     /**

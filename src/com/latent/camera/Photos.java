@@ -149,14 +149,43 @@ final class Photos {
         return b.toString();
     }
 
-    /** A shutter time as the camera shows it: "1/250", "0.5\"", "2\"", "30\""; "" for none. */
+    /** The camera's shutter speeds in thirds of a stop, 1/4000 to 1/4 (as fractions of a second: these denominators)... */
+    private static final int[] FRACTIONS = { 4000, 3200, 2500, 2000, 1600, 1250, 1000, 800, 640, 500, 400, 320, 250, 200, 160, 125,
+            100, 80, 60, 50, 40, 30, 25, 20, 15, 13, 10, 8, 6, 5, 4 };
+    /** ... and 0.3" to 30", as it shows them. */
+    private static final double[] SECONDS = { 0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.3, 1.6, 2, 2.5, 3.2, 4, 5, 6, 8, 10, 13, 15, 20, 25, 30 };
+
+    /**
+     * A shutter time as the camera shows it: "1/250", "0.5\"", "2\"", "30\""; "" for none. Android 2.3's ExifInterface
+     * gives the time as a rounded decimal (jhead's "%6.4f" below 0.010 s, "%5.3f" above, of a float), so 1/60 reads
+     * "0.017" and 1/320 "0.0031", and 1/s of that is a speed no camera has (1/59, 1/323). The time is put back on
+     * the camera's own scale: the speed it is exactly (a rational, "1/3200"), else the one jhead writes the same way
+     * (1/4000 and 1/3200 both read "0.0003": the camera's fastest it is), else the nearest within half a third of a
+     * stop. Anything further off (a bulb exposure, another camera's 1/8000) shows as it is.
+     */
     static String shutter(double s) {
         if (!(s > 0) || s > 3600) return "";
-        if (s >= 0.3) {   // from 0.3 s the camera counts in seconds
-            double r = Math.round(s * 10) / 10.0;
-            return (r == Math.floor(r) ? String.valueOf(Math.round(r)) : String.valueOf(r)) + "\"";
-        }
+        for (int d : FRACTIONS) if (Math.abs(s * d - 1) < 1e-6) return "1/" + d;
+        for (double t : SECONDS) if (Math.abs(s - t) < 1e-6 * t) return seconds(t);
+        double j = asJhead((float) s);   // as Android 2.3 would have given it (1/3333 of a second: "0.0003")
+        for (int d : FRACTIONS) if (Math.abs(asJhead(1f / d) - j) < 1e-9) return "1/" + d;   // fastest first
+        double best = Double.NaN, off = Math.log(2) / 6;   // half a third of a stop
+        for (int d : FRACTIONS) if (Math.abs(Math.log(s * d)) < off) { off = Math.abs(Math.log(s * d)); best = 1.0 / d; }
+        for (double t : SECONDS) if (Math.abs(Math.log(s / t)) < off) { off = Math.abs(Math.log(s / t)); best = t; }
+        if (!Double.isNaN(best)) s = best;
+        if (s >= 0.3) return seconds(s);   // from 0.3 s the camera counts in seconds
         return "1/" + Math.round(1 / s);
+    }
+
+    /** A time as jhead writes it into Android 2.3's ExifInterface: of the float, four places below 0.010 s, else three. */
+    private static double asJhead(float t) {
+        double v = t, p = v < 0.010 ? 10000 : 1000;
+        return Math.round(v * p) / p;
+    }
+
+    private static String seconds(double s) {
+        double r = Math.round(s * 10) / 10.0;
+        return (r == Math.floor(r) ? String.valueOf(Math.round(r)) : String.valueOf(r)) + "\"";
     }
 
     /** A number as EXIF's strings give it: "0.004", "1/250", "28/10", "400" (the first of several); NaN if it isn't one. */
