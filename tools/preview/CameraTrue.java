@@ -14,7 +14,8 @@ import java.util.regex.Pattern;
  *   (MainActivity's Screen), so strokes thinner than a dot go faint and uneven as they do on the LCD;
  * - 4 bits a channel, the OSD's RGBA4444 while the camera is open (every screen after the first viewfinder
  *   visit): Latent's window and the picture surface truncated to it, the viewfinder's picture and its
- *   overlay dithered to it with the composer's own blue-noise thresholds (jni/bluenoise.h, dither_row);
+ *   overlay dithered to it with the composer's own blue-noise thresholds (jni/bluenoise.h), green's the
+ *   opposite of red's and blue's as the camera's build has it (FL_DITHER_GREEN in jni/filmcore.c);
  * - the viewfinder in its parts, as on the camera: the composed picture (the look plus the overlay, dithered)
  *   on its 16-bit surface with what moves drawn over it, Latent's window (the side bars) around it;
  * - then stretched back to 853 for viewing. sun() adds a reflected-light veil for judging it outdoors.
@@ -24,6 +25,7 @@ final class CameraTrue {
 
     static final int DOTS = 640, ROWS = 480;
     private static int[] noise;
+    private static int green = -1;   // FL_DITHER_GREEN as jni/filmcore.c builds it
 
     /** The camera's screen for this state, at 640 x 480 dots (viewing size: view()). */
     static BufferedImage dots(UiState s, File fonts, BufferedImage video) throws Exception {
@@ -134,13 +136,27 @@ final class CameraTrue {
 
     private static int t4(int v) { return (v & 0xF0) | (v >> 4); }
 
-    /** dither_row's arithmetic: v * 241 >> 8 in sixteenths, plus the pixel's blue-noise threshold, over 16. */
+    /**
+     * The composer's dither: v * 241 >> 8 in sixteenths, plus the pixel's blue-noise threshold, over 16; green's
+     * threshold the opposite (15 - t) when the camera's build has it so.
+     */
     static void dither(BufferedImage img) throws Exception {
         int[] bn = noise();
+        boolean opposite = greenOpposite();
         for (int y = 0; y < img.getHeight(); y++) for (int x = 0; x < img.getWidth(); x++) {
             int t = bn[((y & 63) << 6) | (x & 63)] >> 4, p = img.getRGB(x, y);
-            img.setRGB(x, y, 0xFF000000 | d4((p >> 16) & 255, t) << 16 | d4((p >> 8) & 255, t) << 8 | d4(p & 255, t));
+            img.setRGB(x, y, 0xFF000000 | d4((p >> 16) & 255, t) << 16 | d4((p >> 8) & 255, opposite ? 15 - t : t) << 8 | d4(p & 255, t));
         }
+    }
+
+    /** Whether jni/filmcore.c gives green the opposite threshold (its FL_DITHER_GREEN, as the camera builds it). */
+    static boolean greenOpposite() throws Exception {
+        if (green >= 0) return green == 1;
+        String c = new String(Files.readAllBytes(new File("jni/filmcore.c").toPath()), "US-ASCII");
+        Matcher m = Pattern.compile("#define FL_DITHER_GREEN (\\d)").matcher(c);
+        if (!m.find()) throw new IllegalStateException("jni/filmcore.c: no FL_DITHER_GREEN");
+        green = Integer.parseInt(m.group(1));
+        return green == 1;
     }
 
     private static int d4(int v, int t) { return (((v * 241 >> 8) + t) >> 4) * 17; }

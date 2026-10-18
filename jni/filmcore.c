@@ -2194,15 +2194,22 @@ static inline void fade_weights(unsigned int uy, unsigned int ia, unsigned int *
  * and its two greens (left low): each the blue noise's threshold (0..15) x 256 + rnd, + the row's overlay
  * colour (base: red << 16 | blue, green). 32 pairs: the blue noise repeats every 64 pixels. */
 /*
- * FL_DITHER_GREEN 1: green takes the opposite threshold (15 - t) to red's and blue's, so where the dither lifts red
- * and blue a level it tends to leave green down: the dither's noise moves from brightness (which the eye sees) to
- * faint colour speckle (which it mostly doesn't); about half the brightness noise on flat greys and skies. Off (0,
- * one threshold for all three, as since v0.38) until the user has judged the renders (tools/frame-test.sh --render).
+ * FL_DITHER_GREEN 1 (the camera's build since v0.45.0): green takes the opposite threshold (15 - t) to red's and
+ * blue's, so where the dither lifts red and blue a level it tends to leave green down: the dither's noise moves from
+ * brightness (which the eye sees) to faint colour speckle (which it mostly doesn't); about half the brightness noise
+ * on skies, skin and flat greys, at no cost (the same thresholds, ordered differently). Each pixel stays within a
+ * level of one threshold's, with the same mean. 0: one threshold for all three, as v0.38-v0.44.1; the host tests
+ * build it to compare the composer with v0.44.1's pixel for pixel (tools/frame-test.sh, tools/test-jni.sh).
  */
 #ifndef FL_DITHER_GREEN
-#define FL_DITHER_GREEN 0
+#define FL_DITHER_GREEN 1
 #endif
+#ifdef FL_FRAME_REFERENCE   /* the host tests may set it per frame, to compare the two dithers in one build */
+static int g_dither_green = FL_DITHER_GREEN;
+#define GREEN_T(t) (g_dither_green ? 15 - (t) : (t))
+#else                       /* the camera's build: fixed */
 #define GREEN_T(t) (FL_DITHER_GREEN ? 15 - (t) : (t))
+#endif
 
 static void row_thresholds(const unsigned char *bn, int ox, unsigned int rnd, unsigned int brb, unsigned int bg, unsigned int *T) {
     int i;

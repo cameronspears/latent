@@ -9,7 +9,8 @@ import java.util.List;
  * Host test of the viewfinder's logic: the shutter button (Release), the pictures the card's listing
  * doesn't show yet (Library.withShots), the exposure readout, and
  * (v0.45.0) when frames are asked for (FrameScheduler), the pace (Pacer), the store quiet, the /proc
- * readings, the catalogue's new pictures and the overlay's bands.
+ * readings, the catalogue's new pictures, the overlay's bands, and the presenter's state going out of date
+ * (the film card and a note gone on time, frames or none).
  *
  *   ViewfinderTest <empty dir>
  */
@@ -28,6 +29,9 @@ public class ViewfinderTest {
         procParsing();
         catalogue();
         overlayBands();
+        presenterClears();
+        tickClears();
+        stages();
         System.out.println("ViewfinderTest: all passed");
     }
 
@@ -237,6 +241,76 @@ public class ViewfinderTest {
         check(Viewfinder.clearBetween(px, w, top, bottom), "type in the bands only: nothing between");
         px[top * w] = 0x01000000;
         check(!Viewfinder.clearBetween(px, w, top, bottom), "one faint pixel between the bands is seen (the overlay is then drawn whole)");
+    }
+
+    /**
+     * Frames coming (60-140 ms apart, as the look threads finish): each goes up under the state last given until
+     * that state is out of date (Viewfinder.outOfDateAt), then a fresh one is made. The film card and a note are
+     * gone from the picture by the first frame after they end, whatever the frames' timing (v0.45.0 kept the
+     * state until a key: a card could stay up over the live view).
+     */
+    static void presenterClears() {
+        long worst = 0;
+        int cases = 0;
+        for (int phase = 0; phase < 140; phase += 7) for (int seed = 1; seed <= 5; seed++) for (int what = 0; what < 2; what++) {
+            long shown = 1000 + phase, until = shown + (what == 0 ? Viewfinder.CARD_MS : Viewfinder.NOTE_MS);
+            boolean card = what == 0, on;
+            // the card or the note just shown: a fresh state with it
+            long stale = card ? Viewfinder.outOfDateAt(true, until, false, 0) : Viewfinder.outOfDateAt(false, 0, true, until);
+            long off = -1, t = shown;
+            java.util.Random r = new java.util.Random(seed);
+            while (t < until + 2000 && off < 0) {
+                t += 60 + r.nextInt(81);
+                if (t < stale) continue;   // presentAgain: the frame goes up under the state it has
+                on = t < until;            // out of date: a fresh state, as fill() makes it
+                stale = card ? Viewfinder.outOfDateAt(on, until, false, 0) : Viewfinder.outOfDateAt(false, 0, on, until);
+                if (!on) off = t;
+            }
+            cases++;
+            if (off < 0) { check(false, (card ? "the card" : "a note") + " never left the presented state"); return; }
+            worst = Math.max(worst, off - until);
+        }
+        check(worst <= 140, "the card and a note leave the picture by the first frame after they end (" + cases + " timings, at worst "
+                + worst + " ms late, a frame's gap at most 140)");
+        check(Viewfinder.outOfDateAt(false, 5000, false, 9000) == Long.MAX_VALUE && Viewfinder.outOfDateAt(true, 5000, true, 4000) == 4000,
+                "a state with neither never runs out; with both, the first to end");
+    }
+
+    /**
+     * No frames (a still scene, or the picture through Latent's screen): only the tick gives fresh states. Its runs
+     * come 100 ms after the last one ended, late by however long the UI thread took (1-30 ms here). The last state
+     * it gives is one without the card, at any lateness: the run after the last moving one gives one more
+     * (Viewfinder.tickFresh). The first v0.45.0 rule, moving runs only, left the card up when a run stepped past
+     * the 100 ms after its end.
+     */
+    static void tickClears() {
+        int cases = 0, missedBefore = 0;
+        boolean ok = true;
+        for (int phase = 0; phase < 100; phase += 3) for (int late = 1; late <= 30; late++) {
+            long shown = 2000 + phase, until = shown + Viewfinder.CARD_MS, t = shown;
+            boolean moved = false, lastOn = true, lastOnBefore = true;
+            while (true) {
+                boolean m = Viewfinder.moving(t, false, 0, until, 0, -1);
+                if (Viewfinder.tickFresh(m, moved)) lastOn = t < until;   // a fresh state: the card in it while it's up
+                if (m) lastOnBefore = t < until;
+                moved = m;
+                if (!m) break;
+                t += 100 + late;
+            }
+            cases++;
+            if (lastOn) ok = false;
+            if (lastOnBefore) missedBefore++;
+        }
+        check(ok, "no frames: the tick's last state is without the card at any lateness (" + cases + " timings; moving runs alone missed "
+                + missedBefore + ")");
+        check(Viewfinder.moving(0, true, 0, 0, 0, -1) && Viewfinder.moving(1000, false, 0, 0, 0, 0) && !Viewfinder.moving(Viewfinder.PRINT_MS + 200, false, 0, 0, 0, 0)
+                && !Viewfinder.moving(5000, false, 4000, 4000, 4000, -1), "moving: the scale open, a print developing; nothing once all have ended");
+    }
+
+    /** The stats line names each of the image core's stages, as they measure now. */
+    static void stages() {
+        check(Viewfinder.STAGES.length == FilmCore.TM_COUNT && Viewfinder.STAGES[FilmCore.TM_BLEND].equals("of it one pass")
+                && Viewfinder.STAGES[FilmCore.TM_DITHER].equals("type"), "the stats line's stages: " + String.join(", ", Viewfinder.STAGES));
     }
 
     /** A camera that records what Release asks of it; later() runs are kept to run by hand. */

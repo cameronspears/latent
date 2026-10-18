@@ -74,7 +74,7 @@ public class MainActivity extends Activity {
     private int mode = BACK;
     private String status = "";        // shown as a toast near the top; cleared after a few seconds
     private final Runnable clearToast = new Runnable() {
-        public void run() { status = ""; screen.invalidate(); }
+        public void run() { status = ""; toastChanged(); }
     };
     private boolean ready;
 
@@ -605,8 +605,8 @@ public class MainActivity extends Activity {
         // and that write gets a moment before shooting, as the card read after a develop always gave it
         if (holdAfter) releaseHold();
         long power = PowerSave.sinceLastWrite();
-        if (power >= 0 && power < POWER_SETTLE_MS) {
-            if (!shootPending) { shootPending = true; toast("Setting up the camera…"); }
+        if (power >= 0 && power < POWER_SETTLE_MS) {   // "Getting ready…" on the camera back, as the waits above (a toast here went on into the viewfinder)
+            if (!shootPending) { shootPending = true; ui.removeCallbacks(settleTick); ui.post(settleTick); }
             ui.removeCallbacks(shootWhenSettled);
             ui.postDelayed(shootWhenSettled, POWER_SETTLE_MS - power);
             return;
@@ -644,6 +644,7 @@ public class MainActivity extends Activity {
     private int vfHighestAtOpen;       // ... when the viewfinder opened: its pictures are numbered above it
     private volatile boolean filing;   // an original is being removed with Sony's delete: the camera waits
     private boolean s1Held;            // the shutter button is half-pressed now
+    private boolean s1Opened;          // ... and has been since it opened the viewfinder (not the coach's first key)
 
     /**
      * Latent's own viewfinder in place of the camera's shooting mode: live view in the roll's film,
@@ -655,6 +656,7 @@ public class MainActivity extends Activity {
         if (vf != null) {   // opened earlier this visit and kept open: the camera is never reopened in one visit
             if (!current.endless() && exposed >= current.length) { toast("Roll finished. Press \u2299 to develop."); return; }
             mode = PHOTO;
+            s1Opened = s1Held;
             readBattery();
             vf.show();   // frames again at once; its surface back on the screen with the first of them
             if (s1Held) vf.halfDown();
@@ -664,6 +666,7 @@ public class MainActivity extends Activity {
         if (!current.endless() && exposed >= current.length) { toast("Roll finished. Press \u2299 to develop."); return; }
         Stock st = Stock.byId(stocks, current.stock);
         mode = PHOTO;
+        s1Opened = s1Held;
         vfBase = exposed;
         vfHighestAtOpen = highestOnCard;
         readBattery();
@@ -817,7 +820,7 @@ public class MainActivity extends Activity {
     /**
      * Something in the viewfinder changed (UI thread). On its own surface, a fresh state goes to the presenter,
      * and Latent's screen (the side bars) is drawn again only when what it shows changed (Ui.windowKey: focus
-     * events, the lamp, notes and shots mostly leave the bars as they were); else the whole screen.
+     * steps without the AF light, notes, the card and most shots leave the bars as they were); else the whole screen.
      */
     private void vfChanged() {
         if (mode != PHOTO || vf == null) return;   // hidden behind MENU: nothing of it is on screen
@@ -831,11 +834,13 @@ public class MainActivity extends Activity {
 
     /**
      * The viewfinder's state to its picture surface: what moves over the newest picture. UI thread. Without
-     * rebuild, the newest picture goes up under the state it has, unless that no longer fits (v0.44 built a
-     * whole state for every frame). The state handed over is never changed afterwards.
+     * rebuild, the newest picture goes up under the state it has, unless that no longer fits (Viewfinder.presentAgain,
+     * or the toast changed; v0.44 built a whole state for every frame). The state handed over is never changed
+     * afterwards. What it draws that changes without a frame (a note, the card, the toast, the keys' coach, the fatal
+     * screen) gives a fresh one when it changes, and when it runs out (the tick, coachEnd, clearToast).
      */
     private UiState presentPicture(boolean rebuild) {
-        if (!rebuild && presented != null && vf.presentAgain()) return presented;
+        if (!rebuild && presented != null && status.equals(presented.toast) && vf.presentAgain()) return presented;
         UiState s = state();
         vf.layer(s);
         vf.present(s);
@@ -1055,7 +1060,17 @@ public class MainActivity extends Activity {
         status = msg == null ? "" : msg;
         ui.removeCallbacks(clearToast);
         if (status.length() > 0) ui.postDelayed(clearToast, 3500);
-        screen.invalidate();
+        toastChanged();
+    }
+
+    /**
+     * A toast up or gone (UI thread). In the viewfinder on its own surface the presenter draws it, over the picture
+     * (Latent's window, the side bars, has none), so it gets a fresh state at once, frames or none: one given before
+     * stayed up under every frame after (v0.45.0, 'Setting up the camera…' over the live view).
+     */
+    private void toastChanged() {
+        if (mode == PHOTO && vf != null && vf.onSurface()) presentPicture(true);
+        else screen.invalidate();
     }
 
     // ------------------------------------------------------------------------------ load film
@@ -1183,7 +1198,8 @@ public class MainActivity extends Activity {
         if (r.frames.isEmpty()) for (File f : r.exposures(photos)) r.frames.add(f.getPath());
         if (r.frames.isEmpty()) { toast("No exposures on this roll yet. Go shoot."); return; }
         readBattery();
-        if (batteryLow()) { toast(BATTERY_LOW); return; }   // it waits, as it is, until the camera is charged
+        // it waits, as it is, until the camera is charged; a roll with every frame developed finishes (developNext)
+        if (batteryLow() && r.developedCount() < r.frames.size()) { toast(BATTERY_LOW); return; }
         if (!quiet && !r.endless()) r.state = Roll.DEVELOPING;   // an endless roll stays loaded while its photos develop
         try { r.save(); } catch (Exception e) { toast("Could not write the roll: " + e.getMessage()); return; }
         r.cleanTemp();
@@ -1369,6 +1385,11 @@ public class MainActivity extends Activity {
             devViewOf = r;
         }
         if (devQuiet && !quietAllowed()) paused = true;
+        int next = -1;
+        for (int i = 0; i < view.length && next < 0; i++) if (!failed.contains(i) && view[i] == null) next = i;
+        // nothing left: the roll finishes, whatever else holds (a pause asked for on its last frame, the battery
+        // run down during it). The last originals are filed in the background (refresh)
+        if (next < 0) { finishDevelop(); return; }
         readBattery();
         if (batteryLow()) {   // never a frame begun on the last of the battery: the roll stops here, safe, and carries on later
             devLog(r.label() + ": paused, the battery is low (" + batteryNote() + ")");
@@ -1376,9 +1397,6 @@ public class MainActivity extends Activity {
             return;
         }
         if (paused) { stopDevelop(devQuiet ? null : "Paused. Press the centre button to carry on."); return; }
-        int next = -1;
-        for (int i = 0; i < view.length && next < 0; i++) if (!failed.contains(i) && view[i] == null) next = i;
-        if (next < 0) { finishDevelop(); return; }   // the last originals are filed in the background (refresh)
         final int frame = next;
         final File src = r.source(frame), out = r.output(frame), prv = r.preview(out);
         devSource = src;
@@ -2524,8 +2542,9 @@ public class MainActivity extends Activity {
 
     /**
      * At this much battery or less (and not on a charger) no darkroom frame starts: the frame in hand
-     * finishes, then the roll pauses, so the camera never dies between Sony's save and Latent noting it
-     * (that frame would develop twice). Resuming carries on where it stopped.
+     * finishes, then the roll pauses if frames are still to develop (one whose last frame is done finishes),
+     * so the camera never dies between Sony's save and Latent noting it (that frame would develop twice).
+     * Resuming carries on where it stopped.
      */
     static final int BATTERY_GUARD = 5;
     static final String BATTERY_LOW = "Battery low. This roll is safe; charge to carry on.";
@@ -2804,8 +2823,11 @@ public class MainActivity extends Activity {
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent e) {
         int sc = e.getScanCode();
-        if (sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS) s1Held = true;
-        if (mode == PHOTO && coachUntil > 0) endCoach();   // the first key: the keys are learnt
+        boolean s1 = sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS;
+        if (s1) s1Held = true;
+        // the first new press: the keys are learnt. Not a held key's repeats (Android repeats a held button after
+        // ~0.5 s), nor the half-press that opened the viewfinder and is still held: both used it up unseen
+        if (mode == PHOTO && coachUntil > 0 && e.getRepeatCount() == 0 && !(s1 && s1Opened)) endCoach();
         if (mode == PHOTO && vf != null) { vfKey(keyCode, e, true); return true; }
         if (sc >= 0 && sc == playScan()) {   // the camera's Playback button: Photos, and back
             if (e.getRepeatCount() == 0) {
@@ -2845,7 +2867,7 @@ public class MainActivity extends Activity {
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent e) {
         int sc = e.getScanCode();
-        if (sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS) s1Held = false;
+        if (sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS) { s1Held = false; s1Opened = false; }
         if (mode == PHOTO && vf != null) { vfKey(keyCode, e, false); return true; }
         if (shutterKey(sc, keyCode)) {
             if (shutterDown) {

@@ -35,8 +35,7 @@ public final class Relaunch extends Activity {
         // as the screen before and after it, so the restart doesn't show
         final Intent in = getIntent();
         final boolean develop = "develop".equals(in.getStringExtra(EXTRA_WHY));
-        darkroom = develop;
-        if (develop) {   // the darkroom's light, as before and after (the wheel or an arrow brightens it a moment)
+        if (develop) {   // the darkroom's light, as before and after
             light.work(true, SystemClock.uptimeMillis());
             applyLight();
         }
@@ -89,7 +88,6 @@ public final class Relaunch extends Activity {
                 pid = 0;
                 return;
             }
-            oldGone = true;   // the camera is given back now: the light may change
             Intent i = new Intent(Relaunch.this, MainActivity.class);
             i.putExtras(getIntent());   // the film and the count too, so Latent opens on the same darkroom
             i.removeExtra(EXTRA_PID);
@@ -101,35 +99,22 @@ public final class Relaunch extends Activity {
         }
     };
 
-    // the darkroom's light, by the same rules as MainActivity's: the wheel or an arrow brightens it for a moment,
-    // once the old process has given the camera back (as MainActivity's darkroom, never while the camera is Latent's)
+    /**
+     * The darkroom's light, by MainActivity's rules (Backlight: working, so its darkroom level), set once. Nothing
+     * brightens it here: this screen is up only while the old process may still hold the camera (MainActivity's
+     * darkroom never changes the light then either), and it ends as soon as that process has gone.
+     */
     private final Backlight light = new Backlight(SystemClock.uptimeMillis());
-    private boolean darkroom, oldGone;
-    private float lit = Float.NaN;
-    private final Runnable lightCheck = new Runnable() { public void run() { applyLight(); } };
 
     private void applyLight() {
-        long now = SystemClock.uptimeMillis();
-        float level = light.level(now);
-        if (level != lit) {
-            lit = level;
-            android.view.WindowManager.LayoutParams lp = getWindow().getAttributes();
-            lp.screenBrightness = level < 0 ? android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE : level;
-            getWindow().setAttributes(lp);
-        }
-        ui.removeCallbacks(lightCheck);
-        long at = light.next(now);
-        if (at > 0) ui.postAtTime(lightCheck, at);
+        float level = light.level(SystemClock.uptimeMillis());
+        android.view.WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = level < 0 ? android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE : level;
+        getWindow().setAttributes(lp);
     }
 
     @Override
-    public boolean onKeyDown(int keyCode, android.view.KeyEvent e) {   // a moment: nothing to press, but the light
-        if (darkroom && oldGone && e.getRepeatCount() == 0 && MainActivity.arrowKey(keyCode, e.getScanCode())) {
-            light.press(SystemClock.uptimeMillis(), Backlight.PEEK);
-            applyLight();
-        }
-        return true;
-    }
+    public boolean onKeyDown(int keyCode, android.view.KeyEvent e) { return true; }   // a moment: nothing to press
 
     @Override
     public boolean onKeyUp(int keyCode, android.view.KeyEvent e) { return true; }

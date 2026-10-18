@@ -22,9 +22,12 @@ import javax.imageio.ImageIO;
  * Ui.menuRows (what MainActivity shows). Then it checks what the eye would catch late:
  * - the viewfinder's layers and parts add up to the whole (8w, 8x);
  * - the overlay draws nothing outside its two bands (Ui.OVL_TOP_END, OVL_BOTTOM_START) unless the grid is on;
- * - two viewfinder states with one Ui.windowKey draw the same window (the window is redrawn only on a new key);
+ * - two viewfinder states with one Ui.windowKey draw the same window (the window is redrawn only on a new key),
+ *   and a focus step the window doesn't show keeps the key;
  * - every text is at least 13 px (sentences 15), reads at 4.5:1 on its background (3:1 from 18 px), and
- *   overlaps no other text; every side-bar value Sony can report fits its bar;
+ *   overlaps no other text; every side-bar value Sony can report fits its bar; the exposure line reads so
+ *   even over a white picture;
+ * - Choose film's pills and canister row never overlap, however many looks; every menu's headings head rows;
  * - the palette and the films' colours are on the 4-bit grid.
  * Any failure fails the run.
  *
@@ -81,6 +84,16 @@ public class RenderScreens {
         s = state();
         s.mode = UiState.LOAD; s.films = new ArrayList<UiState.Film>(); s.liveCaption = "";
         render(s, "1f-home-no-looks");
+        List<UiState.Film> many = manyLooks(six, 20);   // six of Latent's and fourteen of your own on the card
+        s = state();
+        s.mode = UiState.LOAD; s.films = many; s.filmSel = 13; s.lengthSel = 1; s.liveCaption = "on";
+        render(s, "1g-home-many-looks");
+        for (int n = 1; n <= many.size(); n++) for (int f = 0; f < n; f += Math.max(1, n / 5)) for (boolean cancel : new boolean[] { false, true }) {
+            s = state();   // every count of looks: the row stays between the two pills
+            s.mode = UiState.LOAD; s.films = many.subList(0, n); s.filmSel = f; s.lengthSel = 1; s.liveCaption = "on"; s.cancelable = cancel; s.battery = 100;
+            audit(s, "1-home-choose " + n + " looks, film " + f + (cancel ? ", changing" : ""));
+        }
+        canisterRows();
         for (int f = 0; f < six.size(); f++) for (int l = 0; l < 4; l++) {   // every film at every length: nothing collides
             s = state();
             s.mode = UiState.LOAD; s.films = six; s.filmSel = f; s.lengthSel = l; s.liveCaption = "on";
@@ -141,6 +154,11 @@ public class RenderScreens {
         empty.version = "0.45.0";
         s = menu(empty, 1, null);
         render(s, "6e-menu-no-photos");
+        Ui.Menu developing = new Ui.Menu();   // a roll developing (paused): nothing of the roll's to do here, so no "This roll"
+        developing.roll = true; developing.exposed = 24; developing.photos = true; developing.version = "0.45.0";
+        s = menu(developing, 1, classic);
+        render(s, "6f-menu-roll-developing");
+        menuHeadings();
 
         // ---- the viewfinder (in-app shooting): every focus state, a look change, a shot developing
         int[] hist = new int[64];
@@ -200,6 +218,9 @@ public class RenderScreens {
         s = vf(six, 3, img(samples, "STREET-CUBANNEG.png"));
         s.endless = true; s.exposed = 41; s.lookShown = true; s.cardNote = "From this frame on";
         render(s, "8q-vf-endless-film-card");
+        s = vf(many, 17, img(samples, "STREET-CUBANNEG.png"));
+        s.endless = true; s.exposed = 41; s.lookShown = true; s.cardNote = "From this frame on";
+        render(s, "8qb-vf-film-card-many-looks");
         s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
         s.evEdit = true; s.ev = 0; s.shutter = "1/125"; s.aperture = "F5.6"; s.iso = "200";
         render(s, "8r-vf-exposure-open");
@@ -222,6 +243,7 @@ public class RenderScreens {
         layers(s, "8x-vf-layers-ev-grid");
         windowKeys(six, img(samples, "STREET-CLASSNEG.png"));
         sideBarText();
+        readouts(six);
 
         s = state();
         s.mode = UiState.DARKROOM; s.film = cuban; s.devFrame = 4; s.devTotal = 12; s.devDone = 4;
@@ -345,6 +367,59 @@ public class RenderScreens {
         s.mode = UiState.VIEW; s.photosReady = true;
         s.film = film; s.rollNumber = 12; s.frameNumber = 7; s.frameOf = 24; s.viewImage = picture;
         return s;
+    }
+
+    /**
+     * Every menu MainActivity can build (each of Ui.Menu's switches): a heading always has a row of its own under
+     * it, and "This roll" heads only the roll's rows (v0.45.0 showed it over Photos alone while a roll developed).
+     */
+    static void menuHeadings() {
+        int menus = 0;
+        for (int bits = 0; bits < 32; bits++) {
+            Ui.Menu m = new Ui.Menu();
+            m.roll = (bits & 1) != 0; m.developNow = (bits & 2) != 0; m.changeFilm = (bits & 4) != 0; m.endless = (bits & 8) != 0; m.photos = (bits & 16) != 0;
+            if (!m.roll && (m.developNow || m.changeFilm || m.endless)) continue;   // the roll's switches need a roll
+            List<String[]> rows = Ui.menuRows(m);
+            menus++;
+            for (int i = 0; i < rows.size(); i++) {
+                if (rows.get(i)[1].length() > 0) continue;
+                if (i + 1 >= rows.size() || rows.get(i + 1)[1].length() == 0) problems.add("menu " + bits + ": the heading '" + rows.get(i)[0] + "' has no row under it");
+                else if (rows.get(i)[0].equals("This roll") && !(rows.get(i + 1)[2].equals("develop") || rows.get(i + 1)[2].equals("change")))
+                    problems.add("menu " + bits + ": 'This roll' heads '" + rows.get(i + 1)[0] + "', not one of the roll's rows");
+            }
+        }
+        System.out.println("menu headings: " + menus + " menus, every heading over a row of its own");
+    }
+
+    /**
+     * The canister row (Choose film and the viewfinder's card): at most Ui.CAN_MAX at once, never wider than it may
+     * be, the chosen one always in it and in the middle where the row's ends allow; all of them while they fit.
+     */
+    static void canisterRows() {
+        int rows = 0;
+        for (float room : new float[] { 422, 600, 200, 60 }) for (int n = 1; n <= 40; n++) for (int sel = 0; sel < n; sel++) {
+            int[] w = Ui.canisterWindow(n, sel, room);
+            int first = w[0], k = w[1], fit = (int) ((room - 8) / Ui.CAN_PITCH);
+            rows++;
+            String what = "canister row of " + n + " in " + room + " px, film " + sel + ": shows " + first + ".." + (first + k - 1);
+            if (k < 1 || k > Ui.CAN_MAX || first < 0 || first + k > n || sel < first || sel >= first + k) problems.add(what + " (the chosen one not in it)");
+            else if (n <= Math.min(Ui.CAN_MAX, Math.max(1, fit)) && k != n) problems.add(what + " (they all fit)");
+            else if (k > 1 && Ui.canisterRowWidth(n, sel, room) > room + 0.01f) problems.add(what + " (wider than its room)");
+            else if (sel - first != k / 2 && first != 0 && first + k != n) problems.add(what + " (not centred on the chosen one)");
+        }
+        System.out.println("canister rows: " + rows + " rows checked, at most " + Ui.CAN_MAX + " shown, the chosen one centred");
+    }
+
+    /** Latent's six films, then n - 6 of your own (.CUB files: their own names, Latent's colours in turn). */
+    static List<UiState.Film> manyLooks(List<UiState.Film> six, int n) {
+        List<UiState.Film> out = new ArrayList<UiState.Film>(six);
+        for (int i = six.size(); i < n; i++) {
+            UiState.Film o = six.get(i % six.size()), f = new UiState.Film();
+            f.title = "My look " + (i - six.size() + 1); f.iso = ""; f.tagline = "";
+            f.accent = o.accent; f.body = o.body; f.band = o.band; f.sample = o.sample;
+            out.add(f);
+        }
+        return out;
     }
 
     /** The menu with this row chosen, as MainActivity builds it. */
@@ -567,7 +642,18 @@ public class RenderScreens {
                 }
             }
         }
-        System.out.println("window key: " + checked + " changes that keep the key draw the same window");
+        // and no more than that: what the bars don't draw leaves the key (and the window) be. Each focus step
+        // without the AF light (v0.45.0 drew the whole window again at every one), the counts under the scale
+        for (UiState base : bases) for (int af = 0; af <= 3; af++) {
+            UiState t = base.copy();
+            t.afState = af; t.afTry = af + 1; t.afNote = af == 3 ? "Can't focus" : "";
+            boolean lit = base.afLamp && !base.evEdit && (af == 1) != (base.afState == 1);
+            if (!lit && !Ui.windowKey(t).equals(Ui.windowKey(base))) problems.add("windowKey changes with a focus step (" + base.afState + " to " + af + ") the window doesn't show");
+        }
+        UiState ev = e.copy();
+        ev.shotsLeft = 77; ev.developing = 3; ev.afLamp = true;
+        if (!Ui.windowKey(ev).equals(Ui.windowKey(e))) problems.add("windowKey changes with what the exposure scale covers");
+        System.out.println("window key: " + checked + " changes that keep the key draw the same window; focus steps keep it");
     }
 
     /** Other values for a field, to see whether the window notices them. */
@@ -586,6 +672,84 @@ public class RenderScreens {
             out.add(new ArrayList<UiState.Film>());
         } else if (!t.isPrimitive()) out.add(null);
         return out;
+    }
+
+    /**
+     * The exposure line over the brightest picture there is (white, 0xF0), as the camera shows it (the overlay at the
+     * picture's 540 x 480 dots, laid over it and dithered): each word read against the brightest 5% of what is
+     * behind and beside its letters, at 3:1 for the 22 px figures and 4.5:1 for the 13 px label. And what the
+     * line costs the composer: its type pixels in the bottom band (the fade rows are laid in by arithmetic).
+     */
+    static void readouts(List<UiState.Film> looks) throws Exception {
+        final int w = 540, h = 480;
+        BufferedImage white = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) white.setRGB(x, y, 0xF0F0F0);
+        UiState s = vf(looks, 2, white);
+        UiState bare = s.copy();
+        bare.shutter = ""; bare.aperture = ""; bare.iso = "";
+        BufferedImage of = overlayAt(s, w, h), ob = overlayAt(bare, w, h);
+        BufferedImage cf = laid(white, of), cb = laid(white, ob);
+        CameraTrue.dither(cf);
+        CameraTrue.dither(cb);
+        boolean[] core = new boolean[w * h];
+        boolean[] col = new boolean[w];
+        int opaque = 0, edge = 0;
+        for (int y = Ui.OVL_BOTTOM_START; y < h; y++) for (int x = 0; x < w; x++) {
+            int p = of.getRGB(x, y), q = ob.getRGB(x, y);
+            if (p == q) continue;
+            if ((p >>> 24) == 255) opaque++; else edge++;
+            if ((p >>> 24) == 255 && lum(p) > 0.8) { core[y * w + x] = true; col[x] = true; }
+        }
+        StringBuilder said = new StringBuilder();
+        int x = 0, words = 0;
+        while (x < w) {   // the words: columns with letters, 6 empty ones between
+            while (x < w && !col[x]) x++;
+            if (x >= w) break;
+            int x0 = x, gap = 0, top = h, bottom = 0;
+            while (x < w && gap < 6) { gap = col[x] ? 0 : gap + 1; x++; }
+            int x1 = x - gap;
+            List<Double> bg = new ArrayList<Double>();
+            double text = 0;
+            int n = 0;
+            for (int y = Ui.OVL_BOTTOM_START; y < h; y++) for (int xx = x0; xx < x1; xx++) {
+                if (!core[y * w + xx]) continue;
+                top = Math.min(top, y); bottom = Math.max(bottom, y);
+                text += lum(cf.getRGB(xx, y)); n++;
+                for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) bg.add(lum(cb.getRGB(Math.max(0, Math.min(w - 1, xx + dx)), Math.min(h - 1, y + dy))));
+            }
+            java.util.Collections.sort(bg);
+            double c = (text / n + 0.05) / (bg.get((int) (bg.size() * 0.95)) + 0.05), need = bottom - top < 12 ? 4.5 : 3;   // caps under 12 rows: the label
+            said.append(String.format(" %.1f", c));
+            words++;
+            if (c < need) problems.add(String.format("the exposure line over white: the word at dot %d reads at %.1f:1, under %.1f:1", x0, c, need));
+        }
+        if (words < 4) problems.add("the exposure line over white: " + words + " words found, not shutter, aperture, label and ISO");
+        System.out.println("exposure line over white:" + said + " (:1, each word); its type in the bottom band " + opaque + " opaque + " + edge
+                + " edge pixels, ~" + (opaque * 12 + edge * 52) + " instructions a frame");
+    }
+
+    /** The overlay at the picture's dots (w x h), as the overlay thread draws it. */
+    static BufferedImage overlayAt(UiState s, int w, int h) throws Exception {
+        BufferedImage o = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = o.createGraphics();
+        g.scale(w / 720f, h / 480f);
+        g.translate(-(s.width - 720) / 2, 0);
+        UiState c = s.copy();
+        c.vfLayer = UiState.LAYER_OVERLAY;
+        c.vfPart = UiState.PART_ALL;
+        Ui.draw(new HostGfx(g, fonts), c);
+        g.dispose();
+        return o;
+    }
+
+    /** A picture with an overlay laid over it. */
+    static BufferedImage laid(BufferedImage pic, BufferedImage ov) {
+        BufferedImage b = new BufferedImage(pic.getWidth(), pic.getHeight(), BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = b.createGraphics();
+        g.drawImage(pic, 0, 0, null);
+        g.drawImage(ov, 0, 0, null);
+        g.dispose();
+        return b;
     }
 
     /** Every value a side bar can show (Sony's AF modes and areas, photos left, the keys, the exposure scale) fits it. */
@@ -669,11 +833,15 @@ public class RenderScreens {
         final String name;
         final List<float[]> boxes = new ArrayList<float[]>();
         final List<String> texts = new ArrayList<String>();
+        final List<float[]> plates = new ArrayList<float[]>();   // Choose film's glass plates along the top
 
         Audit(HostGfx g, BufferedImage img, UiState s, String name) { this.g = g; this.img = img; this.s = s; this.name = name; }
 
         public void rect(float x, float y, float w, float h, int c) { g.rect(x, y, w, h, c); }
-        public void roundRect(float x, float y, float w, float h, float r, int c) { g.roundRect(x, y, w, h, r, c); }
+        public void roundRect(float x, float y, float w, float h, float r, int c) {
+            if (s.mode == UiState.LOAD && c == Ui.GLASS && y < 60) plates.add(new float[] { x, x + w });
+            g.roundRect(x, y, w, h, r, c);
+        }
         public void strokeRoundRect(float x, float y, float w, float h, float r, float width, int c) { g.strokeRoundRect(x, y, w, h, r, width, c); }
         public void circle(float cx, float cy, float r, int c) { g.circle(cx, cy, r, c); }
         public void strokeCircle(float cx, float cy, float r, float width, int c) { g.strokeCircle(cx, cy, r, width, c); }
@@ -727,7 +895,14 @@ public class RenderScreens {
             texts.add(t);
         }
 
-        void finish() { }
+        /** The title's pill, the canister row's and the battery's on Choose film: side by side, none over another. */
+        void finish() {
+            for (int i = 0; i < plates.size(); i++) for (int j = i + 1; j < plates.size(); j++) {
+                float[] a = plates.get(i), b = plates.get(j);
+                if (Math.min(a[1], b[1]) - Math.max(a[0], b[0]) > 0.5f)
+                    problems.add(String.format("%s: the plates at %.0f..%.0f and %.0f..%.0f overlap along the top", name, a[0], a[1], b[0], b[1]));
+            }
+        }
 
         static int over(int fg, int bg) {
             int a = fg >>> 24;

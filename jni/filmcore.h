@@ -83,7 +83,7 @@ typedef struct fl_frame_ctx fl_frame_ctx;
 #define FL_FI_SIG_N 48
 #define FL_FRAME_INFO 118
 #define FL_TM_DECODE 0
-#define FL_TM_READ 1      /* the sharpening, when it's built in (FL_SHARPEN); the level until v0.45.0 */
+#define FL_TM_READ 1      /* the frame's signature, and the sharpening when it's built in (FL_SHARPEN); the level until v0.45.0 */
 #define FL_TM_LOOK 2
 #define FL_TM_COMPOSE 3
 #define FL_TM_BLEND 4     /* of compose: the rows blended, faded, dithered and packed, one pass (from every eighth row) */

@@ -757,6 +757,14 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                 || (print != null && now - printAt < PRINT_MS + 200);
     }
 
+    /**
+     * Something over the picture moves at 'now', so the tick gives fresh states: the exposure scale open, the blink,
+     * the film card or a note up (each with 100 ms more), the print developing (printAt, or -1 with no print).
+     */
+    static boolean moving(long now, boolean evEditing, long flashUntil, long cardUntil, long noteUntil, long printAt) {
+        return evEditing || now < flashUntil + 100 || now < cardUntil + 100 || now < noteUntil + 100 || (printAt >= 0 && now - printAt < PRINT_MS + 200);
+    }
+
     /** Any key in the viewfinder: the frame rate back to full at once. */
     void touched() {
         long now = SystemClock.uptimeMillis();
@@ -1110,7 +1118,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private int placeNotes;
     // what the presenter was last given (UI thread), to tell whether the next frame can go up under the same state
     private boolean presentedLook, presentedOverOverlay;
-    private long presentedAt;
+    private long presentedAt, presentedUntil;   // given then; out of date by the clock from then (outOfDateAt)
 
     /** UI thread: the picture's surface is ready (null: it's gone). A presenter that has ended is started again. */
     void pictureSurface(SurfaceHolder h) {
@@ -1136,18 +1144,28 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         presentedLook = s.lookLive;
         presentedOverOverlay = s.vfLayer == UiState.LAYER_SCREEN;
         presentedAt = SystemClock.uptimeMillis();
+        presentedUntil = outOfDateAt(s.lookShown, cardUntil, s.vfNote.length() > 0, noteUntil);
         synchronized (presentLock) { presentState = s; presentWanted = true; presentLock.notifyAll(); }
+    }
+
+    /**
+     * When a state that shows the film card (card) or a note (note) goes out of date by the clock alone: the
+     * first of their ends, or Long.MAX_VALUE when it shows neither. The next frame after it gets a fresh state.
+     */
+    static long outOfDateAt(boolean card, long cardUntil, boolean note, long noteUntil) {
+        return Math.min(card ? cardUntil : Long.MAX_VALUE, note ? noteUntil : Long.MAX_VALUE);
     }
 
     /**
      * UI thread: the newest picture under the state last given, with nothing built again (v0.44 built a whole
      * state for every frame). False when that state no longer fits (the look newly on, the type now in the
-     * frames, the histogram moving), so a fresh one has to be given instead.
+     * frames, the histogram moving, the card or a note in it over), so a fresh one has to be given instead.
      */
     boolean presentAgain() {
         boolean look = lookOn && hasFreshLook() && !sequenceStopped;
-        if (look != presentedLook || (look && frontOverlay > 0) != presentedOverOverlay
-                || (display == D_GRID && SystemClock.uptimeMillis() - presentedAt >= 100)) return false;
+        long now = SystemClock.uptimeMillis();
+        if (look != presentedLook || (look && frontOverlay > 0) != presentedOverOverlay || now >= presentedUntil
+                || (display == D_GRID && now - presentedAt >= 100)) return false;
         synchronized (presentLock) {
             if (presentState == null) return false;
             presentWanted = true;
@@ -2173,18 +2191,25 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     /**
      * Animations (the print, the blink, the card, a note) move on at 10 a second. Frames
      * between go up under the state last given (presentAgain), so on its own surface each tick gives a fresh one;
-     * through Latent's screen, not while frames come (each redraws it anyway).
+     * through Latent's screen, not while frames come (each redraws it anyway). The first run after the last
+     * moving one gives one more: that state is the one with the card or the note gone, whenever the run comes
+     * (the UI thread is late by a few ms each run, and a still scene sends no frames to clear it).
      */
     private final Runnable tick = new Runnable() {
         public void run() {
             if (closed) return;
             long now = SystemClock.uptimeMillis();
             if (evEditing && now > evEditUntil) closeEv();
-            boolean moving = evEditing || now < flashUntil + 100 || now < cardUntil + 100 || now < noteUntil + 100 || (print != null && now - printAt < PRINT_MS + 200);
-            if (moving && (onSurface() || now - lastShownAt > 200)) host.animate();
-            if (moving) ui.postDelayed(this, 100);
+            boolean m = moving(now, evEditing, flashUntil, cardUntil, noteUntil, print != null ? printAt : -1);
+            if (tickFresh(m, moved) && (onSurface() || now - lastShownAt > 200)) host.animate();
+            moved = m;
+            if (m) ui.postDelayed(this, 100);
         }
     };
+    private boolean moved;   // the tick's last run found something moving
+
+    /** The tick gives a fresh state while something moves, and once more on the first run after. */
+    static boolean tickFresh(boolean moving, boolean movedBefore) { return moving || movedBefore; }
 
     /** What Latent says when a picture won't save, so the camera can't be given back: the one thing left to do. */
     static final String STUCK = "A photo isn't saving. Turn the camera off (battery out if it won't).";
@@ -2487,6 +2512,13 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     }
 
     /**
+     * The stats line's names for FilmCore's TM_* stages, as they measure since v0.45.0: the decode; the frame's
+     * signature (and the sharpening, when it's built in); the look; the compose, and of it the one pass (blend,
+     * fades, dither, packing) and the overlay's own pixels (the type). Until v0.45.0: level, blend, dither.
+     */
+    static final String[] STAGES = { "decode", "sig+sharpen", "look", "compose", "of it one pass", "type" };
+
+    /**
      * Every 10 s while live: how the frames are keeping up (a camera slowing down shows here first). The counts
      * are taken here, on the UI thread; /proc, the battery and the card are read and written by the log thread
      * (v0.44 did it all here: a stall of the frames every 10 s). write false (hidden): counted from now, nothing
@@ -2498,9 +2530,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             Runtime rt = Runtime.getRuntime();
             int look = n > 0 ? lm / n : 0, grab = grabs > 0 ? grabMsSum / grabs : 0;
             StringBuilder st = new StringBuilder();
-            String[] names = { "decode", "sharpen", "look", "compose", "of it blend", "dither" };
             for (int i = 0; i < stageMs.length; i++) {
-                st.append(i == 0 ? "" : ", ").append(names[i]).append(' ').append(n > 0 ? (stageMs[i] - statStage[i]) / n : 0);
+                st.append(i == 0 ? "" : ", ").append(STAGES[i]).append(' ').append(n > 0 ? (stageMs[i] - statStage[i]) / n : 0);
                 statStage[i] = stageMs[i];
             }
             StringBuilder cores = new StringBuilder(), late = new StringBuilder();
