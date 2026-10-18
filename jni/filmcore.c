@@ -2158,13 +2158,25 @@ static inline void fade_weights(unsigned int uy, unsigned int ia, unsigned int *
 /* A screen row's thresholds for fuse_row, per pixel pair: red | blue lanes of its left pixel, of its right,
  * and its two greens (left low): each the blue noise's threshold (0..15) x 256 + rnd, + the row's overlay
  * colour (base: red << 16 | blue, green). 32 pairs: the blue noise repeats every 64 pixels. */
+/*
+ * FL_DITHER_GREEN 1: green takes the opposite threshold (15 - t) to red's and blue's, so where the dither lifts red
+ * and blue a level it tends to leave green down: the dither's noise moves from brightness (which the eye sees) to
+ * faint colour speckle (which it mostly doesn't); about half the brightness noise on flat greys and skies. Off (0,
+ * one threshold for all three, as since v0.38) until the user has judged the renders (tools/frame-test.sh --render).
+ */
+#ifndef FL_DITHER_GREEN
+#define FL_DITHER_GREEN 0
+#endif
+#define GREEN_T(t) (FL_DITHER_GREEN ? 15 - (t) : (t))
+
 static void row_thresholds(const unsigned char *bn, int ox, unsigned int rnd, unsigned int brb, unsigned int bg, unsigned int *T) {
     int i;
     for (i = 0; i < 32; i++) {
-        unsigned int t0 = (unsigned int)(bn[(2 * i + ox) & 63] >> 4) * 256 + rnd, t1 = (unsigned int)(bn[(2 * i + 1 + ox) & 63] >> 4) * 256 + rnd;
-        T[3 * i] = (t0 << 16 | t0) + brb;
-        T[3 * i + 1] = (t1 << 16 | t1) + brb;
-        T[3 * i + 2] = (t1 << 16 | t0) + (bg << 16 | bg);
+        unsigned int t0 = bn[(2 * i + ox) & 63] >> 4, t1 = bn[(2 * i + 1 + ox) & 63] >> 4;
+        unsigned int r0 = t0 * 256 + rnd, r1 = t1 * 256 + rnd, g0 = GREEN_T(t0) * 256 + rnd, g1 = GREEN_T(t1) * 256 + rnd;
+        T[3 * i] = (r0 << 16 | r0) + brb;
+        T[3 * i + 1] = (r1 << 16 | r1) + brb;
+        T[3 * i + 2] = (g1 << 16 | g0) + (bg << 16 | bg);
     }
 }
 
@@ -2198,11 +2210,11 @@ static NOINLINE void runs_row(const fl_overlay *o, int y, const unsigned int *h0
         int x;
         if (rn[3]) for (x = rn[0]; x < rn[1]; x++) o16[x] = (unsigned short)(trb[LEVELS(prb[x])] | tg1[pgia[x] >> 12 & 15]);   /* hot: type per=pixel max=12 sp=0 */
         else for (x = rn[0]; x < rn[1]; x++) {
-            unsigned int gia = pgia[x], u, w, t = (unsigned int)(bn[(x + ox) & 63] >> 4) << 8, a, g;
+            unsigned int gia = pgia[x], u, w, t = bn[(x + ox) & 63] >> 4, a, g;
             int r = (x >> 1) * 3, i = r + (x & 1), j = 2 * r + 4 + (x & 1);   /* this pixel in the records: red | blue word, green half */
             fade_weights(uy, gia >> 16, &u, &w);
-            a = h0[i] * u + h1[i] * w + prb[x] + (t << 16 | t);   /* hot: edges per=pixel max=52 sp=10 */
-            g = g0[j] * u + g1[j] * w + (gia & 0xFFFF) + t;
+            a = h0[i] * u + h1[i] * w + prb[x] + (t << 24 | t << 8);   /* hot: edges per=pixel max=52 sp=10 */
+            g = g0[j] * u + g1[j] * w + (gia & 0xFFFF) + (GREEN_T(t) << 8);
             o16[x] = (unsigned short)(trb[LEVELS(a)] | tg1[g >> 12 & 15]);
         }
     }

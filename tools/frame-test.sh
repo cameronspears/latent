@@ -12,6 +12,10 @@ clang -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Ijni -Ijni/t
 clang -g -O1 -fsanitize=undefined -fno-sanitize-recover=undefined -Wall -Wno-unused-function -Ijni -Ijni/turbo -I$J \
   -o out/host/frametest-ubsan tools/frametest.c out/host/obj/*.o
 out/host/frametest "$@"
+for a in "$@"; do if [ "$a" = --render ]; then   # and the other dither (FL_DITHER_GREEN), drawn beside
+  clang -O2 -w -DFL_DITHER_GREEN=1 -Ijni -Ijni/turbo -I$J -o out/host/frametest-green tools/frametest.c out/host/obj/*.o
+  out/host/frametest-green --render-only "$@" | grep dither
+fi; done
 ARGS=(); for a in "$@"; do [ "$a" = --bench ] || ARGS+=("$a"); done
 echo "under UBSan:"
 out/host/frametest-ubsan "${ARGS[@]}" | tail -1

@@ -383,7 +383,54 @@ static void render(const char *dir, const char *name, const unsigned short *o) {
 }
 
 /* Composed frames for judging by eye (tools/frame-test.sh --render DIR): v0.44.1's, today's, and today's with the
- * options that are off (sharpening at two strengths). No overlay: the picture alone. */
+ * options that are off (sharpening at two strengths; built with FL_DITHER_GREEN 1, green's opposite threshold).
+ * No overlay: the picture alone. */
+/* A flat mid-grey and a ramp, as a camera frame: for the dither's own noise. */
+static int test_card(frame_jpg *out) {
+    struct jpeg_compress_struct e;
+    struct jpeg_error_mgr ce;
+    unsigned char *rgb = (unsigned char *)malloc(320 * 216 * 3);
+    int x, y;
+    for (y = 0; y < 216; y++) for (x = 0; x < 320; x++) {
+        int v = y < 108 ? 136 : x * 255 / 319;   /* 136: a level's own value, 8 x 17; then 0..255 */
+        if (y < 108 && x >= 160) v = 128;        /* and between two levels */
+        rgb[(y * 320 + x) * 3] = rgb[(y * 320 + x) * 3 + 1] = rgb[(y * 320 + x) * 3 + 2] = (unsigned char)v;
+    }
+    e.err = jpeg_std_error(&ce);
+    jpeg_create_compress(&e);
+    out->jpg = NULL; out->len = 0;
+    jpeg_mem_dest(&e, &out->jpg, &out->len);
+    e.image_width = 320; e.image_height = 216; e.input_components = 3; e.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&e);
+    jpeg_set_quality(&e, 98, TRUE);
+    jpeg_start_compress(&e, TRUE);
+    while (e.next_scanline < 216) { JSAMPROW r = rgb + (size_t)e.next_scanline * 320 * 3; jpeg_write_scanlines(&e, &r, 1); }
+    jpeg_finish_compress(&e);
+    jpeg_destroy_compress(&e);
+    free(rgb);
+    out->name = "CARD.JPG";
+    return 0;
+}
+
+/* The dither's noise on the test card's flat greys (rows 60..180 of the screen, away from the edges): the standard
+ * deviation of brightness (BT.601) and of colour (each channel's level less the pixel's brightness), in levels. */
+static void dither_noise(const unsigned short *o, double *luma, double *chroma) {
+    double s = 0, ss = 0, cs = 0;
+    long n = 0;
+    int x, y;
+    for (y = 60; y < 180; y++) for (x = 40; x < OW - 40; x++) {
+        int l[3];
+        double Y;
+        if (x > OW / 2 - 40 && x < OW / 2 + 40) continue;   /* not across the two greys' edge */
+        lv(o[y * OW + x], l);
+        Y = 0.299 * l[0] + 0.587 * l[1] + 0.114 * l[2];
+        s += Y; ss += Y * Y; n++;
+        cs += (l[0] - Y) * (l[0] - Y) + (l[1] - Y) * (l[1] - Y) + (l[2] - Y) * (l[2] - Y);
+    }
+    *luma = sqrt(ss / n - (s / n) * (s / n));
+    *chroma = sqrt(cs / (3.0 * n));
+}
+
 static void renders(const char *dir, frame_jpg *fr, int nfr) {
     static const int SHARP[2] = { 4, 8 };
     fl_frame_ctx *c = fl_frame_new();
@@ -391,6 +438,26 @@ static void renders(const char *dir, frame_jpg *fr, int nfr) {
     int info[FL_FRAME_INFO], tm[FL_FRAME_TIMES], i, k, keep = g_sharpen;
     char err[256], name[256];
     fl_set_overlay(NULL, 0, 0);
+    {   /* the dither's noise on the test card (no film: the greys as they are) */
+        frame_jpg card;
+        double l, ch;
+        test_card(&card);
+        fl_frame(c, card.jpg, card.len, NULL, PARAMS, 0, 1, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
+        dither_noise(a, &l, &ch);
+        printf("  the dither on flat greys (%s): brightness noise %.3f levels, colour %.3f\n",
+               FL_DITHER_GREEN ? "green's threshold opposite" : "one threshold", l, ch);
+        render(dir, FL_DITHER_GREEN ? "CARD-d-dither-green" : "CARD-b-now", a);
+        free(card.jpg);
+    }
+#if FL_DITHER_GREEN
+    for (i = 0; i < nfr; i++) {   /* this build only draws the other dither */
+        char base[64];
+        snprintf(base, sizeof base, "%.*s", (int)(strchr(fr[i].name, '.') ? strchr(fr[i].name, '.') - fr[i].name : (long)strlen(fr[i].name)), fr[i].name);
+        fl_frame(c, fr[i].jpg, fr[i].len, FILMS[3], PARAMS, 0, 1, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
+        snprintf(name, sizeof name, "%s-d-dither-green", base); render(dir, name, a);
+    }
+    nfr = 0;
+#endif
     for (i = 0; i < nfr; i++) {
         char base[64];
         snprintf(base, sizeof base, "%.*s", (int)(strchr(fr[i].name, '.') ? strchr(fr[i].name, '.') - fr[i].name : (long)strlen(fr[i].name)), fr[i].name);
@@ -412,15 +479,17 @@ static void renders(const char *dir, frame_jpg *fr, int nfr) {
 
 int main(int argc, char **argv) {
     frame_jpg fr[16];
-    int nfr = 0, i, do_bench = 0;
+    int nfr = 0, i, do_bench = 0, render_only = 0;
     const char *dir = NULL;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--bench")) { do_bench = 1; continue; }
+        if (!strcmp(argv[i], "--render-only")) { render_only = 1; continue; }
         if (!strcmp(argv[i], "--render") && i + 1 < argc) { dir = argv[++i]; continue; }
         if (nfr < 16 && camera_frame(argv[i], 65, &fr[nfr]) == 0) nfr++;
         else fprintf(stderr, "cannot read %s\n", argv[i]);
     }
-    if (!nfr) { fprintf(stderr, "usage: frametest [--bench] [--render DIR] IN.JPG...\n"); return 2; }
+    if (!nfr) { fprintf(stderr, "usage: frametest [--bench] [--render DIR] [--render-only] IN.JPG...\n"); return 2; }
+    if (render_only) { renders(dir, fr, nfr); for (i = 0; i < nfr; i++) free(fr[i].jpg); return 0; }
     test_no_carry();
     test_look_kernels(fr, nfr);
     test_ycc(fr, nfr);
