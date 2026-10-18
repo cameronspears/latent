@@ -214,7 +214,69 @@ public class RollTest {
 
         // old ROLL.TXT without prints still reads
         check(Roll.open(a1.dir).prints.isEmpty() && Roll.open(a1.dir).print(0) == null, "rolls without prints read fine");
+        photoOrder(new File(card.getParentFile(), "sortcard"));
         System.out.println("ROLL OK");
+    }
+
+    /**
+     * The card's photos newest first, each file's time now read once: exactly the order of v0.44's sort
+     * (which asked the card for both times in every comparison), equal times and mixed folders included.
+     */
+    static void photoOrder(File card) throws Exception {
+        long t = 1700000000000L;
+        String[] folders = { "100MSDCF", "101MSDCF", "102_0101", "100MSDCF/SUB" };
+        java.util.Random rnd = new java.util.Random(45);
+        int made = 0;
+        for (int i = 0; i < 160; i++) {
+            String folder = folders[rnd.nextInt(folders.length)];
+            String name = "DSC0" + (1000 + rnd.nextInt(40)) + (rnd.nextInt(5) == 0 ? ".jpeg" : ".JPG");   // the same names recur across folders
+            File f = new File(card, "DCIM/" + folder + "/" + name);
+            if (f.exists()) continue;
+            touch(f, t + rnd.nextInt(12) * 2000);   // twelve times only: plenty of photos share one
+            made++;
+        }
+        touch(new File(card, "DCIM/100MSDCF/EMPTY001.JPG"), t);
+        new FileOutputStream(new File(card, "DCIM/100MSDCF/EMPTY001.JPG")).close();   // empty: never a photo
+        touch(new File(card, "DCIM/101MSDCF/NOTES.TXT"), t);
+        java.util.List<File> now = Library.photos(card), old = oldPhotos(card);
+        check(now.size() == made && now.equals(old), "photos: " + now.size() + " newest first, the same order as v0.44's sort (equal times, mixed folders, same names)");
+        int ties = 0;
+        for (int i = 1; i < now.size(); i++) if (now.get(i).lastModified() == now.get(i - 1).lastModified()) ties++;
+        check(ties > 100, "  (" + ties + " neighbours share a time)");
+        // the same comparison on any input order, a stable sort: always the old order, ties as listed
+        java.util.List<File> in = new java.util.ArrayList<File>(old);
+        boolean same = true;
+        for (int k = 0; k < 200 && same; k++) {
+            java.util.Collections.shuffle(in, rnd);
+            same = Library.newestFirst(in).equals(oldSort(new java.util.ArrayList<File>(in)));
+        }
+        check(same, "the sort matches v0.44's on 200 shuffled listings");
+    }
+
+    /** v0.44's Library.photos, as it was. */
+    static java.util.List<File> oldPhotos(File card) {
+        java.util.List<File> out = new java.util.ArrayList<File>();
+        oldWalk(new File(card, "DCIM"), out, 0);
+        return oldSort(out);
+    }
+
+    static java.util.List<File> oldSort(java.util.List<File> out) {
+        java.util.Collections.sort(out, new java.util.Comparator<File>() {
+            public int compare(File a, File b) {
+                long d = b.lastModified() - a.lastModified();
+                return d < 0 ? -1 : d > 0 ? 1 : a.getName().compareTo(b.getName());
+            }
+        });
+        return out;
+    }
+
+    static void oldWalk(File dir, java.util.List<File> out, int depth) {
+        File[] files = dir.listFiles();
+        if (files == null || depth > 3) return;
+        for (File f : files) {
+            if (f.isDirectory()) oldWalk(f, out, depth + 1);
+            else if (Library.isJpeg(f.getName()) && f.length() > 0) out.add(f);
+        }
     }
 
     static void touch(File f, long time) throws Exception {

@@ -86,7 +86,11 @@ public class MainActivity extends Activity {
     private Roll current;              // the loaded roll, if any
     private int exposed;               // photos on it so far
 
-    private int battery = -1;          // percent
+    private volatile int battery = -1;   // percent
+    // the rest of the battery's report, for the logs: volts in mV and temperature in tenths of a degree (as
+    // the system gives them; -1 / MIN_VALUE unknown), and whether it is on a charger
+    private volatile int batteryMv = -1, batteryTemp = Integer.MIN_VALUE;
+    private volatile boolean batteryPlugged;
     private final Map<String, Bitmap> samples = new HashMap<String, Bitmap>();   // latest photo per stock
     private String samplesFor = "";
     private int stockSel, lengthSel = 1;   // load film
@@ -102,7 +106,7 @@ public class MainActivity extends Activity {
     private Roll developAfter;           // a film roll to develop once the quiet develop has stopped
     private boolean paused;
     private int devFrame, devPct, devDoneAtStart, devFailed;
-    private long devStarted;
+    private long devStarted, devStartedUp;   // when the develop started: the clock (for "developed in"), and uptime
     private final Set<Integer> failed = new HashSet<Integer>();
     // the camera's own develop (worker thread only): null once it fails, and this visit goes on in software
     private HardwareDevelop hw;
@@ -119,11 +123,17 @@ public class MainActivity extends Activity {
     private float progressShown;          // the bar never goes backwards
 
     // contact sheet and viewer
-    private Roll sheetRoll;
+    private volatile Roll sheetRoll;
     private List<File> sheetFrames = new ArrayList<File>();
-    private int sheetSel;
+    private volatile int sheetSel;   // (the viewer's decodes read it on the worker)
     private Bitmap viewBitmap;
-    private final Map<String, Bitmap> thumbs = new HashMap<String, Bitmap>();
+    /**
+     * Thumbnails by path (160x120, ~77 KB each), the least recently drawn dropped past THUMBS_MAX: v0.44's
+     * map only grew (a 36-frame develop added ~5.5 MB). A dropped one is never recycled: a screen being
+     * drawn may still hold it; the collector frees it. Guarded by itself.
+     */
+    private static final int THUMBS_MAX = 64;
+    private final Map<String, Bitmap> thumbs = Slots.recent(THUMBS_MAX);
 
     // lab
     private int labRow, labPhoto, labStock, labHl, labSh, labGrain = 4, labSize = 1, labView;
@@ -145,6 +155,7 @@ public class MainActivity extends Activity {
         // filled under the picture only to be covered (v0.38.2)
         getWindow().setBackgroundDrawable(null);
         screen = new Screen(this);   // loads the fonts
+        light = new Backlight(SystemClock.uptimeMillis());
         setupMs = SystemClock.uptimeMillis() - startAt;
         // live view (the camera's own picture) sits behind Latent's drawing, hidden until it's used
         liveSurface = new android.view.SurfaceView(this);
@@ -170,7 +181,7 @@ public class MainActivity extends Activity {
                 prepared = getIntent();
                 if (battery < 0) battery = prepared.getIntExtra(Relaunch.EXTRA_BATTERY, -1);   // until it's read again
                 mode = DARKROOM;
-                dim(true);
+                work(true);
             }
             relaunched();
         }
@@ -237,6 +248,8 @@ public class MainActivity extends Activity {
         resumed = true;
         backFromCamera = true;
         Display.fullColour(!(vf != null && Viewfinder.SHOOT_16BIT));   // the camera's own 16-bit plane while it's Latent's
+        light.shown(SystemClock.uptimeMillis());   // back on screen: lit (the darkroom keeps its own light)
+        applyLight();
         if (card != null && developing == null) refresh(null);
     }
 
@@ -253,13 +266,19 @@ public class MainActivity extends Activity {
         worker.execute(keysLog);
         Display.fullColour(false);
         if (developing != null) paused = true;   // finish the frame in hand, then stop; resumable later
+        holdAfter = false;   // a hold kept for filing ends here too
+        ui.removeCallbacks(releaseAfter);
         powerSave.release();
         // Once the camera has been opened here, Sony's image memory stays taken until this process ends.
         // Leaving a camera app only pauses it (v0.32.0: never stopped, never destroyed, and the next open
         // resumed this same process with nothing developing), so Latent closes itself now: the camera is
         // given back (after any picture still storing), then the process ends, and the next open develops.
         if (Viewfinder.opened) {
-            devLog("leaving: the camera was opened, so Latent closes itself (its image memory comes back only then)");
+            // how long since the last press: a long quiet means the camera's own power-save timer sent Latent away
+            long quiet = anyKeyAt > 0 ? (SystemClock.uptimeMillis() - anyKeyAt) / 1000 : -1;
+            readBattery();
+            devLog("leaving: the camera was opened, so Latent closes itself (its image memory comes back only then); "
+                    + (quiet >= 0 ? quiet + " s since the last press" : "no press this visit") + ", " + batteryNote());
             killWhenClosed = true;
             if (lookRun != null && lookRun.busy()) {   // the test ends first (never with a picture on its way); it ends Latent then
                 lookRun.close();
@@ -286,6 +305,8 @@ public class MainActivity extends Activity {
         worker.shutdown();
         try { worker.awaitTermination(1500, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
         filer.shutdownNow();
+        // written now: a commit waits for every write left behind (apply) too, which the process ending would lose
+        try { saveSnapshot(true); } catch (Throwable ignored) { }
         finish();
         android.os.Process.killProcess(android.os.Process.myPid());
     }
@@ -343,10 +364,10 @@ public class MainActivity extends Activity {
                     }
                 }
                 final List<Roll> waiting = Roll.undevelopedEndless(ro);
-                final List<File> prints = new ArrayList<File>();
+                final List<File> prints = new ArrayList<File>();   // their thumbnails load once the controls are ready (loadPrints)
                 if (inCamera != null && inCamera.endless()) {
                     List<File> dev = inCamera.developed();
-                    for (int i = dev.size() - 1; i >= 0 && prints.size() < 8; i--) { loadThumb(dev.get(i)); prints.add(dev.get(i)); }
+                    for (int i = dev.size() - 1; i >= 0 && prints.size() < 8; i--) prints.add(dev.get(i));
                 }
                 final File ref = Roll.reference(ro, inCamera, ph);
                 final String neutralMsg = reconcileNeutral(neutralWanted(inCamera != null));
@@ -373,10 +394,15 @@ public class MainActivity extends Activity {
                         if (!ready) readyAt = SystemClock.uptimeMillis();
                         ready = true;
                         saveSnapshot();
-                        if (mode == BACK && current == null) openLoad();   // nothing in the camera: choosing film is home
-                        else if (mode == LOAD && !loading && current == null) renderHero();
-                        filer.execute(new Runnable() { public void run() { fileBacklog(ro); } });
-                        renderSamples();   // so choosing film opens with them ready (only when the reference changed)
+                        if (mode == BACK && current == null) openLoad(false);   // nothing in the camera: choosing film is home
+                        final long filingFrom = SystemClock.uptimeMillis();
+                        filer.execute(new Runnable() {
+                            public void run() {
+                                fileBacklog(ro);
+                                // filed (or it gave way to shooting): a power-save hold kept for it goes
+                                ui.post(new Runnable() { public void run() { filedSince(filingFrom); } });
+                            }
+                        });
                         if (then != null) then.run();
                         boolean back = backFromCamera;
                         backFromCamera = false;
@@ -384,6 +410,12 @@ public class MainActivity extends Activity {
                         if (back && current != null && developing == null && (mode == BACK || preparing) && wantsDeveloping(current)) startDevelop(current);
                         else developWaiting();
                         if (preparing && developing == null && !restarting) unprepare();   // nothing to develop after all
+                        // the pictures go to the worker last, so nothing goes ahead of a develop starting now
+                        // (the darkroom covers them; the next card read, after it, asks again)
+                        if (developing == null) {
+                            if (mode == LOAD && !loading) { renderHero(); renderSamples(); }
+                            loadPrints(prints);
+                        }
                         screen.invalidate();
                     }
                 });
@@ -410,7 +442,10 @@ public class MainActivity extends Activity {
     }
 
     /** Choosing film: the home screen when the camera is empty, or Change film from the menu. */
-    private void openLoad() {
+    private void openLoad() { openLoad(true); }
+
+    /** render: its pictures now (the card read leaves them until it knows no develop starts first). */
+    private void openLoad(boolean render) {
         if (stocks.isEmpty()) { toast("No looks in LATENT/LUTS"); return; }
         if (mode != LOAD) {   // opens on the film and length you chose last
             String last = prefs.getString("lastStock", "");
@@ -419,8 +454,25 @@ public class MainActivity extends Activity {
         }
         stockSel = Math.min(stockSel, stocks.size() - 1);
         mode = LOAD;
-        renderSamples();
-        renderHero();
+        if (render) {
+            renderHero();      // the full-size picture first: it's what the screen shows
+            renderSamples();   // then the small stand-ins, this film's and its neighbours'
+        }
+    }
+
+    /**
+     * The endless roll's newest prints on the camera back: their thumbnails, after the controls are ready
+     * (v0.44 loaded eight, two EXIF reads each, before a half-press could shoot).
+     */
+    private void loadPrints(final List<File> prints) {
+        if (prints.isEmpty()) return;
+        worker.execute(new Runnable() {
+            public void run() {
+                boolean added = false;
+                for (File f : prints) added |= loadThumb(f);
+                if (added) ui.post(new Runnable() { public void run() { if (mode == BACK && endlessPrints == prints) screen.invalidate(); } });
+            }
+        });
     }
 
     /** The home screen: the camera back with its roll, or choosing film when there is none. */
@@ -464,7 +516,7 @@ public class MainActivity extends Activity {
                         hero = b;
                         heroFor = key;
                         if (old != null) old.recycle();
-                        screen.invalidate();
+                        if (mode == LOAD) screen.invalidate();   // only Choose film shows it
                     }
                 });
             }
@@ -555,16 +607,16 @@ public class MainActivity extends Activity {
             String action = rows.get(Math.min(settingsSel, n - 1))[2];
             if (action.equals("cores")) {   // develop on three cores, or on Latent's own only
                 if (!prefs.getBoolean("multicoreOk", false)) toast("Run the Speed test first: it checks the other cores");
-                else prefs.edit().putInt("cores", developCores() > 1 ? 1 : 3).commit();
+                else prefs.edit().putInt("cores", developCores() > 1 ? 1 : 3).apply();   // apply: written behind, not on this thread
             } else if (action.equals("neutral")) {
                 setNeutral(!neutralOn());
             } else if (action.equals("viewfinder")) {
-                prefs.edit().putBoolean("viewfinder", !viewfinderOn()).commit();
+                prefs.edit().putBoolean("viewfinder", !viewfinderOn()).apply();
             } else if (action.equals("focusFirst")) {
-                prefs.edit().putBoolean("focusFirst", !focusFirst()).commit();
+                prefs.edit().putBoolean("focusFirst", !focusFirst()).apply();
             } else if (action.equals("liveLook")) {
                 if (vf != null) toast("It changes the next time the viewfinder opens");
-                prefs.edit().putBoolean("liveLook2", !liveLook()).commit();
+                prefs.edit().putBoolean("liveLook2", !liveLook()).apply();
             } else if (action.equals("lab")) {
                 openLab();
                 fromSettings = true;
@@ -599,7 +651,7 @@ public class MainActivity extends Activity {
      * camera at once (and shooting waits the usual few seconds after, like loading a roll).
      */
     private void setNeutral(final boolean on) {
-        prefs.edit().putBoolean("neutral", on).commit();
+        prefs.edit().putBoolean("neutral", on).apply();   // the switch only: the camera's own state is on the card (NeutralSettings)
         matchNeutral();
     }
 
@@ -773,8 +825,8 @@ public class MainActivity extends Activity {
             screen.invalidate();
             return;
         }
-        dim(hardwareTest || speedTest);
-        if (speedTest || devTest) powerSave.hold();
+        if (hardwareTest || speedTest) work(true);
+        if (speedTest || devTest) holdPower();
         worker.execute(new Runnable() {
             public void run() {
                 if (devTest) {
@@ -784,28 +836,35 @@ public class MainActivity extends Activity {
                 } else if (settingsCheck) {
                     new SettingsCheck(card, listener).run();
                 } else if (hardwareTest) {
-                    new HardwareTest(MainActivity.this, card, stock, listener, new FilmCore.Progress() {
-                        public void onProgress(final int pct) {
-                            ui.post(new Runnable() { public void run() { if (probeStatus[4] == Probe.RUN) { probeDetail[4] = "developing… " + pct + "%"; screen.invalidate(); } } });
-                        }
+                    // its progress redraws the screen at most twice a second, not once per percent
+                    new HardwareTest(MainActivity.this, card, stock, listener, new Throttled(500) {
+                        void show(int pct) { if (probeStatus.length > 4 && probeStatus[4] == Probe.RUN) { probeDetail[4] = "developing… " + pct + "%"; screen.invalidate(); } }
                     }).run();
                 } else {
                     new Probe(MainActivity.this, card, ui, listener).run();
                 }
-                ui.post(new Runnable() { public void run() { probeStage = 2; dim(false); if (speedTest || devTest) powerSave.release(); screen.invalidate(); } });
+                ui.post(new Runnable() { public void run() { probeStage = 2; work(false); if (speedTest || devTest) powerSave.release(); screen.invalidate(); } });
             }
         });
         screen.invalidate();
     }
 
     /** The loaded roll as last seen, so the camera back appears instantly on the next launch. */
-    private void saveSnapshot() {
+    private void saveSnapshot() { saveSnapshot(false); }
+
+    /**
+     * now: written before this returns (just before the process ends itself). Otherwise written behind
+     * (apply): it's a hint for the next start, and a synchronous write with its fsync on the UI thread
+     * stalled the viewfinder's frame grabbing around each picture and wheel click. Android 2.3 finishes
+     * writes left behind when Latent is paused; killNow commits first.
+     */
+    private void saveSnapshot(boolean now) {
         SharedPreferences.Editor e = prefs.edit();
         Stock st = current == null ? null : Stock.byId(stocks, current.stock);
         if (st == null) e.remove("snap");
         else e.putString("snap", st.title + "|" + st.iso + "|" + st.body + "|" + st.band + "|" + st.accent + "|"
                 + current.number + "|" + exposed + "|" + current.length + "|" + current.state);
-        e.commit();
+        if (now) e.commit(); else e.apply();
     }
 
     /** Fills the camera back from the snapshot until the card has been read. */
@@ -853,8 +912,23 @@ public class MainActivity extends Activity {
             ui.postDelayed(shootWhenSettled, loading ? 300 : SHOOT_SETTLE_MS - since);
             return;
         }
+        // the power-save timer: yours goes back before the camera is Latent's (a hold kept for filing ends here),
+        // and that write gets a moment before shooting, as the card read after a develop always gave it
+        if (holdAfter) releaseHold();
+        long power = PowerSave.sinceLastWrite();
+        if (power >= 0 && power < POWER_SETTLE_MS) {
+            if (!shootPending) { shootPending = true; toast("Setting up the camera…"); }
+            ui.removeCallbacks(shootWhenSettled);
+            ui.postDelayed(shootWhenSettled, POWER_SETTLE_MS - power);
+            return;
+        }
         shootPending = false;
-        if (viewfinderOn() && current != null && Roll.LOADED.equals(current.state)) { openViewfinder(); return; }
+        if (viewfinderOn() && current != null && Roll.LOADED.equals(current.state)) {
+            openViewfinder();
+            light.shown(SystemClock.uptimeMillis());
+            applyLight();   // the viewfinder's light (the camera's own) now, before the camera opens: never while it's Latent's
+            return;
+        }
         // a breadcrumb: if the camera restarts on the way to shooting, the next start shows it came right after this
         devLog("shoot: handing over to the camera" + (current != null ? " (" + current.label() + ", " + exposed + " exposed)" : " (no roll)")
                 + (since >= 0 ? ", settings last changed " + since / 1000 + " s before" : ""));
@@ -1140,7 +1214,7 @@ public class MainActivity extends Activity {
         preparing = true;
         toast("");
         mode = DARKROOM;
-        dim(true);
+        work(true);
         screen.invalidate();
         if (vf != null) { relaunchWhenClosed = true; vf.close(null); }
         else relaunch();
@@ -1150,7 +1224,7 @@ public class MainActivity extends Activity {
     private void unprepare() {
         if (!preparing) return;
         preparing = false;
-        if (mode == DARKROOM && developing == null) { mode = BACK; dim(false); }
+        if (mode == DARKROOM && developing == null) { mode = BACK; work(false); }
         screen.invalidate();
     }
 
@@ -1305,7 +1379,7 @@ public class MainActivity extends Activity {
         else if (k == K_UP) lengthSel = Math.min(LENGTHS.length - 1, lengthSel + 1);   // up = more exposures (∞ last)
         else if (k == K_DOWN) lengthSel = Math.max(0, lengthSel - 1);
         else if (k == K_ENTER) loadRoll();
-        if (k == K_LEFT || k == K_RIGHT) renderHero();
+        if (k == K_LEFT || k == K_RIGHT) { renderHero(); renderSamples(); }   // the next film either side gets its stand-in
         screen.invalidate();
     }
 
@@ -1316,7 +1390,7 @@ public class MainActivity extends Activity {
      */
     private void loadRoll() {
         final Stock stock = stocks.get(stockSel);
-        prefs.edit().putString("lastStock", stock.id).putInt("lastLength", lengthSel).commit();
+        prefs.edit().putString("lastStock", stock.id).putInt("lastLength", lengthSel).apply();   // a hint for next time
         final Roll previous = current;
         final List<File> ph = photos;
         final int length = LENGTHS[lengthSel];
@@ -1417,28 +1491,38 @@ public class MainActivity extends Activity {
         }
         if (r.frames.isEmpty()) for (File f : r.exposures(photos)) r.frames.add(f.getPath());
         if (r.frames.isEmpty()) { toast("No exposures on this roll yet. Go shoot."); return; }
+        readBattery();
+        if (batteryLow()) { toast(BATTERY_LOW); return; }   // it waits, as it is, until the camera is charged
         if (!quiet && !r.endless()) r.state = Roll.DEVELOPING;   // an endless roll stays loaded while its photos develop
         try { r.save(); } catch (Exception e) { toast("Could not write the roll: " + e.getMessage()); return; }
         r.cleanTemp();
+        // nothing of Choose film's goes ahead of the develop on the one worker: samples still waiting are dropped
+        // (they render again when Choose film is next opened), and its full-size picture too unless it's on show
+        samplesGen++;
+        samplesFor = "";
+        if (!quiet) heroGen++;
+        devViewOf = null;   // the roll asked about afresh (frames may have developed on an earlier visit)
         developing = r;
         paused = false;
         devFailed = 0;
         failed.clear();
         devDoneAtStart = r.developedCount();
         devStarted = System.currentTimeMillis();
+        devStartedUp = SystemClock.uptimeMillis();   // a press after this means someone is watching the roll develop
         etaShown = -1;
         progressShown = 0;
         devQuiet = quiet;
         quietLeft = r.frames.size() - devDoneAtStart;
-        powerSave.hold();
+        final String held = holdPower();   // logged once per develop: does Sony's power-save API work here, and to what
         preparing = false;
         if (!quiet) {
             mode = DARKROOM;
             toast("");
-            dim(true);
+            work(true);
         }
         worker.execute(new Runnable() {
             public void run() {
+                devLog(r.label() + ": developing " + (r.frames.size() - devDoneAtStart) + " frame(s); " + held + "; " + batteryNote());
                 // developing into the camera roll needs the catalogue and a verified memory path
                 FilmCore.setVariant(prefs.getInt("lookVariant", 0));   // the inner loop the speed test chose
                 FilmCore.setFastCube(true);   // film files read Latent's way: identical on the camera, row for row, for every film (v0.39.1)
@@ -1453,8 +1537,13 @@ public class MainActivity extends Activity {
                     devLog("camera roll develop unavailable (" + Probe.why(e) + "); developing in software. "
                             + hl.toString().trim().replace("\r\n", "; "));
                 }
-                // the strip shows frames developed on an earlier, paused visit too
-                for (int i = 0; i < r.frames.size(); i++) if (r.developed(i) != null) loadThumb(r.developed(i));
+                // the strip shows frames developed on an earlier, paused visit too (an endless roll's strip is
+                // this batch only: its earlier prints aren't loaded, as state() draws the strip from 'base')
+                int base = r.endless() ? Math.max(0, Math.min(devDoneAtStart, r.frames.size())) : 0;
+                for (int i = base; i < r.frames.size(); i++) {
+                    File d = r.developed(i);
+                    if (d != null) loadThumb(d);
+                }
             }
         });
         developNext();
@@ -1463,11 +1552,12 @@ public class MainActivity extends Activity {
     // time estimate: per-frame time learned from earlier develops, so it's right from the first second
     private long etaShown = -1;
 
-    private long msPerFrame() { return prefs.getLong("msPerFrame", 37000); }
+    // until a frame has been timed here: a darkroom frame takes ~6-7 s since v0.44 (37 s was v0.1x's software develop)
+    private long msPerFrame() { return prefs.getLong("msPerFrame", 7000); }
 
     private void learnFrameTime(int ms) {
         if (ms <= 0) return;
-        prefs.edit().putLong("msPerFrame", (msPerFrame() * 6 + ms * 4) / 10).commit();
+        prefs.edit().putLong("msPerFrame", (msPerFrame() * 6 + ms * 4) / 10).apply();   // an estimate: written behind
     }
 
     /**
@@ -1502,12 +1592,12 @@ public class MainActivity extends Activity {
     private static final long DEV_REDRAW_MS = 1000;
     private long devDrawnAt;
     private boolean devRedrawPending;
-    private int devTrayShown = -1;
+    private int devTrayShown;   // the tray as last drawn: step 0 is the empty tray (the print still under a full veil)
     private final Runnable devRedraw = new Runnable() {
         public void run() {
             devRedrawPending = false;
             devDrawnAt = SystemClock.uptimeMillis();
-            if (mode != DARKROOM) { screen.invalidate(); return; }
+            if (mode != DARKROOM) return;   // no other screen shows the frame's progress (v0.44: a full redraw a second for nothing)
             invalidateLogical(0, Ui.BAND_TOP, logicalWidth, Ui.BAND_BOTTOM - Ui.BAND_TOP);
             int step = Ui.trayStep(devPct / 100f);
             if (step != devTrayShown) {
@@ -1529,13 +1619,56 @@ public class MainActivity extends Activity {
         ui.postDelayed(devRedraw, Math.max(0, devDrawnAt + DEV_REDRAW_MS - SystemClock.uptimeMillis()));
     }
 
+    /**
+     * A worker's progress, handed to the UI thread at most once per 'every' ms, the newest value winning.
+     * A post per percent was ~100 UI wake-ups a darkroom frame on core 3, which the develop's reads and
+     * writes share, for a band that redraws at most once a second anyway.
+     */
+    private abstract class Throttled implements FilmCore.Progress, Runnable {
+        private final long every;
+        private volatile int pct;
+        private volatile long shownAt;
+        private final java.util.concurrent.atomic.AtomicBoolean posted = new java.util.concurrent.atomic.AtomicBoolean();
+
+        Throttled(long every) { this.every = every; }
+
+        public final void onProgress(int p) {   // any thread
+            pct = p;
+            if (posted.compareAndSet(false, true)) ui.postDelayed(this, Math.max(0, shownAt + every - SystemClock.uptimeMillis()));
+        }
+
+        public final void run() {   // UI thread
+            posted.set(false);
+            shownAt = SystemClock.uptimeMillis();
+            show(pct);
+        }
+
+        /** No more of this progress (the job ended): a post still waiting is dropped. UI thread. */
+        final void cancel() { ui.removeCallbacks(this); }
+
+        abstract void show(int pct);   // UI thread
+    }
+
+    private Throttled devProgress;   // the frame in hand's (UI thread): an older frame's late post changes nothing
+
     private void developNext() {
         final Roll r = developing;
-        File[] view = new File[r.frames.size()];   // the roll asked about once per frame, for the screen too
-        for (int i = 0; i < view.length; i++) view[i] = r.developed(i);
-        devView = view;
-        devViewOf = r;
+        File[] view = devView;
+        if (devViewOf != r || view.length != r.frames.size()) {
+            // the card asked about every frame once, as the develop starts (or carries on); after that each
+            // finished frame updates its own entry, rather than two stats per frame of the roll every frame
+            view = new File[r.frames.size()];
+            for (int i = 0; i < view.length; i++) view[i] = r.developed(i);
+            devView = view;
+            devViewOf = r;
+        }
         if (devQuiet && !quietAllowed()) paused = true;
+        readBattery();
+        if (batteryLow()) {   // never a frame begun on the last of the battery: the roll stops here, safe, and carries on later
+            devLog(r.label() + ": paused, the battery is low (" + batteryNote() + ")");
+            stopDevelop(devQuiet ? null : BATTERY_LOW);
+            return;
+        }
         if (paused) { stopDevelop(devQuiet ? null : "Paused. Press the centre button to carry on."); return; }
         int next = -1;
         for (int i = 0; i < view.length && next < 0; i++) if (!failed.contains(i) && view[i] == null) next = i;
@@ -1560,9 +1693,14 @@ public class MainActivity extends Activity {
         final Stock stock = Stock.byId(stocks, film);
         devFrame = frame;
         devPct = 0;
-        devTrayShown = -1;
-        powerSave.touch();
-        readBattery();
+        devTrayShown = 0;   // the full redraw below draws the tray at step 0 (empty): no tray redraw until step 1
+        // (no power-save write per frame any more: hold() already set the longest timer for the develop, and
+        // the per-frame re-write of v0.2x was an experiment nothing ever read back)
+        if (devProgress != null) devProgress.cancel();
+        final Throttled progress = new Throttled(250) {
+            void show(int pct) { if (devProgress == this) { devPct = pct; redrawSoon(); } }
+        };
+        devProgress = progress;
         final int[] p = stock == null ? params(src, 0, 0, 4, 1)
                 : params(src, stock.highlight, stock.shadow, stock.grain, stock.grainSize);
         p[FilmCore.SEED] = (int) (src.lastModified() ^ new File(r.frames.get(frame)).getName().hashCode());
@@ -1574,15 +1712,9 @@ public class MainActivity extends Activity {
                 if (behind) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
                 long t0 = System.currentTimeMillis();
                 boolean exists = src.exists();
-                if (exists) {   // the print in the tray: the camera's own small thumbnail of this frame
-                    loadThumb(src);
-                    ui.post(new Runnable() { public void run() { screen.invalidate(); } });
-                }
-                FilmCore.Progress progress = new FilmCore.Progress() {
-                    public void onProgress(final int pct) {
-                        ui.post(new Runnable() { public void run() { devPct = pct; redrawSoon(); } });
-                    }
-                };
+                // the print in the tray: the camera's own small thumbnail of this frame. No redraw for it: the
+                // tray shows the print only from its first step up (devRedraw redraws the tray then)
+                if (exists) loadThumb(src);
                 File made = null;
                 String err = null;
                 final int[] t = new int[FilmCore.T_COUNT];
@@ -1655,8 +1787,11 @@ public class MainActivity extends Activity {
                 final long frameMs = System.currentTimeMillis() - t0;
                 ui.post(new Runnable() {
                     public void run() {
+                        progress.cancel();
                         if (error != null) { devFailed++; failed.add(frame); toast((devQuiet ? "Photo " : "Frame ") + (frame + 1) + ": " + error); }
                         else {
+                            File[] v = devView;   // this frame is developed now: its entry, without asking the card again
+                            if (devViewOf == r && frame < v.length && print != null) { v = v.clone(); v[frame] = print; devView = v; }
                             if (devQuiet) {
                                 quietLeft = Math.max(0, quietLeft - 1);
                                 if (r == current && print != null) endlessPrints.add(0, print);
@@ -1788,7 +1923,7 @@ public class MainActivity extends Activity {
         try { r.save(); } catch (Exception e) { /* the frames are on the card either way */ }
         if (devQuiet) {   // nothing to announce: the photos are in the camera roll, the next trip's develop next
             final int n = r.frames.size();
-            endDarkroom();
+            endDarkroom(true);
             refresh(new Runnable() { public void run() { afterQuiet(); } });
             return;
         }
@@ -1796,7 +1931,7 @@ public class MainActivity extends Activity {
         if (r.endless()) {   // the photos just shot are in the camera roll: back to the camera back, ready to shoot
             final int n = r.developedCount() - devDoneAtStart;
             final String m = devFailed == 0 ? n + (n == 1 ? " photo" : " photos") + " developed" : devFailed + " photo(s) could not be developed";
-            endDarkroom();
+            endDarkroom(true);
             refresh(new Runnable() {
                 public void run() {
                     if (shootAfterFrame) { shootAfterFrame = false; goShoot(); return; }
@@ -1808,7 +1943,7 @@ public class MainActivity extends Activity {
         }
         final String msg = devFailed == 0 ? r.label() + " developed in " + secs / 60 + " min " + secs % 60 + " s"
                 : devFailed + " frame(s) could not be developed";
-        endDarkroom();
+        endDarkroom(true);
         refresh(new Runnable() {
             public void run() {
                 if (shootAfterFrame) { shootAfterFrame = false; goShoot(); return; }   // the shutter was pressed on the last frame
@@ -1820,7 +1955,7 @@ public class MainActivity extends Activity {
 
     private void stopDevelop(final String msg) {
         boolean quiet = devQuiet;
-        endDarkroom();
+        endDarkroom(false);
         if (quiet) { refresh(new Runnable() { public void run() { afterQuiet(); } }); return; }
         refresh(new Runnable() {
             public void run() {
@@ -1856,6 +1991,10 @@ public class MainActivity extends Activity {
     /** An endless roll's new photos start developing as soon as nothing else needs the camera. */
     private void developWaiting() {
         if (developing != null || restarting || shootPending || shootAfterFrame || !ready || !quietAllowed() || endlessWaiting.isEmpty()) return;
+        if (batteryLow()) {   // (as last read) they wait for a charge rather than start and stop again
+            if (developNow) { developNow = false; toast(BATTERY_LOW); }   // started again to develop: say why it doesn't
+            return;
+        }
         // an endless roll develops when you're not about to shoot: a half-press right after opening Latent
         // shoots at once, rather than waiting for a frame in the darkroom (v0.35.0: "finishing up some frames")
         long idle = SystemClock.uptimeMillis() - Math.max(lastPressAt, readyAt);
@@ -1873,18 +2012,62 @@ public class MainActivity extends Activity {
     private boolean developNow;   // started again to develop (Relaunch): at once
     private final Runnable developWhenIdle = new Runnable() { public void run() { developWaiting(); } };
 
-    private void endDarkroom() {
+    /** The develop is over: finished (its last frame done), or stopped part-way. */
+    private void endDarkroom(boolean finished) {
+        boolean darkroom = !devQuiet;
         devQuiet = false;
         quietLeft = 0;
         developing = null;
-        dim(false);
+        if (devProgress != null) { devProgress.cancel(); devProgress = null; }
+        // nobody pressed anything while it developed (the camera set down): what it ends on stays at the
+        // darkroom's light, and the first press only wakes the screen. Otherwise it lights up, as before.
+        boolean rests = darkroom && light.developEnded(SystemClock.uptimeMillis(), devStartedUp);
+        applyLight();
+        // a finished roll nobody is watching keeps the power-save hold until its last originals are filed
+        // (they wait SETTLE_MS for their negatives to reach the card), so the roll completes in this visit
+        if (finished && rests && !shootAfterFrame) holdUntilFiled();
+        else powerSave.release();
+    }
+
+    /** After a roll, the camera's power-save stays held for its filing at most this long. */
+    static final long HOLD_AFTER_MS = SETTLE_MS + 30000;
+    /** A write of the power-save timer is given this long before the camera opens (as ~1 s always passed before v0.45). */
+    static final long POWER_SETTLE_MS = 1000;
+    private boolean holdAfter;         // the hold is kept for the last roll's filing (UI thread)
+    private long holdAfterSince;
+    private final Runnable releaseAfter = new Runnable() { public void run() { releaseHold(); } };
+
+    private void holdUntilFiled() {
+        holdAfter = true;
+        holdAfterSince = SystemClock.uptimeMillis();
+        ui.removeCallbacks(releaseAfter);
+        ui.postDelayed(releaseAfter, HOLD_AFTER_MS);
+    }
+
+    /** The filing queued at 'queuedAt' is done: a hold kept for it (from before then) is given back. UI thread. */
+    private void filedSince(long queuedAt) {
+        if (holdAfter && queuedAt >= holdAfterSince) releaseHold();
+    }
+
+    /** The power-save timer back to yours, if it was kept for filing. UI thread. */
+    private void releaseHold() {
+        ui.removeCallbacks(releaseAfter);
+        if (!holdAfter) return;
+        holdAfter = false;
         powerSave.release();
+    }
+
+    /** The power-save timer raised for long work (a hold kept for filing becomes this one's). Returns hold()'s note. */
+    private String holdPower() {
+        holdAfter = false;
+        ui.removeCallbacks(releaseAfter);
+        return powerSave.hold();
     }
 
     /** If the threads did not really run in parallel on this camera, stop paying for them. */
     private void adaptThreads(int[] t, int threads) {
         if (threads > 1 && t[FilmCore.T_TOTAL] > 0 && t[FilmCore.T_CPU] < t[FilmCore.T_TOTAL] * 13 / 10) {
-            prefs.edit().putInt("threads", 1).commit();
+            prefs.edit().putInt("threads", 1).apply();
         }
     }
 
@@ -1900,14 +2083,18 @@ public class MainActivity extends Activity {
         sheetRoll = r;
         sheetSel = 0;
         sheetFrames = new ArrayList<File>();
+        thumbsPage = -1;
+        dropViewer();
         if (r != null) {
             worker.execute(new Runnable() {
                 public void run() {
                     final List<File> frames = r.developed();
-                    for (File f : frames) loadThumb(f);
+                    // the sheet at once, its thumbnails filling in page by page (v0.44 read every frame's first)
                     ui.post(new Runnable() {
                         public void run() {
-                            if (sheetRoll == r) sheetFrames = frames;
+                            if (sheetRoll != r) return;
+                            sheetFrames = frames;
+                            sheetThumbs();
                             screen.invalidate();
                         }
                     });
@@ -1917,11 +2104,41 @@ public class MainActivity extends Activity {
         screen.invalidate();
     }
 
+    /** Ui.sheet's page of thumbnails (5 x 3). */
+    static final int SHEET_PAGE = 15;
+
+    /**
+     * The contact sheet's thumbnails: the page on show first, then the pages either side (where LEFT and
+     * RIGHT go next). Three pages at most, so the cache keeps them however long the roll. UI thread.
+     */
+    private void sheetThumbs() {
+        final Roll r = sheetRoll;
+        final List<File> frames = sheetFrames;
+        if (r == null || frames.isEmpty()) return;
+        final int page = Math.min(sheetSel, frames.size() - 1) / SHEET_PAGE, pages = (frames.size() + SHEET_PAGE - 1) / SHEET_PAGE;
+        if (page == thumbsPage && r == thumbsRoll) return;   // asked for already
+        thumbsPage = page;
+        thumbsRoll = r;
+        worker.execute(new Runnable() {
+            public void run() {
+                for (int p : new int[] { page, page + 1, page - 1 }) {
+                    if (p < 0 || p >= pages || sheetRoll != r) continue;
+                    boolean added = false;
+                    for (int i = p * SHEET_PAGE; i < Math.min(frames.size(), (p + 1) * SHEET_PAGE); i++) added |= loadThumb(frames.get(i));
+                    if (added && p == page) ui.post(new Runnable() { public void run() { if ((mode == SHEET || mode == VIEW) && sheetRoll == r) screen.invalidate(); } });
+                }
+            }
+        });
+    }
+
+    private int thumbsPage = -1;
+    private Roll thumbsRoll;
+
     private void sheetKey(int k) {
         if (sheetRoll == null) return;
         int idx = rolls.indexOf(sheetRoll);
-        if (k == K_LEFT && sheetSel > 0) sheetSel--;
-        else if (k == K_RIGHT && sheetSel < sheetFrames.size() - 1) sheetSel++;
+        if (k == K_LEFT && sheetSel > 0) { sheetSel--; sheetThumbs(); }
+        else if (k == K_RIGHT && sheetSel < sheetFrames.size() - 1) { sheetSel++; sheetThumbs(); }
         else if (k == K_DOWN && idx > 0) openSheet(rolls.get(idx - 1));
         else if (k == K_UP && idx >= 0 && idx < rolls.size() - 1) openSheet(rolls.get(idx + 1));
         else if (k == K_ENTER) {
@@ -1936,6 +2153,26 @@ public class MainActivity extends Activity {
         public void run() { viewCaption = false; screen.invalidate(); }
     };
 
+    // The viewer keeps the frame on show and the ones either side decoded (three previews of ~1.4 MB,
+    // and the picture on show while the next loads), so LEFT and RIGHT show the next frame at once, as
+    // swiping does in Apple's Photos. Until a frame's own preview is there, its sheet thumbnail stands in
+    // (else the picture on show stays): never a black screen between frames. Bitmaps are recycled only
+    // here on the UI thread, never the one on show, and all of them when the viewer is left. UI thread.
+    private final Map<Integer, Bitmap> viewSlots = new HashMap<Integer, Bitmap>();   // sheet index -> its preview (viewBitmap among them)
+    private final Set<Integer> viewQueued = new HashSet<Integer>();   // decodes on their way
+    private int viewShown = -1;        // the frame viewBitmap is
+    private int viewGen;               // leaving the viewer: decodes still on their way are dropped
+    private Bitmap viewStandIn;        // the frame's thumbnail (cut to the picture's shape) while its preview loads
+    private boolean viewStandInOwned;  // a cut of the thumbnail, the viewer's to recycle (the thumbnail itself is the cache's)
+    private int viewStandInFor = -1;
+
+    /** What the viewer shows: the frame's preview; until it's there its thumbnail; failing that the picture on show. */
+    private Bitmap viewImage() {
+        if (viewBitmap != null && viewShown == sheetSel) return viewBitmap;
+        if (viewStandIn != null && viewStandInFor == sheetSel) return viewStandIn;
+        return viewBitmap;
+    }
+
     /** Shows a developed frame: its screen-size preview (made once, if it predates previews). */
     private void openView(final int index) {
         mode = VIEW;
@@ -1943,38 +2180,138 @@ public class MainActivity extends Activity {
         viewCaption = true;
         ui.removeCallbacks(hideCaption);
         ui.postDelayed(hideCaption, 1800);
-        if (viewBitmap != null) { viewBitmap.recycle(); viewBitmap = null; }
-        final File f = sheetFrames.get(index), prv = sheetRoll.preview(f);
+        Bitmap ready = viewSlots.get(index);
+        if (ready != null) { viewBitmap = ready; viewShown = index; }
+        else standIn(index);
+        trimView();
+        prefetchView(index);   // this frame first if it isn't here, then the one after, then the one before
+        screen.invalidate();
+    }
+
+    /** The frame's sheet thumbnail, its letterbox cut to the shape of the picture on show (3:2 at first). */
+    private void standIn(int index) {
+        if (viewStandInFor == index) return;
+        dropStandIn();
+        Bitmap t = index < sheetFrames.size() ? thumb(sheetFrames.get(index)) : null;
+        if (t == null || t.isRecycled()) return;
+        float aspect = viewBitmap != null ? viewBitmap.getWidth() / (float) viewBitmap.getHeight() : 1.5f;
+        int w = t.getWidth(), h = t.getHeight(), ch = Math.min(h, Math.round(w / aspect)), cw = Math.min(w, Math.round(h * aspect));
+        if (ch < h) cw = w; else ch = h;
+        viewStandInFor = index;
+        if (cw == w && ch == h) { viewStandIn = t; return; }   // nothing to cut: the thumbnail as it is
+        try {
+            viewStandIn = Bitmap.createBitmap(t, (w - cw) / 2, (h - ch) / 2, cw, ch);
+            viewStandInOwned = viewStandIn != t;
+        } catch (Throwable e) {
+            viewStandIn = t;
+        }
+    }
+
+    private void dropStandIn() {
+        if (viewStandIn != null && viewStandInOwned) viewStandIn.recycle();
+        viewStandIn = null;
+        viewStandInOwned = false;
+        viewStandInFor = -1;
+    }
+
+    /** Previews out of reach of the frame on show are recycled (never the picture on show: it goes once replaced). */
+    private void trimView() {
+        java.util.Iterator<Map.Entry<Integer, Bitmap>> it = viewSlots.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Integer, Bitmap> e = it.next();
+            if (Slots.kept(e.getKey(), sheetSel) || e.getValue() == viewBitmap) continue;
+            e.getValue().recycle();
+            it.remove();
+        }
+        if (viewStandIn != null && (viewStandInFor != sheetSel || viewShown == sheetSel)) dropStandIn();   // its frame is up, or gone
+    }
+
+    private void prefetchView(int index) {
+        for (int i : Slots.wanted(index, sheetFrames.size())) if (!viewSlots.containsKey(i) && viewQueued.add(i)) decodeView(i);
+    }
+
+    /** Frame i's preview from the card (made first if it's missing or predates previews), on the worker. */
+    private void decodeView(final int i) {
+        final Roll r = sheetRoll;
+        final File f = sheetFrames.get(i), prv = r.preview(f);
+        final int gen = viewGen;
         worker.execute(new Runnable() {
             public void run() {
-                if (!prv.exists()) {
-                    prv.getParentFile().mkdirs();
-                    FilmCore.makePreview(f.getPath(), prv.getPath());
-                }
-                BitmapFactory.Options o = new BitmapFactory.Options();
-                o.inPreferredConfig = Bitmap.Config.ARGB_8888;
-                o.inDither = false;
-                Bitmap d = BitmapFactory.decodeFile(prv.getPath(), o);
-                if (d != null && d.getHeight() < 470) {   // made before previews filled the panel's height
-                    d.recycle();
-                    FilmCore.makePreview(f.getPath(), prv.getPath());
-                    d = BitmapFactory.decodeFile(prv.getPath(), o);
+                if (gen != viewGen) return;   // the viewer was left
+                Bitmap d = null;
+                // only the frame on show goes at the usual priority: its neighbours are a nicety
+                boolean ahead = i != sheetSel;
+                if (ahead) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                try {
+                    if (Slots.kept(i, sheetSel)) d = readPreview(f, prv);   // (moved on far since: skipped)
+                } finally {
+                    if (ahead) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
                 }
                 final Bitmap b = d;
                 ui.post(new Runnable() {
                     public void run() {
-                        if (mode == VIEW && sheetSel == index) { viewBitmap = b; screen.invalidate(); }
-                        else if (b != null) b.recycle();
+                        if (gen == viewGen) viewQueued.remove(i);
+                        if (b == null) return;
+                        if (gen != viewGen || sheetRoll != r || !Slots.kept(i, sheetSel) || viewSlots.containsKey(i)) { b.recycle(); return; }
+                        viewSlots.put(i, b);
+                        if (i != sheetSel || mode != VIEW) return;
+                        viewBitmap = b;   // the swap: the picture before is recycled only now, if it's out of reach
+                        viewShown = i;
+                        trimView();
+                        screen.invalidate();
                     }
                 });
             }
         });
-        screen.invalidate();
+    }
+
+    /** A preview file decoded (read in one go: the card answers large reads far faster than many small ones). Worker thread. */
+    private static Bitmap readPreview(File f, File prv) {
+        if (!prv.exists()) {
+            prv.getParentFile().mkdirs();
+            FilmCore.makePreview(f.getPath(), prv.getPath());
+        }
+        Bitmap d = decodeWhole(prv);
+        if (d != null && d.getHeight() < 470) {   // made before previews filled the panel's height
+            d.recycle();
+            FilmCore.makePreview(f.getPath(), prv.getPath());
+            d = decodeWhole(prv);
+        }
+        return d;
+    }
+
+    private static Bitmap decodeWhole(File f) {
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        o.inDither = false;
+        try {
+            long n = f.length();
+            if (n <= 0 || n > 8 * 1024 * 1024) return BitmapFactory.decodeFile(f.getPath(), o);
+            byte[] data = new byte[(int) n];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            int got = 0;
+            try { for (int k; got < data.length && (k = in.read(data, got, data.length - got)) > 0; ) got += k; } finally { in.close(); }
+            return BitmapFactory.decodeByteArray(data, 0, got, o);
+        } catch (Throwable e) {
+            return BitmapFactory.decodeFile(f.getPath(), o);
+        }
+    }
+
+    /** Leaving the viewer: every preview it holds is recycled (UI thread; nothing on screen holds them now). */
+    private void dropViewer() {
+        viewGen++;
+        viewQueued.clear();
+        for (Bitmap b : viewSlots.values()) if (b != viewBitmap) b.recycle();
+        viewSlots.clear();
+        if (viewBitmap != null) viewBitmap.recycle();
+        viewBitmap = null;
+        viewShown = -1;
+        dropStandIn();
     }
 
     private void viewKey(int k) {
-        if (k == K_LEFT && sheetSel > 0) openView(sheetSel - 1);
-        else if (k == K_RIGHT && sheetSel < sheetFrames.size() - 1) openView(sheetSel + 1);
+        if (k == K_LEFT && sheetSel > 0) { openView(sheetSel - 1); sheetThumbs(); }
+        else if (k == K_RIGHT && sheetSel < sheetFrames.size() - 1) { openView(sheetSel + 1); sheetThumbs(); }
         else if (k == K_ENTER) {   // fit the whole photo, or fill the screen
             viewFill = !viewFill;
             viewCaption = true;
@@ -1984,9 +2321,9 @@ public class MainActivity extends Activity {
         screen.invalidate();
     }
 
-    /** The EXIF thumbnail (developed files carry one with the look applied); cached. Worker thread. */
-    private void loadThumb(File f) {
-        synchronized (thumbs) { if (thumbs.containsKey(f.getPath())) return; }
+    /** The EXIF thumbnail (developed files carry one with the look applied); cached. Worker thread. False if it was already. */
+    private boolean loadThumb(File f) {
+        synchronized (thumbs) { if (thumbs.containsKey(f.getPath())) return false; }
         Bitmap b = null;
         try {
             byte[] data = new ExifInterface(f.getPath()).getThumbnail();
@@ -2000,6 +2337,7 @@ public class MainActivity extends Activity {
             b = BitmapFactory.decodeFile(f.getPath(), o);
         }
         synchronized (thumbs) { thumbs.put(f.getPath(), b); }
+        return true;
     }
 
     private Bitmap thumb(File f) {
@@ -2108,16 +2446,17 @@ public class MainActivity extends Activity {
         final int[] p = params(src, labHl, labSh, labGrain, labSize);
         labBusy = true;
         labProgress = 0;
-        powerSave.hold();
+        holdPower();
         toast("Saving " + src.getName());
-        dim(true);
+        work(true);
+        // its bar redraws the screen at most once a second (a redraw per percent was ~100 full Lab redraws a save,
+        // on the core the save shares)
+        final Throttled progress = new Throttled(1000) {
+            void show(int pct) { if (labBusy) { labProgress = pct; screen.invalidate(); } }
+        };
         worker.execute(new Runnable() {
             public void run() {
-                int rc = FilmCore.process(src.getPath(), out.getPath(), lut, null, p, new FilmCore.Progress() {
-                    public void onProgress(final int pct) {
-                        ui.post(new Runnable() { public void run() { labProgress = pct; screen.invalidate(); } });
-                    }
-                });
+                int rc = FilmCore.process(src.getPath(), out.getPath(), lut, null, p, progress);
                 final int[] t = new int[FilmCore.T_COUNT];
                 final String msg;
                 if (rc == 0) {
@@ -2129,12 +2468,13 @@ public class MainActivity extends Activity {
                 }
                 ui.post(new Runnable() {
                     public void run() {
+                        progress.cancel();
                         labBusy = false;
                         labProgress = -1;
                         toast(msg);
                         if (t[FilmCore.T_TOTAL] > 0) adaptThreads(t, p[FilmCore.THREADS]);
                         powerSave.release();
-                        dim(false);
+                        work(false);
                         screen.invalidate();
                     }
                 });
@@ -2206,51 +2546,101 @@ public class MainActivity extends Activity {
         slowestScreen = "";
     }
 
+    /**
+     * Choose film's small samples, each the stand-in for the full-size picture while that renders: the film
+     * under the wheel (queued after its full-size picture, renderHero), then the films either side of it,
+     * where the wheel goes next; the rest only as the wheel reaches them. v0.44 rendered all six on every card
+     * read where the photo had changed, whatever was on screen, ahead of the darkroom's first frame on the one
+     * worker. UI thread.
+     */
     private void renderSamples() {
+        if (mode != LOAD || stocks.isEmpty()) return;
         // the newest neutral original; failing that (nothing shot with Latent yet), the newest photo
         final File latest = reference != null ? reference : photos.isEmpty() ? null : photos.get(0);
         if (latest == null) return;
-        if (mode == LOAD) renderHero();
-        if (latest.getPath().equals(samplesFor) && samples.size() == stocks.size()) return;
-        samplesFor = latest.getPath();
-        final List<Stock> st = stocks;
+        if (!latest.getPath().equals(samplesFor)) { samplesFor = latest.getPath(); samplesQueued.clear(); }
+        int n = stocks.size(), sel = Math.min(stockSel, n - 1);
+        renderSample(stocks.get(sel), latest);
+        renderSample(stocks.get((sel + 1) % n), latest);
+        renderSample(stocks.get((sel + n - 1) % n), latest);
+    }
+
+    private final Set<String> samplesQueued = new HashSet<String>();   // stocks rendered, or on their way, on samplesFor
+
+    private void renderSample(final Stock s, final File latest) {
+        if (!samplesQueued.add(s.id)) return;
         final int gen = samplesGen;
+        final String on = latest.getPath();
         worker.execute(new Runnable() {
             public void run() {
+                if (gen != samplesGen) return;   // a load or a develop goes first: this one renders again later
+                Bitmap made = null;
                 // the samples are a nicety: they must never slow the screen or your presses (one core, shared)
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
-                try { render(); } finally { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT); }
-            }
-
-            private void render() {
-                for (final Stock s : st) {
-                    if (gen != samplesGen) return;
+                try {
                     int[] px = new int[420 * 280], size = new int[2];
                     int[] p = params(latest, s.highlight, s.shadow, 0, 1);
-                    if (FilmCore.preview(latest.getPath(), s.lut.getPath(), p, FilmCore.PREVIEW_FIT, px, 420, 280, size) != 0) continue;
-                    final Bitmap b = Bitmap.createBitmap(px, size[0], size[1], Bitmap.Config.ARGB_8888);
-                    ui.post(new Runnable() {
-                        public void run() {
-                            Bitmap old = samples.put(s.id, b);
-                            if (old != null && old != b) old.recycle();
-                            screen.invalidate();
-                        }
-                    });
+                    if (FilmCore.preview(on, s.lut.getPath(), p, FilmCore.PREVIEW_FIT, px, 420, 280, size) == 0)
+                        made = Bitmap.createBitmap(px, size[0], size[1], Bitmap.Config.ARGB_8888);
+                } finally {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
                 }
+                if (made == null) return;
+                final Bitmap b = made;
+                ui.post(new Runnable() {
+                    public void run() {
+                        if (gen != samplesGen || !on.equals(samplesFor)) { b.recycle(); return; }
+                        Bitmap old = samples.put(s.id, b);
+                        if (old != null && old != b) old.recycle();
+                        // redrawn only where it shows: Choose film on this film, while its full-size picture isn't up
+                        if (mode == LOAD && !stocks.isEmpty() && s.id.equals(stocks.get(Math.min(stockSel, stocks.size() - 1)).id) && !heroShown())
+                            screen.invalidate();
+                    }
+                });
             }
         });
     }
 
-    /** Battery level from the system's sticky broadcast (no receiver to keep registered). */
+    /** Choose film shows the full-size picture of the film under the wheel (not its sample). */
+    private boolean heroShown() {
+        if (hero == null || reference == null || stocks.isEmpty()) return false;
+        return heroFor.equals(reference.getPath() + "|" + stocks.get(Math.min(stockSel, stocks.size() - 1)).id);
+    }
+
+    /** Battery level from the system's sticky broadcast (no receiver to keep registered); its volts and temperature too. */
     private void readBattery() {
         try {
             android.content.Intent i = registerReceiver(null, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
             if (i == null) return;
             int level = i.getIntExtra("level", -1), scale = i.getIntExtra("scale", 100);
             battery = level < 0 || scale <= 0 ? -1 : level * 100 / scale;
+            batteryMv = i.getIntExtra("voltage", -1);
+            batteryTemp = i.getIntExtra("temperature", Integer.MIN_VALUE);
+            batteryPlugged = i.getIntExtra("plugged", 0) != 0;
         } catch (Exception e) {
             battery = -1;
         }
+    }
+
+    /**
+     * At this much battery or less (and not on a charger) no darkroom frame starts: the frame in hand
+     * finishes, then the roll pauses, so the camera never dies between Sony's save and Latent noting it
+     * (that frame would develop twice). Resuming carries on where it stopped.
+     */
+    static final int BATTERY_GUARD = 5;
+    static final String BATTERY_LOW = "Battery low. This roll is safe; charge to carry on.";
+
+    private boolean batteryLow() {
+        int b = battery;
+        return b >= 0 && b <= BATTERY_GUARD && !batteryPlugged;
+    }
+
+    /** "battery=54% 3812mV 31.5C" (as last read), for the timing log: what a roll costs, frame by frame. */
+    private String batteryNote() {
+        int t = batteryTemp;
+        return "battery=" + (battery >= 0 ? battery + "%" : "?") + (batteryMv > 0 ? " " + batteryMv + "mV" : "")
+                + (t != Integer.MIN_VALUE ? " " + (t < 0 ? "-" : "") + Math.abs(t) / 10 + "." + Math.abs(t) % 10 + "C" : "")
+                + (batteryPlugged ? " plugged" : "");
     }
 
     // ------------------------------------------------------------------------------ shared
@@ -2267,10 +2657,54 @@ public class MainActivity extends Activity {
         return p;
     }
 
-    /** The backlight is a large share of the camera's power draw: turn it right down while developing. */
-    private void dim(boolean on) {
+    // ------------------------------------------------------------------------------ the backlight
+
+    private Backlight light;           // what level the screen wants (the rules are there, tested on the Mac)
+    private float lit = Float.NaN;     // the level the window has now
+    private int lightMode = -1;        // the screen the light last saw (onDraw notices a change and asks again)
+    private boolean lightStill;
+    private final Runnable lightCheck = new Runnable() { public void run() { applyLight(); } };
+
+    /** The backlight as Backlight wants it now; asks again when that changes by time alone. UI thread. */
+    private void applyLight() {
+        long now = SystemClock.uptimeMillis();
+        light.still(stillScreen(), now);
+        dim(light.level(now));
+        ui.removeCallbacks(lightCheck);
+        long at = light.next(now);
+        if (at > 0) ui.postAtTime(lightCheck, at);   // one timer, moved on by each press: no polling
+    }
+
+    /** Long work with the screen down (the darkroom, a Lab save, the Speed and Hardware tests) starts or ends. */
+    private void work(boolean on) {
+        light.work(on, SystemClock.uptimeMillis());
+        applyLight();
+    }
+
+    /**
+     * Screens that wait for you, which may rest after a while untouched. Never the viewfinder or the
+     * viewer, the darkroom (its own light), or anything while the camera is Latent's.
+     */
+    private boolean stillScreen() {
+        if (vf != null || liveRun != null || shootRun != null || restartRun != null || lookRun != null || screenRun != null) return false;
+        return mode == BACK || mode == LOAD || mode == SETTINGS || mode == SHEET || mode == LAB || mode == PROBE;
+    }
+
+    /** The wheel or an arrow: in the darkroom, a press that brightens the screen for a moment. */
+    static boolean arrowKey(int keyCode, int sc) {
+        int k = key(keyCode, sc);
+        return k == K_UP || k == K_DOWN || k == K_LEFT || k == K_RIGHT;
+    }
+
+    /**
+     * The backlight is a large share of the camera's power draw: the darkroom turns it right down, an idle
+     * screen rests lower. level is a fraction of full, or Backlight.FULL for the camera's own brightness.
+     */
+    private void dim(float level) {
+        if (level == lit) return;
+        lit = level;
         WindowManager.LayoutParams lp = getWindow().getAttributes();
-        lp.screenBrightness = on ? 0.05f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        lp.screenBrightness = level < 0 ? WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE : level;
         getWindow().setAttributes(lp);
     }
 
@@ -2280,12 +2714,12 @@ public class MainActivity extends Activity {
 
     /** Appends one line per developed frame to /LATENT/TIMING.TXT. Worker thread. */
     private void logTiming(File src, String look, int[] p, int[] t) {
-        String line = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())
+        String line = stamp()
                 + " v" + versionName() + " abi=" + Build.CPU_ABI + " " + src.getName() + " look=" + look
                 + " grain=" + p[FilmCore.GRAIN] + "/" + p[FilmCore.GRAIN_SIZE] + " threads=" + p[FilmCore.THREADS]
                 + " ms: read=" + t[FilmCore.T_READ] + " look=" + t[FilmCore.T_LOOK] + " write=" + t[FilmCore.T_WRITE]
                 + " finish=" + t[FilmCore.T_FINISH] + " total=" + t[FilmCore.T_TOTAL] + " cpu=" + t[FilmCore.T_CPU]
-                + " " + cpuInfo() + " screen=" + screenSize + "\r\n";
+                + " " + cpuInfo() + " screen=" + screenSize + " " + batteryNote() + "\r\n";
         try {
             FileOutputStream out = new FileOutputStream(new File(Library.home(card), "TIMING.TXT"), true);
             try { out.write(line.getBytes("US-ASCII")); } finally { out.close(); }
@@ -2296,16 +2730,24 @@ public class MainActivity extends Activity {
 
     /** One line per hardware-developed frame in TIMING.TXT. */
     private void logHardware(File src, String look, HardwareDevelop.Print print, long[] m, String extra, long total) {
-        appendLog("TIMING.TXT", new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())
+        appendLog("TIMING.TXT", stamp()
                 + " v" + versionName() + " " + src.getName() + " -> " + print.file.getName() + " look=" + look + " hardware ms:"
                 + " decode=" + m[HardwareDevelop.T_DECODE] + " image=" + m[HardwareDevelop.T_IMAGE] + " develop=" + m[HardwareDevelop.T_DEVELOP]
-                + " save=" + m[HardwareDevelop.T_SAVE] + " find=" + m[HardwareDevelop.T_FIND] + " orient=" + m[HardwareDevelop.T_ORIENT]
-                + extra + " total=" + total + " (" + print.orientation + ")");
+                + " save=" + m[HardwareDevelop.T_SAVE] + " find=" + m[HardwareDevelop.T_FIND] + " (settle " + m[HardwareDevelop.T_SETTLE] + ")"
+                + " orient=" + m[HardwareDevelop.T_ORIENT]
+                + extra + " total=" + total + " " + batteryNote() + " (" + print.orientation + ")");
     }
 
     /** What the darkroom decided and why, in LATENT/DEVELOP.TXT. */
     private void devLog(String what) {
-        appendLog("DEVELOP.TXT", new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()) + " v" + versionName() + " " + what);
+        appendLog("DEVELOP.TXT", stamp() + " v" + versionName() + " " + what);
+    }
+
+    // one date format for every log line (it isn't thread-safe: the worker, the filer and the UI thread all log)
+    private static final SimpleDateFormat STAMP = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
+
+    private static String stamp() {
+        synchronized (STAMP) { return STAMP.format(new Date()); }
     }
 
     private void appendLog(String name, String line) {
@@ -2320,8 +2762,15 @@ public class MainActivity extends Activity {
     private volatile String screenSize = "?";
     private float logicalWidth = 640;  // 480 x the panel's real aspect (853 on a 16:9 panel)
 
+    private static volatile String version;   // asked of the package manager once: it's a call into another process
+
     private String versionName() {
-        try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return "?"; }
+        String v = version;
+        if (v != null) return v;
+        try { v = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return "?"; }
+        if (v == null) return "?";
+        version = v;
+        return v;
     }
 
     /** Cores, the cores this process may run on, CPU part and features, for the timing log. */
@@ -2359,10 +2808,34 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------------------------ keys
 
+    private long anyKeyAt;   // the last press of any button (uptime), the shutter and MENU too
+    private static final int NO_KEY = Integer.MIN_VALUE;
+    private int wokeBy = NO_KEY;   // the button whose press only woke the screen: the rest of that press is ignored
+
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
+        boolean down = e.getAction() == KeyEvent.ACTION_DOWN, first = down && e.getRepeatCount() == 0;
+        int sc = e.getScanCode(), id = sc != 0 ? sc : -e.getKeyCode();   // the button: by its scan code where it has one
+        if (first) {
+            long now = SystemClock.uptimeMillis();
+            anyKeyAt = now;
+            if (id == wokeBy) wokeBy = NO_KEY;   // pressed again: a new press
+            int kind = shutterKey(sc, e.getKeyCode()) ? Backlight.SHUTTER
+                    : mode == DARKROOM && vf == null && arrowKey(e.getKeyCode(), sc) ? Backlight.PEEK : Backlight.PRESS;
+            if (light.press(now, kind)) {   // the screen was down: this press only wakes it (MENU acts on its release: that too)
+                wokeBy = id;
+                applyLight();
+                return true;
+            }
+        }
+        if (wokeBy != NO_KEY && id == wokeBy) {
+            if (!down) wokeBy = NO_KEY;
+            return true;
+        }
         // route every key here, so no focused view swallows the camera's buttons
-        return e.getAction() == KeyEvent.ACTION_DOWN ? onKeyDown(e.getKeyCode(), e) : onKeyUp(e.getKeyCode(), e);
+        boolean r = down ? onKeyDown(e.getKeyCode(), e) : onKeyUp(e.getKeyCode(), e);
+        if (first) applyLight();   // a peek, or a press that changed the screen
+        return r;
     }
 
     private static int key(int keyCode, int sc) {
@@ -2443,7 +2916,7 @@ public class MainActivity extends Activity {
             case LOAD: if (loading) break; if (current != null) mode = BACK; else openSettings(); break;   // MENU: back to the roll, or the menu
             case SETTINGS: goHome(); break;
             case DARKROOM: if (!preparing) { paused = true; toast("Pausing after this frame"); } break;
-            case VIEW: mode = SHEET; break;
+            case VIEW: mode = SHEET; dropViewer(); sheetThumbs(); break;   // its previews go; the sheet's page may have moved
             case LAB: if (!labBusy) { if (fromSettings) mode = SETTINGS; else goHome(); developWaiting(); } break;
             case PROBE:
                 if (screenRun != null) screenRun.stop();
@@ -2576,12 +3049,14 @@ public class MainActivity extends Activity {
                     if (s.film == null) { s.film = new UiState.Film(); s.film.title = sheetRoll.stock; s.film.accent = Ui.INK; }
                     s.rollNumber = sheetRoll.number;
                     s.sheetUndeveloped = !Roll.DEVELOPED.equals(sheetRoll.state);
-                    for (File f : sheetFrames) s.thumbs.add(thumb(f));
+                    // the page on show only (Ui.sheet draws no other): the cache then keeps what's drawn freshest
+                    int first = Math.max(0, sheetSel) / SHEET_PAGE * SHEET_PAGE;
+                    for (int i = 0; i < sheetFrames.size(); i++) s.thumbs.add(i >= first && i < first + SHEET_PAGE ? thumb(sheetFrames.get(i)) : null);
                 }
                 s.sheetSel = sheetSel;
                 s.sheetTotal = sheetFrames.size();
                 s.filingLeft = filingLeft;
-                s.viewImage = viewBitmap;
+                s.viewImage = viewImage();
                 s.viewCaption = viewCaption;
                 s.viewFill = viewFill;
                 break;
@@ -2678,6 +3153,8 @@ public class MainActivity extends Activity {
             drawCount++;
             drawMs += SystemClock.uptimeMillis() - t;
             drawn();
+            boolean still = stillScreen();   // another screen (without a press): the light looks again, after this draw
+            if (mode != lightMode || still != lightStill) { lightMode = mode; lightStill = still; ui.post(lightCheck); }
             if (mode == PHOTO && vf != null) vf.drew(SystemClock.uptimeMillis() - t, gfx.takeExactMs());
         }
     }
