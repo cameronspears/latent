@@ -43,8 +43,11 @@ final class HardwareDevelop {
             "Save to camera roll", "New photo" };
     static final int S_PHOTO = 0, S_DECODE = 1, S_MEMORY = 2, S_IMAGE = 3, S_DEVELOP = 4, S_SAVE = 5, S_NEW = 6;
 
-    /** Milliseconds per phase of the last develop(). */
-    static final int T_DECODE = 0, T_IMAGE = 1, T_DEVELOP = 2, T_SAVE = 3, T_FIND = 4, T_ORIENT = 5, T_TOTAL = 6, T_COUNT = 7;
+    /**
+     * Milliseconds per phase of the last develop(). T_SETTLE: of T_FIND, the wait for the encoder's release
+     * to have its EXPORT_SETTLE_MS (the rest of that time was spent finding the new photo on the card).
+     */
+    static final int T_DECODE = 0, T_IMAGE = 1, T_DEVELOP = 2, T_SAVE = 3, T_FIND = 4, T_ORIENT = 5, T_TOTAL = 6, T_SETTLE = 7, T_COUNT = 8;
 
     static final class Stuck extends Exception {
         Stuck() { super("no answer from the camera in time"); }
@@ -210,26 +213,34 @@ final class HardwareDevelop {
             Set<String> before = new HashSet<String>();
             for (File f : Library.photos(card)) before.add(f.getPath());
             t = System.currentTimeMillis();
-            int code = export(o.full, mediaId, extraFine ? "EXTRAFINE" : "FINE");
-            if (code == -2 && extraFine) {   // this camera won't take Extra Fine here: Fine from now on
-                extraFine = false;
-                log.append("Extra Fine refused (invalid parameters); saving as Fine\r\n");
-                code = export(o.full, mediaId, "FINE");
+            Saved saved = export(o.full, mediaId, extraFine ? "EXTRAFINE" : "FINE");
+            Print print = new Print();
+            // Sony sees what it always has: the exporter's release, at least EXPORT_SETTLE_MS, its thread ended,
+            // then the image released, the catalogue asked, the rotate. What changed is Latent's side: the new
+            // photo is looked for on the card (its listing only, no Sony call) during the settle, not after it
+            try {
+                if (saved.code == -2 && extraFine) {   // this camera won't take Extra Fine here: Fine from now on
+                    saved.settle.finish();   // the refused try ends as every save always has, before the next
+                    extraFine = false;
+                    log.append("Extra Fine refused (invalid parameters); saving as Fine\r\n");
+                    saved = export(o.full, mediaId, "FINE");
+                }
+                ms[T_SAVE] = System.currentTimeMillis() - t;   // to the encoder's answer (v0.44 counted its 300 ms settle here too)
+                if (saved.code != 0) throw fail(S_SAVE, "Sony's encoder answered " + saved.code + (saved.code == -1 ? " (failed)" : saved.code == -2 ? " (invalid parameters)" : ""));
+                step(S_SAVE, OK, "Sony's encoder saved it (" + (extraFine ? "Extra Fine" : "Fine") + ") in " + ms[T_SAVE] + " ms");
+                pct(progress, 94);
+
+                // the new photo: on the card, in the catalogue, the right way up
+                t = System.currentTimeMillis();
+                for (int i = 0; i < 40 && print.file == null; i++) {
+                    if (i > 0) Thread.sleep(250);
+                    for (File f : Library.photos(card)) if (!before.contains(f.getPath())) { print.file = f; break; }
+                }
+            } finally {
+                ms[T_SETTLE] = saved.settle.finish();   // whatever happened: before any other Sony call (the finally below releases)
             }
-            ms[T_SAVE] = System.currentTimeMillis() - t;
-            if (code != 0) throw fail(S_SAVE, "Sony's encoder answered " + code + (code == -1 ? " (failed)" : code == -2 ? " (invalid parameters)" : ""));
             call(o.full, "release");
             o.full = null;
-            step(S_SAVE, OK, "Sony's encoder saved it (" + (extraFine ? "Extra Fine" : "Fine") + ") in " + ms[T_SAVE] + " ms");
-            pct(progress, 94);
-
-            // the new photo: on the card, in the catalogue, the right way up
-            t = System.currentTimeMillis();
-            Print print = new Print();
-            for (int i = 0; i < 40 && print.file == null; i++) {
-                if (i > 0) Thread.sleep(250);
-                for (File f : Library.photos(card)) if (!before.contains(f.getPath())) { print.file = f; break; }
-            }
             if (print.file == null) throw fail(S_NEW, "Sony's encoder answered OK, but no new photo appeared");
             Probe.Row row = null;
             for (int i = 0; i < 8 && row == null; i++) {
@@ -309,9 +320,10 @@ final class HardwareDevelop {
      * while the caller holds SONY: that is what the save check tries.
      */
     int save(Object image) throws Exception {
-        int code = export(image, mediaId, extraFine ? "EXTRAFINE" : "FINE");
-        if (code == -2 && extraFine) { extraFine = false; code = export(image, mediaId, "FINE"); }
-        return code;
+        Saved s = export(image, mediaId, extraFine ? "EXTRAFINE" : "FINE");
+        if (s.code == -2 && extraFine) { s.settle.finish(); extraFine = false; s = export(image, mediaId, "FINE"); }
+        s.settle.finish();
+        return s.code;
     }
 
     /** The photos on the card now (to see which one a save added). */
@@ -525,12 +537,18 @@ final class HardwareDevelop {
             if (!print.exists()) return "its print is gone; original kept";
             if (crc == 0) crc = crc(original);
             if (!neg.exists() || neg.length() != original.length() || crc(neg) != crc) return NEG_MISMATCH;
+            Object[] answer = new Object[1];
             SONY.lock();
             try {
-                return deleteOriginal(original, print);
+                String kept = deleteOriginal(original, print, answer);
+                if (kept != null) return kept;
             } finally {
                 SONY.unlock();
             }
+            // Sony's delete has answered: the file going is waited for without SONY, which the darkroom's next
+            // decode or save would otherwise wait behind for up to 3 s (only a stat of the file, no Sony call)
+            for (int i = 0; i < 12 && original.exists(); i++) Thread.sleep(250);
+            return original.exists() ? "Sony's delete answered " + answer[0] + " and kept the original" : null;
         } catch (Stuck e) {
             hung = true;
             return "Sony's delete gave no answer in time";
@@ -539,20 +557,22 @@ final class HardwareDevelop {
         }
     }
 
-    /** Sony's delete of the original, its print checked in the catalogue again first. Under SONY. */
-    private String deleteOriginal(File original, File print) throws Exception {
+    /**
+     * Sony's delete of the original, its print checked in the catalogue again first. Under SONY. Returns why
+     * the original stays (nothing deleted), or null once Sony's delete has answered (its answer in answer[0]).
+     */
+    private String deleteOriginal(File original, File print, Object[] answer) throws Exception {
         List<Probe.Row> rows = Probe.query(cr, uri);
         if (Probe.find(rows, print) == null) return "its print is not in the camera roll; original kept";
         final Probe.Row row = Probe.find(rows, original);
         if (row == null) return "not in the catalogue; original kept";
         final Class<?> media = Class.forName("com.sony.scalar.provider.AvindexStore$Images$Media");
-        Object ok = guarded(new Call() {
+        answer[0] = guarded(new Call() {
             public Object run() throws Exception {
                 return media.getMethod("deleteImage", ContentResolver.class, Uri.class, long.class).invoke(null, cr, uri, row.id);
             }
         }, 15000);
-        for (int i = 0; i < 12 && original.exists(); i++) Thread.sleep(250);
-        return original.exists() ? "Sony's delete answered " + ok + " and kept the original" : null;
+        return null;
     }
 
     static long crc(File f) throws IOException {
@@ -628,8 +648,53 @@ final class HardwareDevelop {
         }
     }
 
-    /** JpegExporter.encode(image, mediaId, quality, listener) on a Looper thread; waits for the result code. */
-    private int export(final Object image, final String mediaId, final String quality) throws Exception {
+    /**
+     * The exporter's release, posted to its own thread, is given this long before that thread is ended
+     * (on Android 2.3 a quit goes ahead of what is queued: ended sooner, the release might never run).
+     */
+    static final long EXPORT_SETTLE_MS = 300;
+
+    /** A save the encoder answered: the answer, and the end of its thread still to come (Settle.finish). */
+    static final class Saved {
+        final int code;
+        final Settle settle;
+        Saved(int code, Settle settle) { this.code = code; this.settle = settle; }
+    }
+
+    /**
+     * The exporter's thread ends once its release has had EXPORT_SETTLE_MS from being posted, exactly as
+     * export() used to sleep it out; the caller may do work of its own meanwhile (the darkroom looks for
+     * the new photo on the card), and must finish() before any other Sony call.
+     */
+    static final class Settle {
+        private final long from;     // System.nanoTime() when the release was posted
+        private final Runnable end;  // ends the exporter's thread
+        private boolean done;
+
+        Settle(long from, Runnable end) { this.from = from; this.end = end; }
+
+        /** Waits out what's left of the settle, then ends the thread (once). Returns the ms waited here. */
+        long finish() throws InterruptedException {
+            if (done) return 0;
+            done = true;   // one try, as v0.44's sleep then quit: interrupted, the thread is left as it was
+            long waited = waitOut(from, EXPORT_SETTLE_MS);
+            end.run();
+            return waited;
+        }
+    }
+
+    /** Sleeps until at least ms have passed since 'since' (System.nanoTime()). Returns the ms slept. */
+    static long waitOut(long since, long ms) throws InterruptedException {
+        long start = System.nanoTime(), left;
+        while ((left = since + ms * 1000000L - System.nanoTime()) > 0) Thread.sleep(left / 1000000L + 1);
+        return (System.nanoTime() - start) / 1000000L;
+    }
+
+    /**
+     * JpegExporter.encode(image, mediaId, quality, listener) on a Looper thread; waits for the result code.
+     * The exporter's release is posted on that thread; the caller ends it with the answer's settle.
+     */
+    private Saved export(final Object image, final String mediaId, final String quality) throws Exception {
         final Class<?> exporterClass = Class.forName("com.sony.scalar.graphics.JpegExporter");
         final Class<?> optionsClass = Class.forName("com.sony.scalar.graphics.JpegExporter$Options");
         final Class<?> listenerClass = Class.forName("com.sony.scalar.graphics.JpegExporter$onExportEventListener");
@@ -681,8 +746,7 @@ final class HardwareDevelop {
         h.post(new Runnable() {
             public void run() { try { if (exporter[0] != null) exporterClass.getMethod("release").invoke(exporter[0]); } catch (Throwable ignored) { } }
         });
-        Thread.sleep(300);
-        looper.quit();
-        return code[0];
+        final HandlerThread thread = looper;
+        return new Saved(code[0], new Settle(System.nanoTime(), new Runnable() { public void run() { thread.quit(); } }));
     }
 }

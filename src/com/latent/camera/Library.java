@@ -125,14 +125,36 @@ final class Library {
     static List<File> photos(File card) {
         List<File> out = new ArrayList<File>();
         walk(new File(card, "DCIM"), out, 0);
-        Collections.sort(out, new Comparator<File>() {
-            public int compare(File a, File b) {
-                long d = b.lastModified() - a.lastModified();
-                return d < 0 ? -1 : d > 0 ? 1 : a.getName().compareTo(b.getName());
-            }
-        });
+        return newestFirst(out);
+    }
+
+    /**
+     * These files newest first (ties by name, then as listed): each file's time is read once, where the
+     * sort used to ask the card twice per comparison (~2 N log N stats a listing, ~20,000 for 1,000 photos).
+     * The order is exactly the old one: the same comparison on the same times, in the same stable sort.
+     */
+    static List<File> newestFirst(List<File> files) {
+        int n = files.size();
+        List<Timed> timed = new ArrayList<Timed>(n);
+        for (File f : files) timed.add(new Timed(f, f.lastModified()));
+        Collections.sort(timed, NEWEST_FIRST);
+        List<File> out = new ArrayList<File>(n);
+        for (Timed t : timed) out.add(t.file);
         return out;
     }
+
+    private static final class Timed {
+        final File file;
+        final long time;
+        Timed(File file, long time) { this.file = file; this.time = time; }
+    }
+
+    private static final Comparator<Timed> NEWEST_FIRST = new Comparator<Timed>() {
+        public int compare(Timed a, Timed b) {
+            long d = b.time - a.time;
+            return d < 0 ? -1 : d > 0 ? 1 : a.file.getName().compareTo(b.file.getName());
+        }
+    };
 
     private static void walk(File dir, List<File> out, int depth) {
         File[] files = dir.listFiles();
@@ -166,7 +188,15 @@ final class Library {
     /** The looks shipped inside the app (assets/luts). */
     static final String[] BUNDLED = { "NATURAL.CUB", "PORTRA4W.CUB", "CLASSNEG.CUB", "CUBANNEG.CUB", "TRIX400.CUB", "PARTY800.CUB" };
 
+    private static volatile boolean installed;   // checked once per run: six stats on the card every resume otherwise
+
     static void installBundledLuts(AssetManager assets, File card) throws IOException {
+        if (installed) return;
+        installLuts(assets, card);
+        installed = true;
+    }
+
+    private static void installLuts(AssetManager assets, File card) throws IOException {
         File dir = lutDir(card);
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cannot create " + dir);
         boolean all = true;

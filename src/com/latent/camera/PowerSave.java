@@ -31,7 +31,16 @@ final class PowerSave {
 
     private static void set(int value) throws Exception {
         Method m = settings().getMethod("setAutoPowerOffTime", int.class);
+        wroteAt = android.os.SystemClock.uptimeMillis();   // tried: whether it took or not, the camera was asked
         m.invoke(null, value);
+    }
+
+    private static volatile long wroteAt = -1;
+
+    /** Milliseconds since Latent last wrote the camera's power-save timer, or -1 if it never has (this process). */
+    static long sinceLastWrite() {
+        long at = wroteAt;
+        return at < 0 ? -1 : android.os.SystemClock.uptimeMillis() - at;
     }
 
     /** Raise the timer for a long job. Returns a note for the on-screen log. */
@@ -48,14 +57,6 @@ final class PowerSave {
         } catch (Throwable t) {
             return "power-save unchanged (" + t.getClass().getSimpleName() + ")";
         }
-    }
-
-    /**
-     * Experiment for long develops: re-apply the current timer value, which may restart the camera's
-     * idle countdown. Harmless if it does not; the develop log records whether the camera stayed up.
-     */
-    void touch() {
-        try { set(get()); } catch (Throwable t) { /* no Sony API: nothing to do */ }
     }
 
     /** Put the user's timer back, if hold() changed it (also after a crash). */
