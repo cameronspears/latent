@@ -1644,10 +1644,14 @@ int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, 
 /* the viewfinder's frame composer                                                               */
 /*
  * One live frame, start to finish, for the camera's 16-bit screen: the JPEG decoded straight into a
- * kept buffer, the level and histogram read (when asked), the film's look, then for every screen pixel
- * one pass that stretches (bilinear), lays Latent's own type and fades over it (the overlay, drawn by
- * the screen only when it changes), and dithers to 4 bits a channel with blue noise. The screen then
- * copies one opaque picture a frame. A context per look thread: its own buffers and its own film.
+ * kept buffer (as Y'CbCr, unless the level wants RGB), its signature (a still scene can stop here), the
+ * level read (when asked), the film's look (a word a pixel, already in the dither's units), its histogram
+ * (when asked), then each source row stretched once and each screen row made in one pass that blends two
+ * stretched rows, lays the fades over them and dithers to 4 bits a channel with blue noise, landing on
+ * the 4-bit levels directly, two pixels a store; Latent's own type (the overlay, drawn by the screen only
+ * when it changes) follows over its runs. The screen then copies one opaque picture a frame. A context
+ * per look thread: its own buffers and its own film. tools/asm-budget.sh counts the hot loops' instructions
+ * with the camera's compiler; tools/frame-test.sh compares the picture with v0.44.1's.
  */
 
 #define FL_LIVE_GRID 17
