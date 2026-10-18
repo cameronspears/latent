@@ -413,6 +413,49 @@ final class Roll {
         return out;
     }
 
+    /** A developed frame as Photos lists it: its roll, its number on the roll (from 1) of the roll's frames, and the file. */
+    static final class Shot {
+        final Roll roll;
+        final int number, of;
+        final File file;
+
+        Shot(Roll roll, int number, int of, File file) { this.roll = roll; this.number = number; this.of = of; this.file = file; }
+    }
+
+    /**
+     * Every developed frame on the card, for Photos: the rolls as listed (newest first), and in each roll its newest
+     * frame first. 'cameraRoll' is the card's camera roll as last listed (each photo's path): a print found there
+     * isn't asked about again, where developed(i) asked the card twice a frame (null: each one is asked). Each
+     * roll's own folder is listed once, for the frames developed into it.
+     */
+    static List<Shot> developedAll(List<Roll> rolls, Set<String> cameraRoll) {
+        List<Shot> out = new ArrayList<Shot>();
+        for (Roll r : rolls) {
+            String[] names = r.dir.list();
+            Set<String> here = names == null ? null : new HashSet<String>(Arrays.asList(names));
+            int n = r.frames.size();
+            if (n == 0) {   // a roll whose frame list is missing: its developed files, by their numbers
+                List<File> dev = r.developed();
+                for (int k = dev.size() - 1; k >= 0; k--) {
+                    File f = dev.get(k);
+                    int no = parseInt(f.getName().substring(0, 2), k + 1);
+                    out.add(new Shot(r, no, dev.size(), f));
+                }
+                continue;
+            }
+            for (int i = n - 1; i >= 0; i--) {
+                File p = r.print(i), f = null;
+                if (p != null && ((cameraRoll != null && cameraRoll.contains(p.getPath())) || p.exists())) f = p;
+                else {
+                    File o = r.output(i);
+                    if (here != null ? here.contains(o.getName()) : o.exists()) f = o;
+                }
+                if (f != null) out.add(new Shot(r, i + 1, n, f));
+            }
+        }
+        return out;
+    }
+
     /** Every roll's prints: photos in the camera roll that are developed frames, never exposures. */
     static Set<String> printPaths(List<Roll> rolls) {
         Set<String> out = new HashSet<String>();

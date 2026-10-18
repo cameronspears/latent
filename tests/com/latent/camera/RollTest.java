@@ -215,7 +215,46 @@ public class RollTest {
         // old ROLL.TXT without prints still reads
         check(Roll.open(a1.dir).prints.isEmpty() && Roll.open(a1.dir).print(0) == null, "rolls without prints read fine");
         photoOrder(new File(card.getParentFile(), "sortcard"));
+        developedAll(new File(card.getParentFile(), "photoscard"));
         System.out.println("ROLL OK");
+    }
+
+    /**
+     * Photos' list: every developed frame on the card, the newest roll first and each roll's newest frame first,
+     * prints and frames developed into the roll's folder alike, and a roll whose frame list is missing by its files.
+     * A print the card's listing names isn't asked about again.
+     */
+    static void developedAll(File card) throws Exception {
+        File dcim = new File(card, "DCIM/100MSDCF");
+        dcim.mkdirs();
+        Roll a = Roll.create(card, "CUBANNEG", 12, 0, 1001000);   // ROLL001: frame 1 in software, 2 a print, 3 not developed
+        for (int i = 1; i <= 3; i++) a.frames.add(new File(dcim, "DSC0100" + i + ".JPG").getPath());
+        touch(a.output(0), 0);
+        File p2 = new File(dcim, "DSC01010.JPG");
+        touch(p2, 0);
+        a.setPrint(1, p2);
+        a.state = Roll.DEVELOPED;
+        a.save();
+        Roll b = Roll.create(card, "TRIX400", Roll.ENDLESS, 0, 1001003);   // ROLL002, endless: three prints, the last one only listed
+        File q1 = new File(dcim, "DSC01011.JPG"), q2 = new File(dcim, "DSC01012.JPG"), q3 = new File(dcim, "DSC01013.JPG");
+        for (int i = 4; i <= 6; i++) b.frames.add(new File(dcim, "DSC0100" + i + ".JPG").getPath());
+        touch(q1, 0);
+        touch(q2, 0);
+        b.setPrint(0, q1); b.setPrint(1, q2); b.setPrint(2, q3);
+        b.save();
+        Roll c = Roll.create(card, "PORTRA4W", 24, 0, 1001013);   // ROLL003, from before frame lists: its files alone
+        touch(new File(c.dir, "01_01020.JPG"), 0);
+        touch(new File(c.dir, "02_01021.JPG"), 0);
+        java.util.Set<String> listed = new java.util.HashSet<String>();
+        listed.add(p2.getPath()); listed.add(q1.getPath()); listed.add(q3.getPath());   // DSC01012 left out: the card is asked about it
+        List<Roll.Shot> all = Roll.developedAll(Roll.list(card), listed);
+        StringBuilder got = new StringBuilder();
+        for (Roll.Shot s : all) got.append(s.roll.number).append('/').append(s.number).append(" of ").append(s.of).append(' ').append(s.file.getName()).append("; ");
+        check(got.toString().equals("3/2 of 2 02_01021.JPG; 3/1 of 2 01_01020.JPG; 2/3 of 3 DSC01013.JPG; 2/2 of 3 DSC01012.JPG; 2/1 of 3 DSC01011.JPG; "
+                + "1/2 of 3 DSC01010.JPG; 1/1 of 3 01_01001.JPG; "), "every developed frame, newest roll and frame first: " + got);
+        List<Roll.Shot> asked = Roll.developedAll(Roll.list(card), null);
+        check(asked.size() == 6 && asked.get(2).file.getName().equals("DSC01012.JPG"), "with no listing, each print is asked about: DSC01013 isn't there");
+        check(Roll.developedAll(new java.util.ArrayList<Roll>(), listed).isEmpty(), "no rolls: nothing");
     }
 
     /**

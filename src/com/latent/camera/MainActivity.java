@@ -41,7 +41,7 @@ import java.util.concurrent.ThreadFactory;
  *   Camera back   the loaded roll: stock canister and frame counter (photos taken since loading)
  *   Load film     pick a stock and a roll length
  *   Darkroom      develops every frame of the roll, screen dimmed; pausable and resumable
- *   Contact sheet developed rolls as film strips; open a frame full screen
+ *   Photos        every developed frame, newest first, on a contact sheet grouped by roll; a frame full screen, at 100%
  *   Viewfinder    the camera's live view with the roll's film on it; the pictures develop next time
  *
  * Originals in DCIM are never changed. Controls: UP/DOWN, LEFT/RIGHT or the wheel, centre, MENU.
@@ -118,21 +118,28 @@ public class MainActivity extends Activity {
      * and the kernel writes cached data out within about 30 s.
      */
     static final long SETTLE_MS = 30000;
-    private volatile int filingLeft;      // originals still to file after a develop, shown on the contact sheet
+    private volatile int filingLeft;      // originals still to file after a develop, shown in Photos on that roll (filingDir)
     private float progressShown;          // the bar never goes backwards
 
-    // contact sheet and viewer
-    private volatile Roll sheetRoll;
-    private List<File> sheetFrames = new ArrayList<File>();
-    private volatile int sheetSel;   // (the viewer's decodes read it on the worker)
+    // Photos: every developed frame, newest first (Roll.developedAll), on a contact sheet grouped by roll, and the viewer
+    private List<Roll.Shot> shots = new ArrayList<Roll.Shot>();
+    private Photos.Sheet sheet = new Photos.Sheet(new int[0]);   // how they lie on the sheet
+    private volatile int photoSel;     // the chosen frame (the viewer's decodes read it on the worker)
+    private boolean photosReady;       // the list is made
+    private int photosFrom = -1;       // the screen Photos was opened from (MENU and Playback go back there); -1 home
+    private volatile int photosGen;    // a visit's: a list or thumbnails meant for an earlier one are dropped
+    private Set<String> cameraRoll;    // the camera roll as the last card read listed it (each photo's path): prints found without asking the card
+    private volatile File filingDir;   // the roll whose originals are being filed (filingLeft)
     private Bitmap viewBitmap;
     /**
      * Thumbnails by path (160x120, ~77 KB each), the least recently drawn dropped past THUMBS_MAX: v0.44's
      * map only grew (a 36-frame develop added ~5.5 MB). A dropped one is never recycled: a screen being
-     * drawn may still hold it; the collector frees it. Guarded by itself.
+     * drawn may still hold it; the collector frees it. Guarded by itself, as is 'notes'.
      */
     private static final int THUMBS_MAX = 64;
     private final Map<String, Bitmap> thumbs = Slots.recent(THUMBS_MAX);
+    /** What each photo's EXIF says, read with its thumbnail: {when it was taken, its exposure} ("" unknown). Small: kept longer. */
+    private final Map<String, String[]> notes = Slots.recent(THUMBS_MAX * 8);
 
     // ------------------------------------------------------------------------------ lifecycle
 
@@ -266,6 +273,8 @@ public class MainActivity extends Activity {
                 long r2 = SystemClock.uptimeMillis();
                 List<File> listed = Library.photos(card);
                 final int highest = Roll.highest(listed);
+                final Set<String> listedPaths = new HashSet<String>(listed.size() * 2);   // Photos finds the prints in it
+                for (File f : listed) listedPaths.add(f.getPath());
                 // test shots are never exposures; the viewfinder's are, even before the listing shows them
                 // (pictures the listing doesn't show are checked against the catalogue: one never stored doesn't count)
                 Set<Integer> catalogued = new File(Library.home(card), "SHOTS.TXT").exists() ? Probe.catalogued(getContentResolver()) : null;
@@ -313,6 +322,7 @@ public class MainActivity extends Activity {
                         stocks = st;
                         rolls = ro;
                         photos = ph;
+                        cameraRoll = listedPaths;
                         current = inCamera;
                         reference = ref;
                         endlessWaiting = waiting;
@@ -359,9 +369,11 @@ public class MainActivity extends Activity {
 
     /**
      * The camera back with a roll in it has one thing to do: shoot (the centre button or a half-press),
-     * or develop once the roll is finished or a develop was paused. Everything else is behind MENU.
+     * or develop once the roll is finished or a develop was paused. DOWN shows your photos (and MENU there
+     * comes back here). Everything else is behind MENU.
      */
     private void backKey(int k) {
+        if (k == K_DOWN && ready) { openPhotos(null, BACK); screen.invalidate(); return; }
         if (k != K_ENTER || !ready || current == null) return;
         if (Viewfinder.opened && current.endless() && (vfWaiting > 0 || (vf != null && vf.shots > 0))) restartToDevelop("photos to develop");
         else if (wantsDeveloping(current)) startDevelop(current);
@@ -498,10 +510,8 @@ public class MainActivity extends Activity {
                 startDevelop(current);
             } else if (action.equals("change")) {
                 openLoad();
-            } else if (action.equals("photos")) {   // the developed photos: for now, the rolls' contact sheets
-                Roll r = firstRollWithFrames();
-                if (r == null) toast("No photos yet");
-                else { openSheet(r); sheetFrom = SETTINGS; }
+            } else if (action.equals("photos")) {   // every developed photo; MENU comes back here
+                openPhotos(null, SETTINGS);
             }
         }
         redrawKey();
@@ -1546,7 +1556,7 @@ public class MainActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         for (int i : todo) negAt.putIfAbsent(r.frames.get(i), now);   // can't tell their age: the full time, all together
         int filed = 0, remaining = todo.size();
-        if (wait) showFiling(remaining);
+        if (wait) showFiling(r, remaining);
         for (int i : todo) {
             File print = r.print(i), original = new File(r.frames.get(i)), neg = r.negative(i);
             String key = original.getPath();
@@ -1575,7 +1585,7 @@ public class MainActivity extends Activity {
             filing = true;   // the camera doesn't open meanwhile
             try { w = Viewfinder.opened ? "the camera is open" : sony.removeOriginal(original, print, neg, negCrc.get(key)); }
             finally { filing = false; }
-            if (wait) showFiling(--remaining);
+            if (wait) showFiling(r, --remaining);
             if (w == null) filed++;
             else devLog(original.getName() + " stays in the camera roll: " + w);
             if (HardwareDevelop.NEG_MISMATCH.equals(w)) {   // a bad copy: drop it, so the next pass copies afresh
@@ -1585,7 +1595,7 @@ public class MainActivity extends Activity {
             }
             if (HardwareDevelop.hung()) break;
         }
-        if (wait) showFiling(0);
+        if (wait) showFiling(r, 0);
         if (filed > 0) {
             devLog(r.label() + ": " + filed + " original(s) filed as negatives");
             if (wait) ui.post(new Runnable() { public void run() { toast("Negatives filed"); } });
@@ -1594,7 +1604,9 @@ public class MainActivity extends Activity {
         return filed;
     }
 
-    private void showFiling(int n) {
+    /** Roll r has n originals still to file (Photos says so on its frames). Filer thread. */
+    private void showFiling(Roll r, int n) {
+        filingDir = r.dir;
         filingLeft = Math.max(0, n);
         ui.post(new Runnable() { public void run() { screen.invalidate(); } });
     }
@@ -1642,7 +1654,7 @@ public class MainActivity extends Activity {
         refresh(new Runnable() {
             public void run() {
                 if (shootAfterFrame) { shootAfterFrame = false; goShoot(); return; }   // the shutter was pressed on the last frame
-                openSheet(r);
+                openPhotos(r, -1);   // on the roll just developed; MENU goes home
                 toast(msg);
             }
         });
@@ -1766,116 +1778,204 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ------------------------------------------------------------------------------ contact sheet
+    // ------------------------------------------------------------------------------ Photos
 
-    private Roll firstRollWithFrames() {
-        for (Roll r : rolls) if (!r.developed().isEmpty() || !r.frames.isEmpty()) return r;
-        return rolls.isEmpty() ? null : rolls.get(0);
+    /**
+     * Photos: every developed frame on the card, newest first, on one contact sheet grouped by roll (no roll to pick
+     * first: Apple's Photos has no album to open before your photos). onRoll: opened on that roll's newest frame
+     * (after a develop), else on the newest of all. from: where MENU and Playback go back to (-1: home). The list is
+     * made on the worker (each roll's folder listed once, the prints found in the last card read's listing); until
+     * then the screen shows only its title. Nothing in Photos develops or ends a roll. UI thread.
+     */
+    private void openPhotos(final Roll onRoll, int from) {
+        closePhotos();   // anything of an earlier visit goes first
+        mode = SHEET;
+        photosFrom = from;
+        final int gen = photosGen;
+        final List<Roll> ro = rolls;
+        final Set<String> listed = cameraRoll;
+        worker.execute(new Runnable() {
+            public void run() {
+                if (gen != photosGen) return;   // left again already
+                final List<Roll.Shot> made = Roll.developedAll(ro, listed);
+                ui.post(new Runnable() {
+                    public void run() {
+                        if (gen != photosGen || mode != SHEET) return;   // left meanwhile (the shutter, say)
+                        shots = made;
+                        sheet = new Photos.Sheet(rollSizes(made));
+                        photoSel = 0;
+                        if (onRoll != null) for (int i = 0; i < made.size(); i++) if (made.get(i).roll.dir.equals(onRoll.dir)) { photoSel = i; break; }
+                        photosReady = true;
+                        photoThumbs();
+                        screen.invalidate();
+                    }
+                });
+            }
+        });
     }
 
-    private void openSheet(final Roll r) {
-        if (mode != SHEET && mode != VIEW) sheetFrom = -1;   // a new visit to the sheet: whoever opened it says where MENU goes
-        mode = SHEET;
-        sheetRoll = r;
-        sheetSel = 0;
-        sheetFrames = new ArrayList<File>();
-        thumbsPage = -1;
-        dropViewer();
-        if (r != null) {
-            worker.execute(new Runnable() {
-                public void run() {
-                    final List<File> frames = r.developed();
-                    // the sheet at once, its thumbnails filling in page by page (v0.44 read every frame's first)
-                    ui.post(new Runnable() {
-                        public void run() {
-                            if (sheetRoll != r) return;
-                            sheetFrames = frames;
-                            sheetThumbs();
-                            screen.invalidate();
-                        }
-                    });
-                }
-            });
+    /** Each roll's frames in the list, in order (Roll.developedAll keeps a roll's frames together). */
+    private static int[] rollSizes(List<Roll.Shot> list) {
+        List<Integer> n = new ArrayList<Integer>();
+        Roll at = null;
+        for (Roll.Shot s : list) {
+            if (s.roll != at) { n.add(0); at = s.roll; }
+            n.set(n.size() - 1, n.get(n.size() - 1) + 1);
         }
+        int[] out = new int[n.size()];
+        for (int i = 0; i < out.length; i++) out[i] = n.get(i);
+        return out;
+    }
+
+    /**
+     * Everything Photos holds goes: the viewer's pictures (recycled: UI thread, and nothing drawn from here on reads
+     * them), the 100% view and its open photo, the list; work still on its way for it is dropped (photosGen). The
+     * thumbnails stay in their cache (the camera back's prints share it). Every way out of Photos ends here: MENU and
+     * Playback (leavePhotos), and the shutter or the darkroom (noticed at the next key or drawing: photosLeft).
+     */
+    private void closePhotos() {
+        photosGen++;
+        dropViewer();
+        shots = new ArrayList<Roll.Shot>();
+        sheet = new Photos.Sheet(new int[0]);
+        photoSel = 0;
+        photosReady = false;
+        thumbsPage = -1;
+    }
+
+    /** Photos was left some other way than MENU or Playback (the shutter, the darkroom): what it holds goes now. UI thread. */
+    private void photosLeft() {
+        if (mode == SHEET || mode == VIEW) return;
+        if (photosReady || viewBitmap != null || viewStandIn != null || zoomBitmap != null || !viewSlots.isEmpty() || loupeUsed) closePhotos();
+    }
+
+    /** MENU on the sheet, or Playback in Photos: back where Photos was opened (the menu, Choose film), else home. */
+    private void leavePhotos() {
+        int from = photosFrom;
+        closePhotos();
+        photosFrom = -1;
+        if (from == SETTINGS) mode = SETTINGS;
+        else if (from == LOAD && !stocks.isEmpty()) openLoad();
+        else goHome();
+        if (mode == BACK) loadPrints(endlessPrints);   // an endless roll's prints, if Photos' pages pushed them out of the cache
+    }
+
+    /**
+     * Playback, as on the camera itself: Photos, and pressed again, back where it was. Only from the camera back,
+     * Choose film and the menu: never in the viewfinder or the darkroom.
+     */
+    private void playback() {
+        if (!ready) return;
+        if (mode == SHEET || mode == VIEW) { leavePhotos(); screen.invalidate(); return; }
+        if (mode != BACK && mode != LOAD && mode != SETTINGS) return;
+        if (mode == LOAD && loading) return;
+        openPhotos(null, mode);
         screen.invalidate();
     }
 
-    /** Ui.sheet's page of thumbnails (5 x 3). */
-    static final int SHEET_PAGE = 15;
+    /** The sheet: the wheel, LEFT and RIGHT a frame (from one roll into the next), UP and DOWN a row; centre the frame full screen. */
+    private void photosKey(int k) {
+        if (!photosReady || shots.isEmpty()) return;   // (MENU leaves: onKeyUp)
+        int sel = photoSel;
+        if (k == K_LEFT || k == K_RIGHT) sel = sheet.step(sel, k == K_RIGHT ? 1 : -1);
+        else if (k == K_UP || k == K_DOWN) sel = sheet.vertical(sel, k == K_DOWN ? 1 : -1);
+        else if (k == K_ENTER) { openView(photoSel); return; }
+        if (sel != photoSel) { photoSel = sel; photoThumbs(); }
+        redrawKey();
+    }
+
+    /** The list as the sheet reads it (Photos.page). UI thread. */
+    private final Photos.Frames sheetFrames = new Photos.Frames() {
+        public Object thumb(int i) { return MainActivity.this.thumb(shots.get(i).file); }
+        public int number(int i) { return shots.get(i).number; }
+        public int roll(int i) { return shots.get(i).roll.number; }
+        public UiState.Film film(int i) { return shotFilm(shots.get(i)); }
+    };
+
+    /** How a frame's film is shown: its own (an endless roll's frames each have theirs), or its name alone when the look has left the card. */
+    private UiState.Film shotFilm(Roll.Shot shot) {
+        String id = shot.roll.stockFor(shot.number - 1);
+        UiState.Film f = Ui.film(Stock.byId(stocks, id));
+        if (f == null) {
+            f = new UiState.Film();
+            f.title = id;
+            f.accent = Ui.INK;
+            f.body = Ui.DIM;
+            f.band = Ui.INK3;
+        }
+        return f;
+    }
+
+    private int thumbsPage = -1;   // the sheet's page whose thumbnails were last asked for
 
     /**
-     * The contact sheet's thumbnails: the page on show first, then the pages either side (where LEFT and
-     * RIGHT go next). Three pages at most, so the cache keeps them however long the roll. UI thread.
+     * The sheet's thumbnails: the page on show first, then the pages after and before it (where the keys go next).
+     * Three pages at most, so the cache keeps them however many photos there are. UI thread.
      */
-    private void sheetThumbs() {
-        final Roll r = sheetRoll;
-        final List<File> frames = sheetFrames;
-        if (r == null || frames.isEmpty()) return;
-        final int page = Math.min(sheetSel, frames.size() - 1) / SHEET_PAGE, pages = (frames.size() + SHEET_PAGE - 1) / SHEET_PAGE;
-        if (page == thumbsPage && r == thumbsRoll) return;   // asked for already
+    private void photoThumbs() {
+        if (!photosReady || shots.isEmpty()) return;
+        final int page = sheet.page(photoSel), pages = sheet.pages();
+        if (page == thumbsPage) return;   // asked for already
         thumbsPage = page;
-        thumbsRoll = r;
+        final int gen = photosGen;
+        final List<Roll.Shot> list = shots;
+        final Photos.Sheet sh = sheet;
         worker.execute(new Runnable() {
             public void run() {
-                for (int p : new int[] { page, page + 1, page - 1 }) {
-                    if (p < 0 || p >= pages || sheetRoll != r) continue;
+                for (final int p : new int[] { page, page + 1, page - 1 }) {
+                    if (p < 0 || p >= pages || gen != photosGen) continue;
                     boolean added = false;
-                    for (int i = p * SHEET_PAGE; i < Math.min(frames.size(), (p + 1) * SHEET_PAGE); i++) added |= loadThumb(frames.get(i));
-                    if (added && p == page) ui.post(new Runnable() { public void run() { if ((mode == SHEET || mode == VIEW) && sheetRoll == r) screen.invalidate(); } });
+                    for (int i = sh.pageStart(p); i < sh.pageEnd(p); i++) added |= loadThumb(list.get(i).file);
+                    if (added) ui.post(new Runnable() { public void run() { thumbsIn(gen, p); } });
                 }
             }
         });
     }
 
-    private int thumbsPage = -1;
-    private Roll thumbsRoll;
-
-    private void sheetKey(int k) {
-        if (sheetRoll == null) return;
-        int idx = rolls.indexOf(sheetRoll);
-        if (k == K_LEFT && sheetSel > 0) { sheetSel--; sheetThumbs(); }
-        else if (k == K_RIGHT && sheetSel < sheetFrames.size() - 1) { sheetSel++; sheetThumbs(); }
-        else if (k == K_DOWN && idx > 0) openSheet(rolls.get(idx - 1));
-        else if (k == K_UP && idx >= 0 && idx < rolls.size() - 1) openSheet(rolls.get(idx + 1));
-        else if (k == K_ENTER) {
-            if (!sheetFrames.isEmpty()) openView(sheetSel);
-            else if (!Roll.DEVELOPED.equals(sheetRoll.state)) startDevelop(sheetRoll);
-        }
-        redrawKey();
+    /**
+     * Page p's thumbnails are in: drawn if it's the page on show now (the keys may have turned to it meanwhile,
+     * and a later request then finds them cached and draws nothing); in the viewer, the frame on show's stand-in
+     * and its caption's date and exposure. UI thread.
+     */
+    private void thumbsIn(int gen, int p) {
+        if (gen != photosGen || !photosReady || shots.isEmpty() || sheet.page(photoSel) != p) return;
+        if (mode == VIEW && viewShown != photoSel && viewStandInFor != photoSel) standIn(photoSel);
+        if (mode == SHEET || mode == VIEW) screen.invalidate();
     }
 
-    private boolean viewCaption, viewFill;
-    private final Runnable hideCaption = new Runnable() {
-        public void run() { viewCaption = false; screen.invalidate(); }
-    };
-
-    // The viewer keeps the frame on show and the ones either side decoded (three previews of ~1.4 MB,
-    // and the picture on show while the next loads), so LEFT and RIGHT show the next frame at once, as
-    // swiping does in Apple's Photos. Until a frame's own preview is there, its sheet thumbnail stands in
-    // (else the picture on show stays): never a black screen between frames. Bitmaps are recycled only
-    // here on the UI thread, never the one on show, and all of them when the viewer is left. UI thread.
-    private final Map<Integer, Bitmap> viewSlots = new HashMap<Integer, Bitmap>();   // sheet index -> its preview (viewBitmap among them)
+    // ---- the viewer
+    // It keeps the frame on show and the ones either side decoded (three previews of ~1.4 MB), so the wheel shows
+    // the next frame at once, as swiping does in Apple's Photos, from one roll into the next as the sheet runs. Until
+    // a frame's own preview is there its sheet thumbnail stands in, and failing that the picture on show stays while
+    // the preview is on its way: never a black screen between frames. A frame whose picture can't be had says so,
+    // never showing another frame's. Bitmaps are recycled only here on the UI thread, never the one on show, and all
+    // of them when the viewer is left (dropViewer, on every way out); a decode landing after that is dropped (viewGen).
+    private final Map<Integer, Bitmap> viewSlots = new HashMap<Integer, Bitmap>();   // index in shots -> its preview (viewBitmap among them)
     private final Set<Integer> viewQueued = new HashSet<Integer>();   // decodes on their way
+    private final Set<Integer> viewFailed = new HashSet<Integer>();   // frames whose preview couldn't be had: a note, not another frame
     private int viewShown = -1;        // the frame viewBitmap is
-    private int viewGen;               // leaving the viewer: decodes still on their way are dropped
+    private volatile int viewGen;      // leaving the viewer: decodes still on their way are dropped
     private Bitmap viewStandIn;        // the frame's thumbnail (cut to the picture's shape) while its preview loads
     private boolean viewStandInOwned;  // a cut of the thumbnail, the viewer's to recycle (the thumbnail itself is the cache's)
     private int viewStandInFor = -1;
+    private boolean viewCaption;       // the caption (and at 100% the map) for a moment
+    static final long CAPTION_MS = 2000;
+    private final Runnable hideCaption = new Runnable() {
+        public void run() { viewCaption = false; if (mode == VIEW) screen.invalidate(); }
+    };
 
-    /** What the viewer shows: the frame's preview; until it's there its thumbnail; failing that the picture on show. */
+    /** What the viewer shows: the frame's preview; until it's there its thumbnail; while it's on its way the picture on show; else nothing. */
     private Bitmap viewImage() {
-        if (viewBitmap != null && viewShown == sheetSel) return viewBitmap;
-        if (viewStandIn != null && viewStandInFor == sheetSel) return viewStandIn;
-        return viewBitmap;
+        if (viewBitmap != null && viewShown == photoSel) return viewBitmap;
+        if (viewStandIn != null && viewStandInFor == photoSel) return viewStandIn;
+        return viewQueued.contains(photoSel) ? viewBitmap : null;
     }
 
-    /** Shows a developed frame: its screen-size preview (made once, if it predates previews). */
-    private void openView(final int index) {
+    /** Shows frame 'index' full screen (its screen-size preview, made once if it predates previews), its caption for a moment. */
+    private void openView(int index) {
         mode = VIEW;
-        sheetSel = index;
-        viewCaption = true;
-        ui.removeCallbacks(hideCaption);
-        ui.postDelayed(hideCaption, 1800);
+        photoSel = index;
+        caption();
         Bitmap ready = viewSlots.get(index);
         if (ready != null) { viewBitmap = ready; viewShown = index; }
         else standIn(index);
@@ -1884,11 +1984,25 @@ public class MainActivity extends Activity {
         screen.invalidate();
     }
 
+    /** The caption (and the keys, the map at 100%) for a moment. */
+    private void caption() {
+        viewCaption = true;
+        ui.removeCallbacks(hideCaption);
+        ui.postDelayed(hideCaption, CAPTION_MS);
+    }
+
+    /** MENU in the viewer: back to the sheet on the frame on show (its page may have turned), the viewer's pictures gone. */
+    private void backToSheet() {
+        dropViewer();
+        mode = SHEET;
+        photoThumbs();
+    }
+
     /** The frame's sheet thumbnail, its letterbox cut to the shape of the picture on show (3:2 at first). */
     private void standIn(int index) {
         if (viewStandInFor == index) return;
         dropStandIn();
-        Bitmap t = index < sheetFrames.size() ? thumb(sheetFrames.get(index)) : null;
+        Bitmap t = index < shots.size() ? thumb(shots.get(index).file) : null;
         if (t == null || t.isRecycled()) return;
         float aspect = viewBitmap != null ? viewBitmap.getWidth() / (float) viewBitmap.getHeight() : 1.5f;
         int w = t.getWidth(), h = t.getHeight(), ch = Math.min(h, Math.round(w / aspect)), cw = Math.min(w, Math.round(h * aspect));
@@ -1915,50 +2029,62 @@ public class MainActivity extends Activity {
         java.util.Iterator<Map.Entry<Integer, Bitmap>> it = viewSlots.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<Integer, Bitmap> e = it.next();
-            if (Slots.kept(e.getKey(), sheetSel) || e.getValue() == viewBitmap) continue;
+            if (Slots.kept(e.getKey(), photoSel) || e.getValue() == viewBitmap) continue;
             e.getValue().recycle();
             it.remove();
         }
-        if (viewStandIn != null && (viewStandInFor != sheetSel || viewShown == sheetSel)) dropStandIn();   // its frame is up, or gone
+        if (viewStandIn != null && (viewStandInFor != photoSel || viewShown == photoSel)) dropStandIn();   // its frame is up, or gone
     }
 
     private void prefetchView(int index) {
-        for (int i : Slots.wanted(index, sheetFrames.size())) if (!viewSlots.containsKey(i) && viewQueued.add(i)) decodeView(i);
+        for (int i : Slots.wanted(index, shots.size()))
+            if (!viewSlots.containsKey(i) && !viewFailed.contains(i) && viewQueued.add(i)) decodeView(i);
     }
 
     /** Frame i's preview from the card (made first if it's missing or predates previews), on the worker. */
     private void decodeView(final int i) {
-        final Roll r = sheetRoll;
-        final File f = sheetFrames.get(i), prv = r.preview(f);
+        final Roll.Shot shot = shots.get(i);
+        final File f = shot.file, prv = shot.roll.preview(f);
         final int gen = viewGen;
         worker.execute(new Runnable() {
             public void run() {
-                if (gen != viewGen) return;   // the viewer was left
+                boolean skip = gen != viewGen || !Slots.kept(i, photoSel);   // the viewer was left, or has moved on far since
                 Bitmap d = null;
-                // only the frame on show goes at the usual priority: its neighbours are a nicety
-                boolean ahead = i != sheetSel;
-                if (ahead) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
-                try {
-                    if (Slots.kept(i, sheetSel)) d = readPreview(f, prv);   // (moved on far since: skipped)
-                } finally {
-                    if (ahead) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
+                if (!skip) {
+                    boolean ahead = i != photoSel;   // only the frame on show goes at the usual priority: its neighbours are a nicety
+                    if (ahead) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                    try {
+                        d = readPreview(f, prv);
+                    } catch (Throwable e) {   // out of memory, or a file that isn't a picture: this frame has none
+                        d = null;
+                    } finally {
+                        if (ahead) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
+                    }
                 }
                 final Bitmap b = d;
-                ui.post(new Runnable() {
-                    public void run() {
-                        if (gen == viewGen) viewQueued.remove(i);
-                        if (b == null) return;
-                        if (gen != viewGen || sheetRoll != r || !Slots.kept(i, sheetSel) || viewSlots.containsKey(i)) { b.recycle(); return; }
-                        viewSlots.put(i, b);
-                        if (i != sheetSel || mode != VIEW) return;
-                        viewBitmap = b;   // the swap: the picture before is recycled only now, if it's out of reach
-                        viewShown = i;
-                        trimView();
-                        screen.invalidate();
-                    }
-                });
+                final boolean skipped = skip;
+                ui.post(new Runnable() { public void run() { viewLanded(gen, i, b, skipped); } });
             }
         });
+    }
+
+    /** Frame i's preview is in (b), or isn't (null: it couldn't be had, or 'skipped': the viewer had moved on). UI thread. */
+    private void viewLanded(int gen, int i, Bitmap b, boolean skipped) {
+        if (gen != viewGen || mode != VIEW) { if (b != null) b.recycle(); return; }   // the viewer was left meanwhile
+        viewQueued.remove(i);
+        if (b == null) {
+            if (!skipped) viewFailed.add(i);
+            else if (Slots.kept(i, photoSel) && !viewSlots.containsKey(i) && viewQueued.add(i)) decodeView(i);   // back to it since
+            if (i == photoSel) screen.invalidate();   // its note now, rather than the picture before
+            return;
+        }
+        if (!Slots.kept(i, photoSel) || viewSlots.containsKey(i)) { b.recycle(); return; }
+        viewSlots.put(i, b);
+        if (i != photoSel) return;
+        viewBitmap = b;   // the swap: the picture before is recycled only now, if it's out of reach
+        viewShown = i;
+        trimView();
+        screen.invalidate();
     }
 
     /** A preview file decoded (read in one go: the card answers large reads far faster than many small ones). Worker thread. */
@@ -1993,36 +2119,230 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Leaving the viewer: every preview it holds is recycled (UI thread; nothing on screen holds them now). */
+    /** Leaving the viewer (for the sheet, or out of Photos): every picture it holds is recycled (UI thread; nothing draws them now). */
     private void dropViewer() {
         viewGen++;
         viewQueued.clear();
+        viewFailed.clear();
         for (Bitmap b : viewSlots.values()) if (b != viewBitmap) b.recycle();
         viewSlots.clear();
         if (viewBitmap != null) viewBitmap.recycle();
         viewBitmap = null;
         viewShown = -1;
         dropStandIn();
+        endZoom();
+        viewCaption = false;
+        ui.removeCallbacks(hideCaption);
     }
 
-    private void viewKey(int k) {
-        if (k == K_LEFT && sheetSel > 0) { openView(sheetSel - 1); sheetThumbs(); }
-        else if (k == K_RIGHT && sheetSel < sheetFrames.size() - 1) { openView(sheetSel + 1); sheetThumbs(); }
-        else if (k == K_ENTER) {   // fit the whole photo, or fill the screen
-            viewFill = !viewFill;
-            viewCaption = true;
-            ui.removeCallbacks(hideCaption);
-            ui.postDelayed(hideCaption, 1500);
+    /**
+     * The viewer: the wheel, LEFT and RIGHT the next and previous frame (across rolls, as the sheet runs), centre
+     * 100% and back, UP the caption again. At 100% the arrows move the view and the wheel still steps frames.
+     */
+    private void viewKey(int k, boolean wheel) {
+        if (shots.isEmpty()) return;
+        if (zoom && !wheel && k != K_ENTER) { zoomMove(k); return; }
+        if (k == K_LEFT || k == K_RIGHT) {
+            int to = sheet.step(photoSel, k == K_RIGHT ? 1 : -1);
+            if (to != photoSel) { endZoom(); openView(to); photoThumbs(); }   // the next frame fitted, as it arrives
+        } else if (k == K_ENTER) {
+            if (zoom) { endZoom(); caption(); } else zoomIn();
+        } else if (k == K_UP) {
+            caption();
         }
         screen.invalidate();
     }
 
-    /** The EXIF thumbnail (developed files carry one with the look applied); cached. Worker thread. False if it was already. */
+    // ---- the viewer at 100%
+    // Centre shows the middle of the developed photo a photo pixel to a layout pixel: FilmCore.preview's crop, which
+    // decodes only that part (and the image core keeps it, for a return to the middle). The arrows then move the view
+    // half a screen at a time, never past the photo's edge, through a Loupe (Android's region decoder: the photo read
+    // through once, on the first move). The picture on show stays until the next lands, and the map says at once
+    // where it's going. ~1.6 MB a crop: the one on show, and one landing.
+    private boolean zoom;              // at 100% (asked for: its picture may be on its way)
+    private int zoomDx, zoomDy;        // the view's centre from the photo's centre, in photo pixels
+    private int zoomPhotoW, zoomPhotoH;   // the photo's size (0 until its first crop says)
+    private Bitmap zoomBitmap;         // the crop on show
+    private int zoomShownDx, zoomShownDy;   // where it is
+    private boolean zoomPending;       // a crop on its way
+    private boolean zoomFixed;         // this photo can't be moved at 100% (its Loupe failed): the middle only
+    private volatile int zoomGen;      // a newer request, or 100% left: a crop on its way is dropped
+    private boolean loupeUsed;         // a Loupe may be open: closed on the worker when 100% ends
+    private Loupe loupe;               // worker thread only
+
+    /** The crop's size: the screen's, a photo pixel to a layout pixel (853 x 480 on the A5100's panel). */
+    private int zoomViewW() { return (int) Math.ceil(logicalWidth); }
+    static final int ZOOM_H = 480;
+
+    private void zoomIn() {
+        zoom = true;
+        zoomDx = zoomDy = zoomShownDx = zoomShownDy = 0;
+        zoomPhotoW = zoomPhotoH = 0;
+        zoomFixed = false;
+        caption();   // the keys at 100%, and the map once the photo's size is known
+        requestZoom();
+    }
+
+    /** The arrows at 100%: half a screen that way, as far as the photo's edge. */
+    private void zoomMove(int k) {
+        if (zoomPhotoW <= 0 || zoomFixed) return;   // its size isn't known yet (the middle is on its way), or it can't move
+        int w = zoomViewW(), dx = zoomDx, dy = zoomDy;
+        if (k == K_LEFT || k == K_RIGHT) dx = Photos.pan(dx, k == K_RIGHT ? 1 : -1, w / 2, w, zoomPhotoW);
+        else if (k == K_UP || k == K_DOWN) dy = Photos.pan(dy, k == K_DOWN ? 1 : -1, ZOOM_H / 2, ZOOM_H, zoomPhotoH);
+        caption();
+        if (dx != zoomDx || dy != zoomDy) {   // (at the edge already: only the map, to say so)
+            zoomDx = dx;
+            zoomDy = dy;
+            requestZoom();
+        }
+        screen.invalidate();
+    }
+
+    /** The crop for where the view is now, decoded on the worker; only the newest asked for is decoded. */
+    private void requestZoom() {
+        final int gen = ++zoomGen;
+        zoomPending = true;
+        final File f = shots.get(photoSel).file;
+        final int dx = zoomDx, dy = zoomDy, w = zoomViewW();
+        if (dx != 0 || dy != 0) loupeUsed = true;
+        worker.execute(new Runnable() {
+            public void run() {
+                if (gen != zoomGen) return;   // asked again since: that one goes instead
+                final int[] size = new int[2];
+                Bitmap b;
+                try {
+                    b = crop(f, dx, dy, w, ZOOM_H, size);
+                    if (b == null) devLog("Photos: " + f.getName() + " at 100%: " + (dx == 0 && dy == 0 ? FilmCore.lastError() : "no picture"));
+                } catch (Throwable e) {   // no memory, no region decoder on this camera, a photo it can't read: stays as it is
+                    b = null;
+                    devLog("Photos: " + f.getName() + " at 100%: " + Probe.why(e));
+                }
+                final Bitmap made = b;
+                ui.post(new Runnable() { public void run() { zoomLanded(gen, made, dx, dy, size[0], size[1]); } });
+            }
+        });
+    }
+
+    /**
+     * The developed photo at 100%: a w x h view centred (dx, dy) from its middle; size gets the photo's size. The
+     * middle through the image core's crop (no film: the photo as it developed), anywhere else through the Loupe.
+     * Worker thread.
+     */
+    private Bitmap crop(File f, int dx, int dy, int w, int h, int[] size) throws java.io.IOException {
+        if (dx == 0 && dy == 0) {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;   // its size, from its header
+            BitmapFactory.decodeFile(f.getPath(), o);
+            size[0] = o.outWidth;
+            size[1] = o.outHeight;
+            int[] px = new int[w * h], got = new int[2];
+            if (FilmCore.preview(f.getPath(), null, new int[FilmCore.COUNT], FilmCore.PREVIEW_CROP, px, w, h, got) != 0) return null;
+            return Bitmap.createBitmap(px, got[0], got[1], Bitmap.Config.ARGB_8888);
+        }
+        if (loupe == null || !loupe.file.equals(f)) {
+            closeLoupe();
+            long t0 = SystemClock.uptimeMillis();
+            loupe = new Loupe(f);
+            // what the first move at 100% costs on the camera (the region decoder reads the whole photo through once)
+            devLog("Photos: " + f.getName() + " opened for 100% in " + (SystemClock.uptimeMillis() - t0) + " ms");
+        }
+        int pw = loupe.width(), ph = loupe.height(), cw = Math.min(w, pw), ch = Math.min(h, ph);
+        size[0] = pw;
+        size[1] = ph;
+        int x = Math.max(0, Math.min(pw - cw, pw / 2 + dx - cw / 2)), y = Math.max(0, Math.min(ph - ch, ph / 2 + dy - ch / 2));
+        return loupe.part(x, y, cw, ch);
+    }
+
+    /** Worker thread. */
+    private void closeLoupe() {
+        if (loupe == null) return;
+        loupe.close();
+        loupe = null;
+    }
+
+    /** A crop is in (b, of the view at dx, dy), or isn't (null). UI thread. */
+    private void zoomLanded(int gen, Bitmap b, int dx, int dy, int photoW, int photoH) {
+        if (gen != zoomGen || mode != VIEW || !zoom) { if (b != null) b.recycle(); return; }   // moved on, or 100% left
+        zoomPending = false;
+        if (photoW > 0 && photoH > 0) { zoomPhotoW = photoW; zoomPhotoH = photoH; }
+        if (b == null) {
+            if (dx == 0 && dy == 0 && zoomBitmap == null) {   // not even its middle: back to the whole photo
+                endZoom();
+                toast("This photo can't be shown at 100%");
+            } else {   // it can't move: the view stays where its picture is
+                zoomFixed = true;
+                zoomDx = zoomShownDx;
+                zoomDy = zoomShownDy;
+                toast("Only the middle of this photo at 100%");
+            }
+            screen.invalidate();
+            return;
+        }
+        if (zoomPhotoW <= 0 || zoomPhotoH <= 0) zoomFixed = true;   // its size unknown (an odd header): the middle only
+        Bitmap old = zoomBitmap;
+        zoomBitmap = b;
+        zoomShownDx = dx;
+        zoomShownDy = dy;
+        if (old != null && old != b) old.recycle();   // the new crop is what's drawn from now on
+        caption();   // the map a moment longer, now it's there
+        screen.invalidate();
+    }
+
+    /** Out of 100%: its picture recycled (UI thread; the next drawing is the fitted one), its open photo closed on the worker. */
+    private void endZoom() {
+        zoomGen++;
+        zoom = false;
+        zoomPending = false;
+        zoomFixed = false;
+        zoomDx = zoomDy = zoomShownDx = zoomShownDy = 0;
+        zoomPhotoW = zoomPhotoH = 0;
+        if (zoomBitmap != null) { zoomBitmap.recycle(); zoomBitmap = null; }
+        if (loupeUsed) {
+            loupeUsed = false;
+            try {
+                worker.execute(new Runnable() { public void run() { closeLoupe(); } });
+            } catch (java.util.concurrent.RejectedExecutionException e) {
+                // Latent closing down: it goes with the process
+            }
+        }
+    }
+
+    /** At 100%: where the view lies in the photo, for the map ({x, y, w, h} 0..1 and the photo's aspect); null until the photo's size is known. */
+    private float[] zoomMap() {
+        if (zoomPhotoW <= 0 || zoomPhotoH <= 0) return null;
+        int w = Math.min(zoomViewW(), zoomPhotoW), h = Math.min(ZOOM_H, zoomPhotoH);
+        float x = Math.max(0, Math.min(zoomPhotoW - w, zoomPhotoW / 2 + zoomDx - w / 2)), y = Math.max(0, Math.min(zoomPhotoH - h, zoomPhotoH / 2 + zoomDy - h / 2));
+        return new float[] { x / zoomPhotoW, y / zoomPhotoH, w / (float) zoomPhotoW, h / (float) zoomPhotoH, zoomPhotoW / (float) zoomPhotoH };
+    }
+
+    /** The viewer into s: the picture, or a note when there's none; the caption; at 100%, the map. */
+    private void viewState(UiState s) {
+        boolean crop = zoom && zoomBitmap != null;
+        Bitmap img = crop ? zoomBitmap : viewImage();
+        s.viewImage = img;
+        s.viewCrop = crop;
+        s.viewNote = img != null ? "" : viewFailed.contains(photoSel) ? "This photo can't be shown" : "Developing preview\u2026";
+        s.viewCaption = viewCaption;
+        s.viewZoom = zoom;
+        s.viewMoves = zoom && !zoomFixed;
+        if (zoom && (viewCaption || zoomPending)) {
+            s.viewMap = zoomMap();
+            s.viewMapPending = zoomPending;
+        }
+    }
+
+    /**
+     * The EXIF thumbnail (developed files carry one with the look applied), and from the same read what Photos says
+     * of the photo: when it was taken and its exposure. Cached. Worker thread. False if it was already.
+     */
     private boolean loadThumb(File f) {
         synchronized (thumbs) { if (thumbs.containsKey(f.getPath())) return false; }
         Bitmap b = null;
+        String[] note = NO_NOTE;
         try {
-            byte[] data = new ExifInterface(f.getPath()).getThumbnail();
+            ExifInterface x = new ExifInterface(f.getPath());
+            try { note = noteOf(x); } catch (Throwable e) { /* odd EXIF: nothing to say about it */ }
+            byte[] data = x.getThumbnail();
             if (data != null) b = BitmapFactory.decodeByteArray(data, 0, data.length);
         } catch (Exception e) {
             // fall back to a heavily subsampled decode below
@@ -2032,8 +2352,30 @@ public class MainActivity extends Activity {
             o.inSampleSize = 32;
             b = BitmapFactory.decodeFile(f.getPath(), o);
         }
-        synchronized (thumbs) { thumbs.put(f.getPath(), b); }
+        synchronized (thumbs) {
+            thumbs.put(f.getPath(), b);
+            notes.put(f.getPath(), note);
+        }
         return true;
+    }
+
+    private static final String[] NO_NOTE = { "", "" };
+
+    /**
+     * {when it was taken, its exposure} from EXIF, by the tags' own names (API 10's ExifInterface has constants for
+     * few of them; one it doesn't read gives null, and says nothing).
+     */
+    private static String[] noteOf(ExifInterface x) {
+        String when = Photos.date(x.getAttribute("DateTimeOriginal"));
+        if (when.length() == 0) when = Photos.date(x.getAttribute("DateTime"));
+        return new String[] { when, Photos.exposure(x.getAttribute("ExposureTime"), x.getAttribute("FNumber"), x.getAttribute("ISOSpeedRatings")) };
+    }
+
+    private String[] note(File f) {
+        synchronized (thumbs) {
+            String[] n = notes.get(f.getPath());
+            return n != null ? n : NO_NOTE;
+        }
     }
 
     private Bitmap thumb(File f) {
@@ -2088,7 +2430,7 @@ public class MainActivity extends Activity {
 
     private String modeName() {
         switch (mode) {
-            case BACK: return "camera back"; case LOAD: return "Load film"; case DARKROOM: return "darkroom"; case SHEET: return "contact sheet";
+            case BACK: return "camera back"; case LOAD: return "Load film"; case DARKROOM: return "darkroom"; case SHEET: return "Photos";
             case VIEW: return "viewer"; case SETTINGS: return "menu"; default: return "viewfinder";
         }
     }
@@ -2388,6 +2730,7 @@ public class MainActivity extends Activity {
         }
         // route every key here, so no focused view swallows the camera's buttons
         boolean r = down ? onKeyDown(e.getKeyCode(), e) : onKeyUp(e.getKeyCode(), e);
+        photosLeft();   // the shutter, say, took it out of Photos: what Photos held goes at once
         if (first) applyLight();   // a peek, or a press that changed the screen
         return r;
     }
@@ -2440,33 +2783,7 @@ public class MainActivity extends Activity {
         return playScan;
     }
 
-    private int sheetFrom = -1;        // the screen the contact sheet was opened from (MENU and Playback go back there); -1 home
     private final Set<String> unmapped = new HashSet<String>();   // buttons pressed this visit that Latent doesn't use
-
-    /**
-     * Playback, as on the camera itself: the roll's contact sheet (the loaded roll's once it has frames, else the
-     * newest roll with any), and pressed again, back where it was. Only from the camera back, Choose film and the
-     * menu: never in the viewfinder or the darkroom.
-     */
-    private void playback() {
-        if (!ready) return;
-        if (mode == SHEET || mode == VIEW) { leaveSheet(); screen.invalidate(); return; }
-        if (mode != BACK && mode != LOAD && mode != SETTINGS) return;
-        if (mode == LOAD && loading) return;
-        Roll r = current != null && exposed > 0 ? current : firstRollWithFrames();
-        if (r == null) { toast("No rolls yet"); return; }
-        int from = mode;
-        openSheet(r);
-        sheetFrom = from;
-    }
-
-    /** Off the contact sheet: back to the menu or Choose film when it was opened there, else home. */
-    private void leaveSheet() {
-        if (sheetFrom == SETTINGS) mode = SETTINGS;
-        else if (sheetFrom == LOAD && current == null) openLoad();
-        else goHome();
-        sheetFrom = -1;
-    }
 
     /** A button Latent doesn't use: noted (scan code / key code, Sony's name), for one line a visit in DEVELOP.TXT. */
     private void unmapped(int keyCode, int sc) {
@@ -2490,8 +2807,11 @@ public class MainActivity extends Activity {
         if (sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS) s1Held = true;
         if (mode == PHOTO && coachUntil > 0) endCoach();   // the first key: the keys are learnt
         if (mode == PHOTO && vf != null) { vfKey(keyCode, e, true); return true; }
-        if (sc >= 0 && sc == playScan()) {   // the camera's Playback button: the roll's contact sheet, and back
-            if (e.getRepeatCount() == 0) playback();
+        if (sc >= 0 && sc == playScan()) {   // the camera's Playback button: Photos, and back
+            if (e.getRepeatCount() == 0) {
+                keyAt = lastPressAt = SystemClock.uptimeMillis();   // a press like any other: a develop waiting for a pause waits on
+                playback();
+            }
             return true;
         }
         if (shutterKey(sc, keyCode) && e.getRepeatCount() == 0 && mode == BACK && ready && current != null && !wantsDeveloping(current)
@@ -2510,11 +2830,12 @@ public class MainActivity extends Activity {
         if (k == 0 || (k == K_ENTER && e.getRepeatCount() > 0)) return true;
         if (e.getRepeatCount() == 0) keyAt = SystemClock.uptimeMillis();
         lastPressAt = SystemClock.uptimeMillis();
+        boolean wheel = sc == SC_WHEEL_CW || sc == SC_WHEEL_CCW || sc == SC_DIAL_CW || sc == SC_DIAL_CCW;
         switch (mode) {
             case BACK: backKey(k); break;
             case LOAD: loadKey(k); break;
-            case SHEET: sheetKey(k); break;
-            case VIEW: viewKey(k); break;
+            case SHEET: photosKey(k); break;
+            case VIEW: viewKey(k, wheel); break;
             case SETTINGS: settingsKey(k); break;
             default: break;   // darkroom: only MENU (pause)
         }
@@ -2547,8 +2868,8 @@ public class MainActivity extends Activity {
             case LOAD: if (loading) break; if (current != null) mode = BACK; else openSettings(); break;   // MENU: back to the roll, or the menu
             case SETTINGS: goHome(); break;
             case DARKROOM: if (!preparing) { paused = true; toast("Pausing after this frame"); } break;
-            case SHEET: leaveSheet(); break;
-            case VIEW: mode = SHEET; dropViewer(); sheetThumbs(); break;   // its previews go; the sheet's page may have moved
+            case SHEET: leavePhotos(); break;
+            case VIEW: backToSheet(); break;
             default: goHome(); break;
         }
         screen.invalidate();
@@ -2669,22 +2990,21 @@ public class MainActivity extends Activity {
             }
             case SHEET:
             case VIEW: {
-                Stock st = sheetRoll == null ? null : Stock.byId(stocks, sheetRoll.stock);
-                if (sheetRoll != null) {
-                    s.film = film(st);
-                    if (s.film == null) { s.film = new UiState.Film(); s.film.title = sheetRoll.stock; s.film.accent = Ui.INK; }
-                    s.rollNumber = sheetRoll.number;
-                    s.sheetUndeveloped = !Roll.DEVELOPED.equals(sheetRoll.state);
-                    // the page on show only (Ui.sheet draws no other): the cache then keeps what's drawn freshest
-                    int first = Math.max(0, sheetSel) / SHEET_PAGE * SHEET_PAGE;
-                    for (int i = 0; i < sheetFrames.size(); i++) s.thumbs.add(i >= first && i < first + SHEET_PAGE ? thumb(sheetFrames.get(i)) : null);
-                }
-                s.sheetSel = sheetSel;
-                s.sheetTotal = sheetFrames.size();
-                s.filingLeft = filingLeft;
-                s.viewImage = viewImage();
-                s.viewCaption = viewCaption;
-                s.viewFill = viewFill;
+                s.photosReady = photosReady;
+                if (!photosReady || shots.isEmpty()) break;
+                int sel = Math.min(photoSel, shots.size() - 1);
+                Roll.Shot shot = shots.get(sel);
+                s.film = shotFilm(shot);   // the chosen frame's: its roll, which frame, when it was taken and how
+                s.rollNumber = shot.roll.number;
+                s.frameNumber = shot.number;
+                s.frameOf = shot.of;
+                String[] n = note(shot.file);
+                s.photoDate = n[0];
+                s.photoExposure = n[1];
+                s.filingLeft = filingLeft > 0 && shot.roll.dir.equals(filingDir) ? filingLeft : 0;
+                // the page on show only (Ui draws no other): the cache then keeps what's drawn freshest
+                if (mode == SHEET) Photos.page(s, sheet, sel, sheetFrames);
+                else viewState(s);
                 break;
             }
             default:
@@ -2777,6 +3097,7 @@ public class MainActivity extends Activity {
             }
             windowDrawn = mode == PHOTO && s.vfPart == UiState.PART_WINDOW ? Ui.windowKey(s) : null;
             if (pictureOnScreen && mode != PHOTO) ui.post(dropSurface);   // it's on top: off the screen, away from the viewfinder
+            photosLeft();   // out of Photos with no key (the darkroom, a shoot that waited): this drawing doesn't read what it held
             Ui.draw(gfx, s);
             // a key's partial redraw (Ui.dirty): if something else changed since the last drawing, all of it next
             if (!whole && drawnState != null && Ui.keyPartial(s.mode) && Ui.dirty(drawnState, s) == null) screen.invalidate();
