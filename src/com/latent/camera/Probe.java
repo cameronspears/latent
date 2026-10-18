@@ -261,6 +261,29 @@ final class Probe {
         return out;
     }
 
+    /**
+     * Every photo number in the catalogue at uri (folder 100, file 4696: 1004696), asked for those two columns
+     * only: no paths, no rows kept. Throws if the catalogue won't answer that (the caller then asks as query does).
+     */
+    static int[] numbers(ContentResolver cr, Uri uri) {
+        Cursor c = cr.query(uri, new String[] { "dcf_folder_number", "dcf_file_number" }, null, null, null);
+        if (c == null) throw new IllegalStateException("no answer for folder and number alone");
+        try {
+            int f = c.getColumnIndexOrThrow("dcf_folder_number"), n = c.getColumnIndexOrThrow("dcf_file_number");
+            int[] out = new int[64];
+            int k = 0;
+            while (c.moveToNext()) {
+                if (k == out.length) { int[] more = new int[k * 2]; System.arraycopy(out, 0, more, 0, k); out = more; }
+                out[k++] = c.getInt(f) * 10000 + c.getInt(n);
+            }
+            int[] exact = new int[k];
+            System.arraycopy(out, 0, exact, 0, k);
+            return exact;
+        } finally {
+            c.close();
+        }
+    }
+
     /** Every photo number in the card's catalogue (folder 100, file 4696: 1004696), or null if it can't be read. */
     static java.util.Set<Integer> catalogued(ContentResolver cr) {
         try {
