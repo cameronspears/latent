@@ -66,7 +66,8 @@ public class JniTest {
         int rc = FilmCore.frame(c, jpeg, jpeg.length, lut, p, RGB | FilmCore.F_HIST, 1, a, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
         int sum = 0, mean = 0;
         for (int i = 0; i < 64; i++) { sum += info[5 + i]; mean += i * info[5 + i]; }
-        check(rc == 0 && info[0] == 320 && info[1] > 200 && sum == ((info[0] + 1) / 2) * ((info[1] + 1) / 2),
+        // fitted in 320x240: 320 across, as tall as the photo's shape makes it (3:2 about 213, 16:9 about 180: PEOPLE.JPG)
+        check(rc == 0 && info[0] == 320 && info[1] >= 180 && info[1] <= 240 && sum == ((info[0] + 1) / 2) * ((info[1] + 1) / 2),
                 "composed: " + info[0] + "x" + info[1] + " frame, histogram of every other pixel of every other row " + FilmCore.lastError());
         {   // the histogram is of the picture with the look: a film's highlight setting moves it
             int[] hp = p.clone(), info3 = new int[FilmCore.FI_COUNT];
@@ -280,7 +281,8 @@ public class JniTest {
 
         // the decoded photo kept between previews: the hero's size and the samples' in turn, then a 100% view
         int[] hero = new int[720 * 480], hero2 = new int[720 * 480], sample = new int[w * h];
-        check(FilmCore.preview(photo, films[1], p, FilmCore.PREVIEW_FIT, hero, 720, 480, size) == 0 && size[1] == 480, "the hero's size: " + size[0] + "x" + size[1]);
+        // fitted: one side meets the box (a 3:2 photo is 720x480, a 16:9 one 720x407)
+        check(FilmCore.preview(photo, films[1], p, FilmCore.PREVIEW_FIT, hero, 720, 480, size) == 0 && size[0] <= 720 && size[1] <= 480 && (size[0] == 720 || size[1] == 480), "the hero's size: " + size[0] + "x" + size[1]);
         FilmCore.preview(photo, films[2], p, FilmCore.PREVIEW_FIT, sample, w, h, size);
         FilmCore.preview(photo, films[1], p, FilmCore.PREVIEW_FIT, hero2, 720, 480, size);
         check(java.util.Arrays.equals(hero, hero2) && java.util.Arrays.equals(sample, fresh[2]), "hero and samples in turn, each from the kept decode: the same pictures");
