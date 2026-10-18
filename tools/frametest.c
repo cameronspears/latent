@@ -131,13 +131,14 @@ static unsigned int *viewfinder_overlay(void) {
 static void test_look_kernels(frame_jpg *fr, int nfr) {
     static const int TONES[3][2] = { { 0, 0 }, { 3, -2 }, { -4, 4 } };
     fl_frame_ctx *c = fl_frame_new();
-    int i, f, t, exact = 1, worst = 0, tone_exact = 1;
+    int i, f, t, worst8 = 0, worst = 0, tone_exact = 1;
     long diffs = 0, samples = 0;
     char err[256];
     for (i = 0; i < nfr; i++) for (f = 0; f <= NFILMS; f++) for (t = 0; t < 3; t++) {
-        int params[FL_PARAM_COUNT], n, k;
+        int params[FL_PARAM_COUNT], n, k, nn;
         unsigned int *ref, *now, *ref_rb;
         unsigned char *ref_g;
+        live_film F8;
         memcpy(params, PARAMS, sizeof params);
         params[FL_PARAM_HIGHLIGHT] = TONES[t][0]; params[FL_PARAM_SHADOW] = TONES[t][1];
         if (!frame_film(c, f < NFILMS ? FILMS[f] : NULL, params, err, sizeof err) || frame_decode(c, fr[i].jpg, fr[i].len, 320, 240, 1, err, sizeof err)) {
@@ -149,18 +150,30 @@ static void test_look_kernels(frame_jpg *fr, int nfr) {
         ref = (unsigned int *)malloc(sizeof(unsigned int) * n); now = (unsigned int *)malloc(sizeof(unsigned int) * n);
         ref_look_pack(&c->film.L, c->rgb, n, ref_rb, ref_g);
         for (k = 0; k < n; k++) ref[k] = ref_rb[k] | (unsigned int)ref_g[k] << 8;
-        if (!c->film.F.n) {
-            look_tone(&c->film.F, c->rgb, n, now);
-            if (memcmp(now, ref, sizeof(unsigned int) * n)) tone_exact = 0;
-        } else {
-            look_live(&c->film.F, c->rgb, n, now);
-            if (memcmp(now, ref, sizeof(unsigned int) * n)) exact = 0;
-            if (c->film.F.n == 17) look_packed17(&c->film.F, c->rgb, n, now); else look_packed(&c->film.F, c->rgb, n, now);
+        look_frame(&c->film.F, c->rgb, n, now);   /* as the composer runs it: in the dither's units */
+        for (k = 0; k < n; k++) {
+            int ch;
+            for (ch = 0; ch < 24; ch += 8) {
+                int d = abs((int)(now[k] >> ch & 255) - dd((int)(ref[k] >> ch & 255)));
+                if (d > worst) worst = d;
+                if (!c->film.F.n && d) tone_exact = 0;
+            }
+        }
+        if (c->film.F.n) {   /* the kernel's own arithmetic: the same film with plain 8-bit nodes */
+            F8 = c->film.F;
+            nn = F8.n * F8.n * F8.n;
+            F8.nodes = (unsigned int *)malloc(sizeof(unsigned int) * nn);
+            for (k = 0; k < nn; k++) {
+                const short *q = c->film.L.data + k * 3;
+                F8.nodes[k] = (unsigned int)((q[0] + 8) >> 4) << 16 | (unsigned int)((q[1] + 8) >> 4) << 8 | (unsigned int)((q[2] + 8) >> 4);
+            }
+            look_frame(&F8, c->rgb, n, now);
+            free(F8.nodes);
             for (k = 0; k < n; k++) {
                 int ch;
                 for (ch = 0; ch < 24; ch += 8) {
                     int d = abs((int)(now[k] >> ch & 255) - (int)(ref[k] >> ch & 255));
-                    if (d > worst) worst = d;
+                    if (d > worst8) worst8 = d;
                     diffs += d;
                     samples++;
                 }
@@ -168,10 +181,34 @@ static void test_look_kernels(frame_jpg *fr, int nfr) {
         }
         free(ref_rb); free(ref_g); free(ref); free(now);
     }
-    check(exact, "the look kernel (8.4 nodes): exactly v0.44.1's, %d frames x %d films x 3 tone settings", nfr, NFILMS);
-    check(tone_exact, "no film, the tone curve alone: exactly v0.44.1's");
-    check(worst <= 1, "the look kernel on 8-bit nodes: within %d/255 of v0.44.1's (mean %.3f/255)", worst, (double)diffs / (samples ? samples : 1));
+    check(tone_exact, "no film, the tone curve alone: exactly v0.44.1's, in the dither's units");
+    check(worst8 <= 1, "the look kernel on 8-bit nodes: within %d/255 of v0.44.1's 8.4 nodes (mean %.3f/255), %d frames x %d films x 3 tone settings",
+          worst8, (double)diffs / (samples ? samples : 1), nfr, NFILMS);
+    check(worst <= 2, "and in the dither's units (nodes there before the lookup): within %d sixteenths of a level of v0.44.1's", worst);
     fl_frame_free(c);
+}
+
+/* ---- the fused row's lanes never carry: every alpha, colour, row weight and threshold, the picture at its
+ * extremes (0 and 240 in the dither's units), through the composer's own arithmetic */
+static void test_no_carry(void) {
+    unsigned int a, col, uy, t, worst = 0, bad = 0;
+    for (a = 0; a < 256; a++) for (col = 0; col < 256; col++) {
+        unsigned int rb, gia, ia, base;
+        ovl_encode(a << 24 | col << 16 | col << 8 | col, &rb, &gia);
+        ia = gia >> 16; base = gia & 0xFFFF;
+        if ((rb >> 16) != base || (rb & 0xFFFF) != base) bad++;
+        for (uy = 0; uy <= 256; uy++) {
+            unsigned int u, w, h0, h1;
+            fade_weights(uy, ia, &u, &w);
+            if (u + w != ia) bad++;
+            for (h0 = 0; h0 <= 240; h0 += 240) for (h1 = 0; h1 <= 240; h1 += 240) for (t = 0; t < 16; t++) {
+                unsigned int lane = h0 * u + h1 * w + base + t * 256 + round_for(ia);
+                if (lane > worst) worst = lane;
+                if (lane > 65535) bad++;
+            }
+        }
+    }
+    check(!bad && worst <= 65535, "the fused row's lanes: at most %u of 65535, over every alpha, colour, row weight and threshold", worst);
 }
 
 /* ---- the composer against v0.44.1's, every frame through every film */
@@ -193,6 +230,7 @@ static void test_versus_reference(frame_jpg *fr, int nfr) {
                 continue;
             }
             versus(a, b, OW * OH, &same, &maxd, &mean);
+            if (getenv("FT_VERBOSE")) printf("    %s %d %d: %.1f%% %+.4f\n", fr[i].name, f, o, same * 100, mean);
             if (same < worst_same) worst_same = same;
             if (maxd > worst_max) worst_max = maxd;
             if (fabs(mean) > fabs(worst_mean)) worst_mean = mean;
@@ -284,6 +322,7 @@ int main(int argc, char **argv) {
         else fprintf(stderr, "cannot read %s\n", argv[i]);
     }
     if (!nfr) { fprintf(stderr, "usage: frametest [--bench] [--render DIR] IN.JPG...\n"); return 2; }
+    test_no_carry();
     test_look_kernels(fr, nfr);
     test_versus_reference(fr, nfr);
     if (do_bench) bench(fr, nfr);

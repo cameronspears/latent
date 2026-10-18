@@ -204,6 +204,21 @@ public class JniTest {
             check(gap && type && faded && rest, "a fade row: a clear gap shows the picture exactly, type exactly its colour, the rest faded ("
                     + gap + type + faded + rest + ")");
         }
+        {   // type in colours off the 4-bit grid (v0.44's ink, an amber) is solid: one 4-bit colour across, on a fade and off it
+            int[] tv = new int[ow * oh];
+            for (int y = 0; y < 64; y++) for (int x = 0; x < ow; x++) tv[y * ow + x] = 0x99000000;
+            for (int y = 20; y < 44; y++) for (int x = 40; x < 140; x++) tv[y * ow + x] = 0xFFF4F1EA;
+            for (int y = 200; y < 230; y++) for (int x = 300; x < 400; x++) tv[y * ow + x] = 0xFFFFAA33;
+            FilmCore.setOverlay(tv, ow, oh);
+            short[] t1 = new short[ow * oh];
+            FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL, 5, t1, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
+            boolean inkSolid = true, amberSolid = true;
+            for (int y = 20; y < 44; y++) for (int x = 40; x < 140; x++) if (t1[y * ow + x] != t1[20 * ow + 40]) inkSolid = false;
+            for (int y = 200; y < 230; y++) for (int x = 300; x < 400; x++) if (t1[y * ow + x] != t1[200 * ow + 300]) amberSolid = false;
+            int ink = t1[20 * ow + 40] & 0xFFFF, amber = t1[200 * ow + 300] & 0xFFFF;
+            check(inkSolid && amberSolid && ink == 0xEEEF && amber == 0xFA3F, "opaque type off the 4-bit grid: solid, the nearest 4-bit colour (ink "
+                    + Integer.toHexString(ink) + ", amber " + Integer.toHexString(amber) + ")");
+        }
         {   // against v0.44.1's composer (built into the host library, tools/frame_ref.h): the same frame, the same dither
             byte[] small = cameraSize(jpeg);
             int[][] ovls = { null, ov, fadeRow(ow, oh) };
