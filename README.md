@@ -71,9 +71,15 @@ card (and the AF light, when it's on). The foot of each bar names the key beside
   own exposure compensation, so shooting mode has it too.
 - **Centre** ("Look") turns the film look off for this visit: the camera's own live view shows,
   marked LOOK OFF. Press it again to bring the look back.
-- **MENU** ("Back") goes back to the camera back. Once you've shot this visit it says "Develop":
-  Latent restarts and develops the new pictures in the darkroom. (Once Latent has opened the
-  camera, the image memory the darkroom needs comes back only when Latent closes.)
+- **MENU** ("Back") goes back to the camera back. On an ∞ roll once you've shot this visit, or on a
+  roll you've just shot to its last frame, it says "Develop": Latent restarts and develops the new
+  pictures in the darkroom. Part-way through a roll of 12, 24 or 36 it still says "Back" after a
+  shot: Latent restarts (a few seconds on a red screen) and shows the camera back, and those frames
+  develop once the roll is finished, or with Develop now. (A roll waiting to develop, below,
+  develops then.) Once Latent has opened the camera, the image memory the darkroom needs comes back
+  only when Latent closes. With nothing shot, MENU keeps the camera open behind the camera back, so
+  the viewfinder is back at once, on whichever roll is loaded by then: after Change film, the new
+  one's film and count.
 
 The first time you open the viewfinder, a line at the foot shows these keys for a few seconds. If
 the camera falls behind, Latent gives it back its own live view ("Film look paused: the camera is
@@ -91,19 +97,32 @@ redraws it once a second. Any key, or anything moving, and it's back to full rat
 - The darkroom shows each frame, the time left and the battery.
 - The screen goes down to a red safelight at about 5% brightness. Turn the wheel or press an arrow
   to brighten it for 5 seconds.
-- MENU pauses after the frame in hand; a half-press pauses it and goes to shoot.
+- MENU pauses after the frame in hand. A roll of 12, 24 or 36 in the camera then carries on with
+  the centre button on the camera back (or by itself the next time you open Latent). A roll
+  developing by itself (an ∞ roll's new photos, a roll changed part-way, below) waits for the next
+  time you open Latent: "Paused. It carries on the next time you open Latent."
+- A half-press pauses it after the frame in hand and goes to shoot.
 - If nobody touched the camera while it developed, the screen stays dim when the roll is done. The
   first press only wakes it.
 - At 5% battery or less (and not on a charger) no new frame starts: "Battery low. This roll is safe;
-  charge to carry on." Once it's charged, the centre button on the camera back carries on where it
-  stopped.
+  charge to carry on." Once it's charged, open Latent again and the roll carries on where it
+  stopped: a roll of 12, 24 or 36 at once (or with the centre button on the camera back, if Latent
+  stayed open), a roll developing by itself once the buttons have been left alone for 4 seconds.
+  On an ∞ roll the centre button shoots.
 - When a roll of 12, 24 or 36 is done, Photos opens on it.
-- **An ∞ roll never ends:** each time you come back, the photos shot since develop in the
-  background (once the buttons have been left alone for 4 seconds), and the newest ones show under
-  the counter.
+- **An ∞ roll never ends:** each time you come back, the photos shot since develop in the red
+  darkroom. It opens by itself once the buttons have been left alone for 4 seconds on the camera
+  back, Choose film or the menu, never over Photos (it waits until you leave them). When they're
+  done you're back on the camera back, with the newest ones under the counter.
+- **A roll changed part-way** (Change film on a roll of 12, 24 or 36) keeps the frames shot so
+  far, and they develop the same way: in the red darkroom once the buttons have been left alone
+  for 4 seconds, never over Photos. Photos then opens on that roll.
+- A develop after you've opened the viewfinder starts with a restart of Latent (a few seconds on a
+  red screen): the camera's image memory comes back only then.
 
-Looks are always previewed on a photo Latent shot neutral, never on one with your own style or a look
-already on it.
+Looks are previewed on the newest photo Latent shot neutral, so they start from the same plain
+picture they're developed from, never one with your own style. Until Latent has shot one (a fresh
+card, say), they're shown on your newest photo as it is.
 
 **Photos.** Every developed frame, newest first, on one contact sheet grouped by roll: each roll
 starts a row of its own, with its canister and number in the margin. Open it from the menu, with
@@ -113,19 +132,23 @@ apps (press it again to go back).
 - The title names the roll. At the top right: when the frame was taken, and which frame of the roll
   it is. "Filing 2 negatives…" means that roll's originals are still moving to its `NEG` folder.
 - Centre shows the frame full screen. A caption says its film, roll and frame, when it was taken
-  and its exposure, for 2 seconds; UP shows it again. The wheel, LEFT and RIGHT go to the next and
-  previous frame.
-- Centre again shows it at **100%**: the middle of the developed photo, a photo pixel to a screen
-  pixel. The arrows move half a screen at a time, as far as the photo's edges, and a small map at the
-  top right shows where you are; the wheel still steps frames. The first move on a photo takes a
-  moment: the camera reads the whole photo through first. Centre goes back to the whole frame.
+  and its exposure (the shutter speed as the camera names it: 1/60, 1/320), for 2 seconds; UP shows
+  it again. The wheel, LEFT and RIGHT go to the next and previous frame.
+- Centre again shows it at **100%**: the middle 854 × 480 of the developed photo at its true shape.
+  Each photo row is one of the screen's 480 lines; across, the 16:9 panel's 640 dots are wider than
+  they are tall, so four photo columns share three dots. The arrows move half a screen at a time, as
+  far as the photo's edges, and a small map at the top right shows where you are; the wheel still
+  steps frames. The first move on a photo takes a moment: the camera reads the whole photo through
+  first. Centre goes back to the whole frame.
 - MENU goes back: from a frame to the sheet, and from the sheet to wherever you opened it.
 
-Nothing in Photos develops or ends a roll, and it doesn't open from the viewfinder or the darkroom.
+Nothing in Photos develops or ends a roll, and no develop starts while you're in it: a roll waiting
+to develop waits until you leave. You can't open Photos from the viewfinder or the darkroom.
 
 **MENU** holds:
 - **This roll:** Develop now (on a roll of 12, 24 or 36 part-way through: it ends the roll there
-  and develops what's shot), Change film.
+  and develops what's shot, after a restart if you've opened the viewfinder), Change film (the
+  frames shot so far develop by themselves, as above).
 - **All rolls:** Photos.
 
 The line at the foot says what the chosen row does, or why it can't right now. On Photos it ends
@@ -133,13 +156,17 @@ with Latent's version.
 
 **A screen left alone** (the camera back, Choose film, the menu, the contact sheet) dims to about
 30% after 30 seconds untouched, as a phone dims before it locks. The first press only wakes it; a
-half-press wakes it and shoots. The viewfinder and a photo shown full screen never dim, and the
-camera's own power-saving setting isn't touched for this.
+half-press wakes it and shoots. The viewfinder and a photo shown full screen never dim, and nor
+does any screen while Latent holds the camera: once you've opened the viewfinder and gone back
+with MENU without shooting, the camera stays open behind every screen until Latent gives it back
+(when you leave, or to develop). The camera's own power-saving setting isn't touched for this.
 
-**Neutral while a roll is loaded.** Latent sets the camera to neutral (white balance fine-tune
-0 / 0, Standard 0 / 0 / 0, DRO off) and puts your own settings back once the roll is developed. Your
-values are kept in `LATENT/NEUTRAL.TXT` until then. Latent can only write those few settings, within
-their menu ranges.
+**Neutral while a roll is loaded.** Latent sets the camera to neutral (white balance Auto with
+fine-tune 0 / 0, Creative Style Standard 0 / 0 / 0, DRO off) and puts your own settings back once
+the roll is developed. Your values are kept in `LATENT/NEUTRAL.TXT` until then. Latent can only
+write those few settings, within their menu ranges, and only while it's on screen. If you leave
+while a roll's last frame develops, the roll finishes and your settings come back the next time
+you open Latent; film loaded just as you leave is set neutral then, before anything shoots.
 
 ### Where developed frames go
 
@@ -295,16 +322,19 @@ as it can:
   left alone rests at about 30%, and an unattended roll stays dim when it's done. Whether the A5100
   honours an app's brightness at all is still to be seen on the camera.
 - **Power-saving timer raised** to the camera's longest setting once for each develop, so the camera
-  can't sleep halfway through. Your own setting is put back afterwards, even after a crash, and
-  before the camera opens to shoot. If the camera doesn't offer this API, set **Setup → Power Saving
-  Start Time** to its longest value yourself.
+  can't sleep halfway through. A develop, and so the raise, only starts while Latent is on screen.
+  Your own setting is put back afterwards, even after a crash, as you leave Latent, and before the
+  camera opens to shoot. If the camera doesn't offer this API, set **Setup → Power Saving Start
+  Time** to its longest value yourself.
 - **A still viewfinder slows down:** see the viewfinder above. Behind MENU, with the camera still
   open, the viewfinder makes nothing at all.
 
 Every developed frame appends a line to **`LATENT/TIMING.TXT`**. A camera-roll develop records
-decode, output image, develop, save, find, orientation and negative copy times, and ends with the
-battery's percent, voltage and temperature. A software develop records read, look and write times
-plus CPU details. The A5100 has no NEON.
+decode, output image, develop, save, find (with Sony's settle) and orientation times, then the
+look's read, look and write times and its threads, the total, the battery's percent, voltage and
+temperature, and last what was done about the photo's orientation. (The negative's copy runs
+alongside and isn't timed.) A software develop records read, look and write times plus CPU details
+and the battery. The A5100 has no NEON.
 
 **`LATENT/DEVELOP.TXT`** records the darkroom's decisions: when it fell back to software, and why
 an original stayed in the camera roll. **`LATENT/VIEWFIND.TXT`** is the viewfinder's: a line every
@@ -326,8 +356,12 @@ when it closes.
 - **Power cut during a save:** if the battery dies in the second between Sony's save and Latent
   recording it, that frame may develop again next time, leaving one extra photo in the camera roll.
   The original is safe either way. The 5% battery guard is there so this shouldn't happen.
-- **The Playback button** opens Photos only if the camera passes it to apps; `DEVELOP.TXT` notes
-  whether it does.
+- **The Playback button** opens Photos only if the camera passes it to apps: if Photos opens, it
+  does. If the button arrives under a code Latent doesn't recognise, `DEVELOP.TXT`'s `keys: not used
+  here …` line lists it, with the scan code the camera names for Playback.
+- **Shutter speeds in captions:** Android 2.3 gives a photo's shutter speed as a rounded decimal,
+  and Latent puts it back on the camera's own scale. 1/3200 and 1/4000 come back the same (0.0003 s),
+  so a photo shot at 1/3200 is captioned 1/4000.
 - **Wheel direction:** if turning the wheel feels backwards, that's a one-line change in
   `MainActivity.java`.
 

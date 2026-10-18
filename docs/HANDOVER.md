@@ -71,14 +71,15 @@ line it misses.
 
 ## Where things are
 
-- `MainActivity.java`: screens, keys, rolls, the darkroom and the background develop, Photos, the
-  light, the battery guard.
+- `MainActivity.java`: screens, keys, rolls, the darkroom and the rolls that develop by themselves,
+  Photos, the light, the battery guard.
 - `Ui.java` / `UiState.java`: all drawing, design system v2 (one palette on the 4-bit grid, one type
   scale, one hint bar with MENU last). `Ui.menuRows` (the menu, shared with the previews),
   `Ui.windowKey` and `Ui.overlayKey` (when the viewfinder's window and overlay need drawing again),
   `Ui.dirty` (partial redraws after a key). The Mac preview tool renders the same code.
 - `Roll.java`, `Library.java`: rolls on the card, counted by the camera's photo numbers. The card is
-  the record of the loaded roll; prefs are only a hint. `Roll.developedAll` is Photos' list.
+  the record of the loaded roll; prefs are only a hint. `Roll.developedAll` is Photos' list;
+  `Roll.undeveloped` the rolls that develop by themselves (see the rest of the app, below).
 - `Photos.java`: the contact sheet's rows, keys and pages, 100%'s edges, the caption's words from EXIF.
   `Loupe.java`: Android's region decoder, for 100% away from the centre.
 - `Backlight.java`: the screen's light (the darkroom's, the rest, the peek). `Slots.java`: what the
@@ -106,7 +107,8 @@ line it misses.
   - A half-press loads the film and shoots.
 - The frame counter.
 - Finished rolls develop as soon as Latent opens.
-- ∞ rolls develop in the background each time you come back.
+- ∞ rolls' new photos develop in the red darkroom each time you come back, once nothing has been
+  pressed for 4 s.
 - A darkroom frame takes about 6–7 s (develop ~2.7 s, Sony's save ~1.75 s). Startup takes about
   0.2–0.4 s to the first frame.
 - Latent's own viewfinder with the film look live: ~11 frames a second (up to ~15).
@@ -125,21 +127,38 @@ line it misses.
   the 6 s settle is dropped when the menu or Photos opens. The APK is ~2.48 MB, down from 2.59.
 - **Photos.** One screen for every developed frame (see README). Opened from the menu, DOWN on the
   camera back, the Playback button (if the camera passes it on), and after a roll of 12, 24 or 36
-  develops. Never from the viewfinder or the darkroom. Nothing in it develops or ends a roll.
+  develops. Never from the viewfinder or the darkroom. Nothing in it develops or ends a roll, and
+  no develop starts over it: a waiting roll waits until it's left.
+- **Rolls closed part-shot develop again.** v0.44.1 developed a roll of 12, 24 or 36 that Change
+  film (or `Roll.tidy`) closed part-way only from its contact sheet, which Photos replaced. They now
+  wait with ∞ batches and develop by themselves in the darkroom (the rest of the app, below).
 - **The viewfinder:** the composer in one pass, Y'CbCr frames, a leaner look kernel, still-scene
-  pacing, nothing made while hidden, the surface kept across MENU, the keys and the exposure scale in
-  the side bars, notes and the film card on opaque plates.
+  pacing, nothing made while hidden, the surface kept across MENU and the roll taken afresh when
+  it's shown again (Change film behind MENU), the keys and the exposure scale in the side bars
+  (`MENU Develop` only when the restart develops), notes and the film card on opaque plates.
 - **The app:** the backlight (the darkroom's light, a 5 s peek, an idle rest), the battery guard,
   one power-save hold per develop, the save's settle overlapped, previews decoded once, the darkroom
   started with nothing queued ahead of it.
+- **No camera write with Latent away** (see the rest of the app, below): an earlier v0.45.0 commit
+  could finish a roll after Latent was left and then put the user's settings back behind the
+  camera's own mode.
 - Darkroom outputs are bit-identical to v0.44.1's (`tools/sony-test.sh`, and the develops compared at
-  each step). Live view differs from v0.44.1's by about one 4-bit level on a few percent of pixels
-  (the Y'CbCr film and the one-pass dither).
+  each step). Live view stays within one 4-bit level of v0.44.1's (but 2 of 46,656,000 values in
+  `tools/frame-test.sh`), with the same mean. With one dither threshold (`FL_DITHER_GREEN` 0, the
+  host tests' second build) about 5-8% of pixels differ (the Y'CbCr film and the one-pass dither:
+  92.2-94.6% identical). The camera's build gives green the opposite threshold
+  (`FL_DITHER_GREEN` 1), which moves green a level on about half the pixels by design, so only
+  39-46% of pixels match v0.44.1's (frame-test 39.4%, `tools/test-jni.sh` 43.5-45.8%). That is more
+  than the small share the rule above allows: it's the user's call (by eye, below;
+  `FL_DITHER_GREEN` 0 is one threshold again).
 
 ## Camera facts learned the hard way
 
 - **Settings writes:** shooting mode must not start within about 6 s of a settings write, or the
-  camera restarts. `goShoot` waits for this, and the camera back counts it down.
+  camera restarts. `goShoot` waits for this, and the camera back counts it down. That guards only
+  Latent's own way to shooting, so no setting is written once Latent has left the front (the
+  camera's own mode may be there, and may shoot at once). The power-save timer goes back in
+  `onPause`, before the next screen resumes.
 - **Handing over to the camera:** do it on shutter key release, or the camera won't focus.
 - **File names:** the card only accepts 8.3 names.
 - **No shelling out:** apps can't start other programs (`sync` and `logcat` both hung).
@@ -187,8 +206,18 @@ From the viewfinder work (each cost an install or a battery pull):
 Shoot or a half-press opens Latent's viewfinder: live frames from the camera with the roll's film
 look on them, Latent's type over them, the print developing in the corner, exposure compensation
 (DOWN, the wheel), the film changed with the wheel (per frame on ∞ rolls). MENU with pictures shot
-restarts Latent (Relaunch) to develop them in the red darkroom; with none, it hides the viewfinder
-and keeps the camera open. Log: `LATENT/VIEWFIND.TXT`.
+restarts Latent (Relaunch): the camera's image memory comes back only when the process ends. The
+new process develops them in the red darkroom only on an ∞ roll or a roll they finished
+(`wantsDeveloping`, or `developWaiting` at once with `developNow`); on a roll of 12, 24 or 36 still
+part-way it develops any other roll waiting, else unprepares to the camera back, and the frames
+develop once the roll is finished or with Develop now. The right bar says so: `MENU Develop` only
+then (`UiState.menuDevelops`: shots, and an ∞ roll or `vfBase + taken >= length`), `MENU Back`
+otherwise, as on the coach line. With nothing shot, MENU hides the viewfinder and keeps the camera
+open; shown again, it takes the roll afresh (`vfResync`: the frame base, the roll's film with
+`setFilm` and the wheel's neighbours prewarmed, and on another roll the picture numbering from the
+card's highest), because Change film may have loaded another roll behind MENU (v0.44.1 kept the old
+film and count, and could lock the new roll's shutter early). Nothing is shot while it's hidden, so
+`vf.shots` is 0 there. Log: `LATENT/VIEWFIND.TXT`.
 
 **How a frame is made (read before changing it):**
 
@@ -238,7 +267,15 @@ and keeps the camera open. Log: `LATENT/VIEWFIND.TXT`.
   drawn in turn, never freed while the presenter may draw them. A picture that won't save is
   `UiState.fatal`, full screen in every part, and the camera isn't given back until it stores (or the
   camera is switched off).
-- **Logs** go out on a thread of their own (core 3, background priority), never the UI thread's.
+- **Logs** go out on a thread of their own (core 3, background priority), except the breadcrumbs
+  that must be on the card before the camera is asked something that could hang it: opening, a full
+  press, Latent's shutter, closing, holding the camera, a crash. Those are written at once on the
+  thread that asks, the UI thread (`flushLog`; a crash's on the thread that crashed).
+  MainActivity's DEVELOP.TXT and TIMING.TXT lines are appended where they're logged, on whichever
+  thread logs them (`devLog`, `appendLog`), the UI thread included.
+- **EV** isn't written to the camera once the viewfinder is closing (`applyEvNow` returns when
+  `closing`): a wheel turn in the last 150 ms before leaving or a restart is dropped, not written on
+  the way out.
 
 **The shared caches** (`jni/filmcore.c`, any thread): up to 8 parsed films (least recently used
 dropped) under a mutex, each look holding a reference, so a film dropped meanwhile is freed only when
@@ -258,14 +295,63 @@ Each thread has its own last error (a pthread key: Android 2.3 has no `__thread`
   nobody pressing anything stays at 0.05 until a press. Still screens (the
   camera back, Choose film, the menu, the contact sheet) rest at 0.3 after 30 s. On a resting or
   rested screen the first press only wakes it, except the shutter, which wakes and acts. Never the
-  viewfinder, the viewer, or anything while the camera is Latent's. Relaunch keeps the darkroom's
-  light and has no peek. The camera's power-save timer is never touched for any of it.
+  viewfinder, the viewer, or anything while the camera is Latent's (`stillScreen` is false while
+  `vf != null`: once the viewfinder has been hidden with nothing shot, no screen rests until Latent
+  is left). Relaunch keeps the darkroom's light and has no peek. The camera's power-save timer is
+  never touched for any of it.
 - **Power:** one power-save hold per develop (no write per frame); an unwatched roll keeps the hold
   until its last originals are filed (at most 60 s); given back before the camera opens, with
-  `POWER_SETTLE_MS` (1 s) after it before shooting.
+  `POWER_SETTLE_MS` (1 s) after it before shooting, and in `onPause`.
 - **The battery guard:** at 5% or less, not on a charger, no darkroom frame starts. A roll whose
-  frames are all developed still finishes. Each TIMING.TXT line carries the battery's %, mV and
-  temperature.
+  frames are all developed still finishes (in front; see below). Each TIMING.TXT line carries the
+  battery's %, mV and temperature. After a charge, a roll of 12, 24 or 36 in the camera carries on at
+  the next open, or with the centre button; a waiting roll by itself after 4 s untouched (the centre
+  button on an ∞ roll shoots: `wantsDeveloping` is never true for one).
+- **No camera write with Latent away.** A settings write within ~6 s of shooting restarts the
+  A5100, and `goShoot`'s settle guards only Latent's own way to shooting, so nothing writes while
+  the camera's own mode may be in front:
+  - `refresh` reconciles neutral settings only while `resumed`; a card read finishing after
+    `onPause` leaves it to `onResume`'s.
+  - `loadRoll` applies them only while resumed; otherwise it logs `load film: Roll nnn loaded with
+    Latent away; the camera is set neutral on the next open` and leaves `neutralTried` false, so
+    the next refresh in front does it.
+  - `startDevelop` returns unless resumed (its power-save hold is a write; a card read's answer can
+    land after `onPause`).
+  - `developNext` finishes a roll with nothing left only while resumed. Left during the last frame
+    (`onPause` set `paused`), it stops still developing, as v0.44.1 did, and finishes on the next
+    open: finishing ends the roll, and the card read after it would put the settings back.
+  - The viewfinder's EV isn't written once it's closing (above).
+  - Left as it was: `PowerSave.release()` in `onPause` (it runs before the next activity resumes,
+    as it has since before v0.44.1, and dropping it would leave the longest timer set) and in
+    `onCreate` (crash repair). A release after `onPause` (`endDarkroom`, the filing hold's) writes
+    nothing: `onPause`'s already gave the timer back, and `release` returns with nothing kept.
+- **Rolls that develop by themselves** (`Roll.undeveloped`, `rollsWaiting`, `developWaiting`): an
+  ∞ roll's new photos, in the camera or replaced, and rolls of 12, 24 or 36 closed part-shot (Change
+  film, or `Roll.tidy` after a crash). They develop in the red darkroom, oldest first, once nothing
+  has been pressed for 4 s (`IDLE_BEFORE_DEVELOP_MS`) on the camera back, Choose film or the menu,
+  never in Photos or its viewer (`developWaiting` returns there; `leavePhotos` counts the 4 s from
+  leaving and asks again). After a restart to develop (`developNow`) they start at once.
+  - The roll in the camera is left out by its folder, not by `isOpen()`: a closed roll that
+    v0.44.1's sheet left `DEVELOPING` still waits. A frame whose original is gone from both the
+    camera roll and NEG doesn't count (`toDevelop`), or a roll of only those would start and fail on
+    every visit.
+  - A closed roll keeps its state while it develops (`replaced()`: until or untilNo set). Marked
+    developing, it would be an open roll, "in the camera" with nothing else loaded, and
+    `reconcileNeutral` would set the camera neutral for it. `finishDevelop` marks it developed and
+    opens Photos on it.
+  - MENU on one holds every waiting roll until the next open (`waitingHeld`, cleared in
+    `onResume`; "Paused. It carries on the next time you open Latent."). MENU isn't a press the 4 s
+    counts, and the frame in hand outlasts it, so before this the darkroom came straight back.
+  - One whose develop ended with frames that wouldn't develop isn't started by itself again this
+    visit unless it has more frames (`waitingFailed`, cleared in `onResume`).
+- **Any develop once the camera has been opened** (`Viewfinder.opened`) restarts Latent first
+  (`restartToDevelop(why, roll, frames)`: the getting-ready screen shows that roll's film and about
+  how many frames). Develop now there ends the roll on the card before the restart, so the restarted
+  Latent finds it developing: its frames frozen from the last card read's `photos`, refused with no
+  exposures or a low battery (the roll left as it was), `DEVELOPING` saved (rolled back if the save
+  fails). Before, the restarted Latent found the roll still loaded part-way and showed the camera
+  back. If anything was shot in this process (`vfWaiting`, `vf.shots`: only once the viewfinder
+  closed itself), `photos` lacks those shots, so it only restarts, as before.
 - **The darkroom:** Sony's 300 ms settle after each save now overlaps looking for the new photo on
   the card (`HardwareDevelop.Settle`): Sony sees the same calls in the same order with the same gap.
   `save=` in TIMING.TXT is now to the encoder's answer, and `find=` holds the settle as `(settle M)`.
@@ -273,11 +359,29 @@ Each thread has its own last error (a pthread key: Android 2.3 has no `__thread`
   most four a second; nothing of Choose film's is queued ahead of a develop.
 - **Photos:** `Roll.developedAll` lists every roll's folder once and finds the prints in the last card
   read's listing. The viewer keeps the frame on show and its neighbours decoded (three previews of
-  ~1.4 MB, `Slots`), the thumbnail standing in, never a black screen. 100% at the centre is
+  ~1.4 MB, `Slots`), the thumbnail standing in, never a black screen. 100% is a photo pixel to a
+  layout pixel, not to a dot: the crop is `zoomViewW()` x 480 = 854 x 480 (the layout is 853.3
+  wide), drawn onto the panel's 640 dots, so 4 photo columns are filtered into 3 dots and rows are
+  1:1 (the photo keeps its shape; 640 columns would stretch it). At the centre it is
   `FilmCore.preview`'s crop (it decodes only those rows and columns; no film, no grain); a move goes
   through `Loupe`, opened on the first move (which reads the photo through) and closed on the worker.
   Every way out of Photos lets go of all of it (`closePhotos`, `photosLeft`); late decodes are dropped
   by generation. The thumbnail cache holds at most 64.
+  - A decode on the worker that runs out of memory is caught there, where an uncaught one would end
+    Latent (with the camera open, at worst). A thumbnail's (`loadThumb`) lets the thumbnail cache
+    go, and the cell stays grey until the next page turn asks again (`thumbnails: out of memory at
+    X, the cache let go`, at most 3 lines); Choose film's hero keeps its sample standing in, and a
+    sample is simply left out.
+  - A viewer preview is remade only if it meets neither side of 720 x 480 (v0.44 and earlier's
+    fitted 640 x 480); a 16:9 photo's is 720 x 405, and was remade on every view.
+  - The camera back's ∞ prints are loaded again by every way back to it (`toBack`, `hideViewfinder`,
+    `leavePhotos`), in case Photos' pages pushed them out of the cache. Leaving Photos for Choose
+    film keeps the film and length being browsed.
+  - The caption's shutter speed: API 10's ExifInterface (jhead) gives a rounded decimal ("%6.4f"
+    below 0.010 s, "%5.3f" above, of a float), so 1/60 reads 0.017 and 1/320 0.0031. `Photos.shutter`
+    takes an exact speed first, then the speed whose jhead string matches (1/4000 for 0.0003, which
+    1/3200 shares), then the nearest within half a third-stop; anything else shows as it is.
+    LogicTest checks every speed's string and rational.
 - **Playback:** `ISV_KEY_PLAY`, read once by reflection from `ScalarInput`'s static fields (nothing is
   called on the camera). Buttons Latent doesn't use are noted, one line a visit in DEVELOP.TXT.
 
@@ -323,17 +427,21 @@ Look first, before anything else:
 - `visit: N min, battery A -> B, N s of it at the still pace`: with the stats lines' battery, the mV
   slope per minute, still against moving.
 
-`TIMING.TXT`, each hardware line:
+`TIMING.TXT`, each hardware line. It runs `decode= image= develop= save= find=N (settle M)
+orient=`, then `(read … look … write …)` and the look's details (`xfine` or `fine`, `rows=`,
+`block=`, `threads=`, `setup=`, `draws=`), then `total=`, the battery, and last the orientation's
+outcome in brackets. No time is logged for the negative's copy (it runs on the filer).
 
-- `develop=N (read … look … write …)` against a v0.44.1 roll in the same film: the prefetch should
-  take an estimated 0.15-0.25 s off the look. `save=` about 300 ms lower than v0.44.1's (the settle
-  moved); `find=` ends `(settle M)`, the part of the 300 ms the card listing didn't cover; `total=`
-  lower by up to 300 ms. Every print still in the catalogue and the right way up.
-- `battery=N% NmV T C` at the end: the mV slope per frame.
+- `develop=N` and the `(read … look … write …)` after `orient=`, against a v0.44.1 roll in the same
+  film: the prefetch should take an estimated 0.15-0.25 s off the look. `save=` about 300 ms lower
+  than v0.44.1's (the settle moved); `find=`'s `(settle M)` is the part of the 300 ms the card
+  listing didn't cover; `total=` lower by up to 300 ms. Every print still in the catalogue and the
+  right way up.
+- `battery=N% NmV T C` after `total=`: the mV slope per frame.
 
 `DEVELOP.TXT`:
 
-- `ROLL n: developing N frame(s); power-save A->B` (or `already longest`, `unchanged (…)`): whether
+- `Roll nnn: developing N frame(s); power-save A->B` (or `already longest`, `unchanged (…)`): whether
   Sony's power-save API works on the A5100, and its units.
 - `leaving: … N s since the last press`: after the camera's own power-save sends Latent away from the
   viewfinder, N should be near the Power Saving Start Time.
@@ -343,14 +451,47 @@ Look first, before anything else:
   100%: …` when a view couldn't be made.
 - No `kept the original` lines after an unattended roll; the sheet shows `Filing N negatives…`, then
   they're filed in the same visit.
+- `viewfinder: shown again on Roll nnn (N exposed): the roll changed behind MENU` after Change film
+  with the viewfinder hidden; the live view in the new roll's film, its count from its own frames.
+- `restarting to develop: Roll nnn to develop` after Develop now with the viewfinder hidden, then
+  `Roll nnn: developing N frame(s)` from the restarted Latent (before, it came back with the roll
+  still loaded).
+- Rarely: `load film: Roll nnn loaded with Latent away; the camera is set neutral on the next
+  open`; `thumbnails: out of memory at X, the cache let go`.
 
-Also by eye: a half-press right after a roll ends may show "Getting ready…" on the camera back for up
-to 1 s (the power-save settle), then the picture stores as usual; the battery guard's message at 5%;
-the darkroom's text readable at 5% light; the side bars' labels and `⦿ Look` / `MENU Back` turning
-`MENU Develop` after a shot; DOWN's exposure track keeping up with the wheel; notes and the card on
-solid plates with no ghost behind them; the first visit's keys, once ever; Photos through a long roll
-with no out-of-memory; green's opposite dither threshold in skies (the user may judge it against
-`tools/frame-test.sh --render`).
+The final review's fixes, to try on the camera:
+
+- **Change film part-way** through a roll of 12, 24 or 36, then leave the camera back alone for
+  4 s: the old roll develops in the red darkroom (after a restart, if the viewfinder was opened in
+  this process), and Photos opens on it. Not while Photos is up: it waits until Photos is left,
+  then 4 s. MENU in that darkroom: "Paused. It carries on the next time you open Latent", and it
+  doesn't come back by itself in this visit.
+- **Change film with the viewfinder hidden** (half-press, MENU with nothing shot, MENU, This roll,
+  Change film, load, half-press at once): the new roll's film live and its own count, and the wheel
+  can change its film until its first frame.
+- **Develop now with the viewfinder hidden:** one restart, then the darkroom on that roll.
+- **Leave during a roll's last frame** (the power button, or plugging in USB): nothing finishes in
+  the background. On the next open the roll finishes in front, and "Your camera settings are back"
+  shows then.
+- **Captions:** shutter speeds as the camera shows them (1/60, 1/320, 1/1600; not 1/59, 1/323,
+  1/1667).
+
+Also by eye:
+
+- A half-press right after an ∞ roll's batch ends may show "Getting ready…" on the camera back for
+  up to 1 s (the power-save settle), then the picture stores as usual. After the camera's roll of
+  12, 24 or 36 finishes, Photos is up, and a half-press there waits with nothing on screen for up
+  to 6 s while your settings are put back (plus up to 1 s if a filing hold was kept), then goes to
+  the camera's own shooting mode.
+- The battery guard's message at 5%; the darkroom's text readable at 5% light.
+- The side bars' labels, and `⦿ Look` / `MENU Back` turning `MENU Develop` after a shot on an ∞
+  roll, or on the last frame of a roll of 12, 24 or 36 (part-way it stays `MENU Back`, and MENU
+  then restarts to the camera back).
+- DOWN's exposure track keeping up with the wheel; notes and the card on solid plates with no ghost
+  behind them; the first visit's keys, once ever.
+- Photos through a long roll with no out-of-memory.
+- Green's opposite dither threshold in skies (the user may judge it against
+  `tools/frame-test.sh --render`).
 
 ## Left on purpose (v0.45.0)
 
