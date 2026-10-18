@@ -32,7 +32,6 @@ int main(int argc, char **argv) {
     char err[256] = "";
     if (argc < 4) return 2;
     if (argc > 4) params[FL_PARAM_GRAIN] = atoi(argv[4]);
-    if (argc > 5) fl_set_variant(atoi(argv[5]));
     in = fopen(argv[1], "rb");
     d.err = jpeg_std_error(&e1);
     jpeg_create_decompress(&d);

@@ -30,7 +30,7 @@ done
   && sips -s format png "$O/samples/HOUSE-PRV.JPG" --out "$O/samples/HOUSE-PRV.png" >/dev/null; }
 rm -f "$O"/*.png "$O"/camera/*.png "$O"/camera-sun/*.png "$O"/compare/*.png
 "$JH/bin/javac" -encoding UTF-8 -d "$O/classes" src/com/latent/camera/Gfx.java src/com/latent/camera/UiState.java \
-  src/com/latent/camera/Ui.java src/com/latent/camera/Probe.java src/com/latent/camera/HardwareTest.java src/com/latent/camera/HardwareDevelop.java src/com/latent/camera/CpuGate.java src/com/latent/camera/SettingsCheck.java src/com/latent/camera/SpeedTest.java src/com/latent/camera/DevelopTest.java src/com/latent/camera/CameraSettings.java src/com/latent/camera/Library.java src/com/latent/camera/Stock.java src/com/latent/camera/FilmCore.java src/com/latent/camera/SonyMemory.java src/com/latent/camera/ShootingTest.java src/com/latent/camera/LiveViewTest.java src/com/latent/camera/Roll.java src/com/latent/camera/Viewfinder.java src/com/latent/camera/FrameScheduler.java src/com/latent/camera/Pacer.java src/com/latent/camera/Release.java src/com/latent/camera/Level.java src/com/latent/camera/NeutralSettings.java src/com/latent/camera/Display.java src/com/latent/camera/AndroidGfx.java src/com/latent/camera/ScreenTest.java \
+  src/com/latent/camera/Ui.java src/com/latent/camera/Stock.java src/com/latent/camera/Library.java src/com/latent/camera/Roll.java \
   -cp "${LATENT_TOOLCHAIN:-$HOME/.latent-toolchain}/sdk/platforms/android-28/android.jar" \
   tools/preview/HostGfx.java tools/preview/CameraTrue.java tools/preview/RenderScreens.java
 BASE=""; [ -d out/preview-base/camera ] && BASE=out/preview-base

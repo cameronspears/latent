@@ -230,7 +230,7 @@ static void test_ycc(frame_jpg *fr, int nfr) {
         if ((double)levels / (3.0 * n) > worst_levels) worst_levels = (double)levels / (3.0 * n);
         /* and composed: Y'CbCr against RGB through today's composer, the same dither */
         fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], params, FL_F_TEMPORAL, 3, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
-        fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], params, FL_F_TEMPORAL | FL_F_LEVEL, 3, b, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
+        fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], params, FL_F_TEMPORAL | FL_F_RGB, 3, b, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err);
         versus(a, b, OW * OH, &same, &maxd, &mean);
         {
             long diff = 0;
@@ -285,7 +285,7 @@ static void test_versus_reference(frame_jpg *fr, int nfr) {
         for (i = 0; i < nfr; i++) for (f = 0; f < NFILMS; f++) {
             double same, mean;
             int maxd;
-            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], PARAMS, FL_F_TEMPORAL | FL_F_LEVEL, 5, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)
+            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], PARAMS, FL_F_TEMPORAL | FL_F_RGB, 5, a, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)
                     || fl_frame(c, fr[i].jpg, fr[i].len, FILMS[f], PARAMS, FL_F_TEMPORAL | FL_F_REFERENCE, 5, b, OW, OH, OW, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)) {
                 check(0, "compose %s %s: %s", fr[i].name, FILMS[f], err);
                 continue;
@@ -321,7 +321,7 @@ static void test_odd_sizes(frame_jpg *fr) {
             fl_set_overlay(o ? ov : NULL, ow, oh);
             /* rows start at odd halfwords: the output offset by one */
             for (x = 0; x < stride * oh + 1; x++) a[x] = b[x] = 0xBEEF;
-            if (fl_frame(c, fr->jpg, fr->len, FILMS[2], PARAMS, FL_F_LEVEL, 3, a + 1, ow, oh, stride, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)
+            if (fl_frame(c, fr->jpg, fr->len, FILMS[2], PARAMS, FL_F_RGB, 3, a + 1, ow, oh, stride, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)
                     || fl_frame(c, fr->jpg, fr->len, FILMS[2], PARAMS, FL_F_REFERENCE, 3, b + 1, ow, oh, stride, 1500, FL_FMT_4444, SH, 320, 240, info, tm, err, sizeof err)) { ok = 0; continue; }
             if (a[0] != 0xBEEF) ok = 0;
             for (y = 0; y < oh; y++) {
@@ -348,9 +348,9 @@ static void test_still(frame_jpg *fr, int nfr) {
     char err[256];
     for (i = 0; i < nfr; i++) {
         int sig[FL_FI_SIG_N], sum[FL_FI_SIG_N] = { 0 }, cnt[FL_FI_SIG_N] = { 0 }, x, y, f;
-        for (f = 0; f < 2; f++) {   /* decoded as Y'CbCr, then as RGB (the level asked) */
+        for (f = 0; f < 2; f++) {   /* decoded as Y'CbCr, then as RGB (FL_F_RGB) */
             fl_set_still_ref(NULL, 0);
-            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[1], PARAMS, FL_F_STILL | (f ? FL_F_LEVEL : 0), 1, a, OW, OH, OW, 1500, FL_FMT_565, SH, 320, 240, info, tm, err, sizeof err) != 0) ok = 0;
+            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[1], PARAMS, FL_F_STILL | (f ? FL_F_RGB : 0), 1, a, OW, OH, OW, 1500, FL_FMT_565, SH, 320, 240, info, tm, err, sizeof err) != 0) ok = 0;
             memcpy(sig, info + FL_FI_SIG, sizeof sig);
             memset(sum, 0, sizeof sum); memset(cnt, 0, sizeof cnt);
             for (y = 0; y < c->sh; y += 2) for (x = 0; x < c->sw; x += 2) {   /* the same cells, the slow way */
@@ -361,7 +361,7 @@ static void test_still(frame_jpg *fr, int nfr) {
             }
             for (k = 0; k < FL_FI_SIG_N; k++) if (abs(sig[k] - (sum[k] + cnt[k] / 2) / cnt[k]) > 0) ok = 0;
             fl_set_still_ref(sig, 2);
-            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[1], PARAMS, FL_F_STILL | (f ? FL_F_LEVEL : 0), 2, a, OW, OH, OW, 1500, FL_FMT_565, SH, 320, 240, info, tm, err, sizeof err) != 1) ok = 0;
+            if (fl_frame(c, fr[i].jpg, fr[i].len, FILMS[1], PARAMS, FL_F_STILL | (f ? FL_F_RGB : 0), 2, a, OW, OH, OW, 1500, FL_FMT_565, SH, 320, 240, info, tm, err, sizeof err) != 1) ok = 0;
         }
     }
     fl_set_still_ref(NULL, 0);

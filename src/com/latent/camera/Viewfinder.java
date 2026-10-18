@@ -23,16 +23,15 @@ import java.util.concurrent.Executors;
 
 /**
  * Latent's own viewfinder, the way the X Half is the camera: live view with the roll's film look on
- * it, focus on a half-press, the picture on a full press, and a level read from the picture.
+ * it, focus on a half-press, the picture on a full press.
  *
- * How, all of it found on this camera (the Shooting, Live look and Restart tests):
+ * How, all of it found on this camera (the Shooting, Live look and Restart tests, v0.3x-v0.44):
  * - The camera opens through Sony's CameraEx on the UI thread, naming the memory card as its target.
  *   Every camera call and callback is on this thread.
- * - Live view runs as usual on the surface behind Latent's drawing; with the film look on (a setting the
- *   Live look test turns on once pictures have stored with it), the camera also hands Latent the same
+ * - Live view runs as usual on the surface behind Latent's drawing; the camera also hands Latent the same
  *   picture as small JPEG frames (CameraSequence's preview sequence, 320 px, asked for as Sony's Smart
- *   Remote asks). Each gets the look on the worker thread (FilmCore.live), back to back, and is drawn
- *   over the camera's own. Centre shows the camera's own live view instead.
+ *   Remote asks). Each gets the look on a look thread (FilmCore.frame), and is put up over the camera's
+ *   own. Centre shows the camera's own live view instead, until it is pressed again.
  * - Focus is the camera's own (Camera.autoFocus), retried while the button is held (Release).
  * - The picture is the camera's own (burstableTakePicture): it stores it itself, with your settings.
  *   Latent learns its name from Sony's catalogue, told to look after each picture (Smart Remote does).
@@ -86,15 +85,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     static volatile boolean opened;
 
     /**
-     * The film look on live view (and the level, which reads the same frames) comes from the camera's
-     * live JPEG frames (CameraSequence's preview sequence), asked for as Sony's Smart Remote asks for
-     * them. v0.31 lost its pictures with them running, but it also never told Sony's catalogue to
-     * look (so it never saw them) and released or reopened the camera with them in doubt; v0.34.1's
-     * Live look test stored two pictures with the frames running, each in the catalogue ~2.2 s later
-     * once flushed. Off (a setting, until the test has passed): the camera's own live view shows.
-     */
-    final boolean liveLook;
-    /**
      * Direct shutter (the button is the camera's own). Off: Latent focuses and takes the pictures
      * itself, exactly as the Shooting test has every time without a fault (focus, burstableTakePicture,
      * stored and catalogued about 0.2 s later).
@@ -109,8 +99,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
      * keeps the stats, the no-frames fallback and the end of the store quiet going (it was the 10-20 ms poll).
      */
     static final long WATCHDOG_MS = 100, HIDDEN_WATCHDOG_MS = 500;
-    /** With the look off and the level on, a frame now and then for it (the level is off: then none at all). */
-    static final long LEVEL_FRAME_MS = 300;
     /** The frame rate follows the scene: slower while it's still and nothing is touched (Pacer). Off: full rate always. */
     static final boolean PACE = true;
     /**
@@ -138,7 +126,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private final StringBuilder log = new StringBuilder();
     private final long t0 = SystemClock.uptimeMillis();
     final Release release;
-    final Level level = new Level();
 
     // the film
     private String lut;
@@ -194,11 +181,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private long lastShownAt;
     private volatile boolean probed, probeWanted;
     private final int[] framesBy = new int[LOOK_CORES.length], statFramesBy = new int[LOOK_CORES.length];
-    /**
-     * The level from the picture's own lines. Off since v0.38.2: you didn't want the line, and reading it cost
-     * 10-15 ms of every other frame. Level and fl_level stay (tested), ready if it comes back.
-     */
-    static final boolean LEVEL = false;
     /** The look's grain moves every frame, as film's does (blue noise: it reads as grain, never a pattern). */
     static final boolean MOVING_GRAIN = false;
     /**
@@ -220,32 +202,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private long resumedAt;
     private volatile boolean bitmapsDirect = true;   // written in place (libjnigraphics), else through a short[]
     private int liveW, liveH;
-    private static int[] shifts;
-
-    /** Where ARGB_4444 keeps each channel on this Android (red, green, blue, alpha), asked once of a 1 px bitmap. */
-    static int[] shifts4444() {
-        if (shifts != null) return shifts;
-        int[] sh = { 12, 8, 4, 0 };   // Skia's usual layout
-        try {
-            Bitmap b = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_4444);
-            int alpha = litNibble(b, 0xFF000000, -1);            // opaque black lights alpha alone
-            int r = litNibble(b, 0xFFFF0000, alpha), g = litNibble(b, 0xFF00FF00, alpha), bl = litNibble(b, 0xFF0000FF, alpha);
-            b.recycle();
-            if (alpha >= 0 && r >= 0 && g >= 0 && bl >= 0 && r != g && g != bl && r != bl) sh = new int[] { r, g, bl, alpha };
-        } catch (Throwable ignored) { }
-        shifts = sh;
-        return sh;
-    }
-
-    /** The shift of the nibble a pixel of this colour sets to 15, other than 'except'; -1 if none. */
-    private static int litNibble(Bitmap b, int colour, int except) {
-        b.setPixel(0, 0, colour);
-        java.nio.ShortBuffer sb = java.nio.ShortBuffer.allocate(1);
-        b.copyPixelsToBuffer(sb);
-        int v = sb.get(0) & 0xFFFF;
-        for (int n = 0; n < 4; n++) if (n * 4 != except && ((v >> (n * 4)) & 15) == 15) return n * 4;
-        return -1;
-    }
 
     /** The picture's size on the screen in real pixels (the 3:2 area), so the 16-bit look is made 1:1. */
     void setLiveSize(int w, int h) { liveW = w; liveH = h; }
@@ -294,11 +250,9 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     private long cardUntil, noteUntil;
     private String note = "";
 
-    Viewfinder(Activity activity, File card, SurfaceView surface, ExecutorService worker, Stock stock, boolean focusFirst,
-               int highestPhoto, boolean liveLook, Host host) {
+    Viewfinder(Activity activity, File card, SurfaceView surface, ExecutorService worker, Stock stock, int highestPhoto, Host host) {
         this.activity = activity; this.card = card; this.surface = surface; this.worker = worker; this.host = host;
-        this.liveLook = liveLook;
-        this.release = new Release(this, focusFirst, !DIRECT_SHUTTER);
+        this.release = new Release(this, !DIRECT_SHUTTER);
         this.highestKnown = highestPhoto;
         setFilm(stock);
         overlayer.execute(new Runnable() { public void run() { FilmCore.setOverlay(null, 0, 0); } });   // none from a last visit
@@ -475,8 +429,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             if (!direct) release.app = true;
         }
         readSettings();
-        if (liveLook) startFrames();
-        else note("the camera's own live view (the film look on live view is off in MENU)");
+        startFrames();
         ui.post(tick);
         host.live();
         host.changed();
@@ -662,6 +615,13 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     // ------------------------------------------------------------------------------ live frames with the look
 
+    /**
+     * The film look on live view comes from the camera's live JPEG frames (CameraSequence's preview sequence),
+     * asked for as Sony's Smart Remote asks for them. v0.31 lost its pictures with them running, but it also
+     * never told Sony's catalogue to look (so it never saw them) and released or reopened the camera with them
+     * in doubt; v0.34.1's Live look test stored two pictures with the frames running, each in the catalogue
+     * ~2.2 s later once flushed. A setting the test turned on until v0.45.0; always on since.
+     */
     private void startFrames() {
         try {
             Class<?> cs = Class.forName("com.sony.scalar.hardware.CameraSequence");
@@ -750,18 +710,16 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         if (closed || closing || sequence == null || sequenceStopped) return;
         ui.removeCallbacks(feeder);
         long now = SystemClock.uptimeMillis();
-        boolean drain = hidden || (!lookOn && !LEVEL);
-        if (pacing && !drain && lookOn) pace(now);
-        long spacing = !lookOn ? LEVEL_FRAME_MS : pacing ? pacer.spacing(MIN_FRAME_MS) : MIN_FRAME_MS;
+        boolean drain = hidden || !lookOn;   // out of sight, or the camera's own view: frames only drained
+        if (pacing && !drain) pace(now);
+        long spacing = pacing ? pacer.spacing(MIN_FRAME_MS) : MIN_FRAME_MS;
         for (int n = 0; n <= LOOK_CORES.length; n++) {
             if (n > 0) now = SystemClock.uptimeMillis();   // after a grab: its ~10 ms count toward the spacing
-            boolean quiet = quietNow(now), any = false;
+            boolean quiet = quietNow(now);
             for (int i = 0; i < lookers.length; i++) {
                 if (lookers[i] == null) lookers[i] = new Looker(LOOK_CORES[i]);
                 busyNow[i] = lookers[i].busy;
-                any |= busyNow[i];
             }
-            if (!lookOn && any) java.util.Arrays.fill(busyNow, true);   // the level's frames: one at a time, as before
             int act = scheduler.next(now, lastGrabAt, busyNow, quiet, drain, spacing);
             if (act == FrameScheduler.WAIT) {
                 long at = scheduler.wakeAt > 0 ? scheduler.wakeAt : quiet && quietUntil > now ? quietUntil : 0;
@@ -877,7 +835,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     /** What a look thread made of one frame, for the UI thread. */
     private static final class Looked {
         Looker by;
-        int seq, w, h, angle = FilmCore.NO_READING, confidence, support, made = -1, overlay;
+        int seq, w, h, made = -1, overlay;
         long ms, grabAt;
         int[] tm, hist;
         int[] sig;             // the frame's brightness in cells (FilmCore.FI_SIG), when the core gives it
@@ -919,8 +877,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         final String l = lut;
         final int[] p = params.clone();
         final int n = ++seq;
-        // the level from every other frame (about ten readings a second), the histogram only when it shows
-        final int flags = (LEVEL && jpeg != null && (n & 1) == 0 ? FilmCore.F_LEVEL : 0) | (jpeg != null && display == D_GRID ? FilmCore.F_HIST : 0)
+        // the histogram only when it shows
+        final int flags = (jpeg != null && display == D_GRID ? FilmCore.F_HIST : 0)
                 | (MOVING_GRAIN ? FilmCore.F_TEMPORAL : 0) | (check && jpeg != null ? FilmCore.F_STILL : 0);
         final int w = liveW, h = liveH;
         // once a visit, on core 2, a while in (not the first frame, which it made late): this core's and its memory's speed
@@ -982,14 +940,11 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
                     if (rc != 0) { r.err = FilmCore.lastError(); giveBack(r.made); r.made = -1; return; }
                     r.w = k.info[0];
                     r.h = k.info[1];
-                    r.angle = k.info[FilmCore.L_ANGLE];
-                    r.confidence = k.info[FilmCore.L_CONFIDENCE];
-                    r.support = k.info[FilmCore.L_SUPPORT];
                     r.overlay = k.info[FilmCore.FI_OVERLAY];
                     r.tm = k.tm.clone();
                     if ((flags & FilmCore.F_HIST) != 0) {
-                        r.hist = new int[FilmCore.L_HIST_BINS];
-                        System.arraycopy(k.info, FilmCore.L_HIST, r.hist, 0, FilmCore.L_HIST_BINS);
+                        r.hist = new int[FilmCore.FI_HIST_BINS];
+                        System.arraycopy(k.info, FilmCore.FI_HIST, r.hist, 0, FilmCore.FI_HIST_BINS);
                     }
                 } catch (Throwable e) {
                     r.err = Probe.why(e);
@@ -1035,7 +990,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     private void show(Looked r) {
         if (r.made < 0) return;
-        if (hidden || (!lookOn && !LEVEL)) { giveBack(r.made); return; }   // out of sight, or the camera's own view shows
+        if (hidden || !lookOn) { giveBack(r.made); return; }   // out of sight, or the camera's own view shows
         int core = coreIndex(r.by.core);
         if (r.seq < shownSeq) { giveBack(r.made); if (core >= 0) lateBy[core]++; return; }   // a later frame is already up
         shownSeq = r.seq;
@@ -1073,7 +1028,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         lastLookMs = r.ms;
         if (core >= 0) framesBy[core]++;
         for (int i = 0; i < stageMs.length; i++) stageMs[i] += r.tm[i];
-        if (r.angle != FilmCore.NO_READING) level.frame(r.angle, r.confidence, r.support, now); else level.tick(now);
         if (r.hist != null) hist = r.hist;
         if (frames == 1 || back) host.changed();   // the look newly on the picture: what's drawn over it changes too
         else host.frame();
@@ -1318,8 +1272,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     /**
      * The screen, about to draw (UI thread): which layer to draw, and a new overlay when Latent's type over
-     * the picture changed. With the overlay in the frames, the screen draws only what moves (the level, focus,
-     * the print) over one opaque picture.
+     * the picture changed. With the overlay in the frames, the screen draws only what moves (focus, the print)
+     * over one opaque picture.
      */
     void layer(UiState s) {
         if (!s.liveExact) { s.vfLayer = UiState.LAYER_ALL; return; }
@@ -1540,7 +1494,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     /** Centre: the film look on live view, or the camera's own picture (smooth, at full speed: Latent makes nothing). */
     void toggleLook() {
-        if (!liveLook) { showCard(); return; }   // no look on live view: centre shows the film
         if (lookFailed) { say("Film look unavailable on live view"); return; }
         lookOn = !lookOn;
         if (lookOn) {
@@ -1557,15 +1510,13 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     void cycleDisplay(int step) {
         display = (display + step + DISPLAY_NAMES.length) % DISPLAY_NAMES.length;
-        say(display == D_GRID && liveLook ? "Grid and histogram" : DISPLAY_NAMES[display]);
+        say(display == D_GRID ? "Grid and histogram" : DISPLAY_NAMES[display]);
         host.changed();
     }
 
     void showCard() { cardUntil = SystemClock.uptimeMillis() + CARD_MS; ui.removeCallbacks(tick); ui.post(tick); host.changed(); }
 
     void say(String text) { note = text; noteUntil = SystemClock.uptimeMillis() + NOTE_MS; ui.removeCallbacks(tick); ui.post(tick); host.changed(); }
-
-    void setFocusFirst(boolean on) { release.focusFirst = on; }
 
     // ------------------------------------------------------------------------------ exposure compensation (decision B)
 
@@ -2220,7 +2171,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     // ------------------------------------------------------------------------------ the screen
 
     /**
-     * Animations (the print, the blink, the card, a note, the level fading) move on at 10 a second. Frames
+     * Animations (the print, the blink, the card, a note) move on at 10 a second. Frames
      * between go up under the state last given (presentAgain), so on its own surface each tick gives a fresh one;
      * through Latent's screen, not while frames come (each redraws it anyway).
      */
@@ -2228,12 +2179,10 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         public void run() {
             if (closed) return;
             long now = SystemClock.uptimeMillis();
-            boolean was = level.shown;
-            level.tick(now);
             if (evEditing && now > evEditUntil) closeEv();
             boolean moving = evEditing || now < flashUntil + 100 || now < cardUntil + 100 || now < noteUntil + 100 || (print != null && now - printAt < PRINT_MS + 200);
-            if ((moving || was != level.shown) && (onSurface() || now - lastShownAt > 200)) host.animate();
-            if (moving || level.shown) ui.postDelayed(this, moving ? 100 : 300);   // the level hides by itself when frames stop being sure
+            if (moving && (onSurface() || now - lastShownAt > 200)) host.animate();
+            if (moving) ui.postDelayed(this, 100);
         }
     };
 
@@ -2268,9 +2217,6 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         s.grid = display == D_GRID;
         s.hist = display == D_GRID && look ? hist : null;
         s.clean = display == D_CLEAN;
-        s.levelShown = LEVEL && display != D_CLEAN && level.shown && previewing;
-        s.levelAngle = level.angle;
-        s.levelOk = level.level;
         s.flash = now < flashUntil;
         s.printImage = print;
         s.printProgress = print == null ? 0 : Math.min(1f, (now - printAt) / (float) PRINT_MS);
@@ -2355,7 +2301,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         long liveMs = Math.max(1, (lastFrameAt > 0 ? lastFrameAt : now) - framesAskedAt);
         note("closed: " + shots + " picture(s), " + stored + " in the catalogue, " + frames + " live frames (" + String.format(Locale.US, "%.1f", frames * 1000.0 / liveMs)
                 + " a second, " + (frames > 0 ? lookMsSum / frames : 0) + " ms each on " + lookers.length + " threads), Latent's focus " + locks + " locked / " + misses
-                + " missed, level sure on " + level.sure + " of " + level.frames + " frames");
+                + " missed");
         int[] bat = battery(activity), was = openBattery;   // the visit's cost, so battery ideas can be measured
         if (openedAt > 0) note("visit: " + String.format(Locale.US, "%.1f", (now - openedAt) / 60000.0) + " min, battery " + (was != null ? batteryText(was) + " -> " : "")
                 + batteryText(bat) + ", " + (slowMsSum + (pacer.slow ? now - pacer.slowSince : 0)) / 1000 + " s of it at the still pace");
@@ -2552,7 +2498,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             Runtime rt = Runtime.getRuntime();
             int look = n > 0 ? lm / n : 0, grab = grabs > 0 ? grabMsSum / grabs : 0;
             StringBuilder st = new StringBuilder();
-            String[] names = { "decode", "level", "look", "compose", "of it blend", "dither" };
+            String[] names = { "decode", "sharpen", "look", "compose", "of it blend", "dither" };
             for (int i = 0; i < stageMs.length; i++) {
                 st.append(i == 0 ? "" : ", ").append(names[i]).append(' ').append(n > 0 ? (stageMs[i] - statStage[i]) / n : 0);
                 statStage[i] = stageMs[i];

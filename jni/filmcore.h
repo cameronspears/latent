@@ -55,28 +55,9 @@ void fl_last_timing(int *out);
 int fl_preview(const char *in_path, const char *lut_path, const int *params, int mode,
                unsigned int *argb, int max_w, int max_h, int *out_wh, char *err, int errlen);
 
-/* The viewfinder: one live frame (a small JPEG from the camera) decoded in memory, fitted inside
- * max_w x max_h, with the look (no grain) into argb. info[FL_LIVE_INFO]: 0, 1 the size produced;
- * 2..4 the level (fl_level, on the picture before the look); 5..68 a 64-bin brightness histogram. */
-#define FL_LIVE_INFO 69
-int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
-            unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen);
-
-/* How far from level the picture is, from its straight edges (the camera has no tilt sensor).
- * out[0]: the angle of the dominant horizontal / vertical edges in 1/100 degree, positive when they
- * rise to the right (the camera is turned clockwise); out[1]: confidence 0..100 (the share of edge
- * weight agreeing within a degree); out[2]: how many 8x8 blocks agree. 0 on success. */
-int fl_level(const unsigned char *rgb, int w, int h, int *out);
-
-/* A live frame (argb, w x h) for a 16-bit screen: cropped from the centre to aspect1000/1000 (width over
- * height; 0 = ow:oh), stretched to ow x oh (bilinear: the screen's pixels needn't be square), and
- * ordered-dithered (4x4 Bayer) down to 4 bits a channel, as 16-bit pixels with each channel's nibble at
- * shifts[0..3] (red, green, blue, alpha; fully opaque). Returns 0, or -1 on bad sizes. */
-int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int ow, int oh, int aspect1000, const int *shifts);
-
 /* The viewfinder's frame composer (v0.38.0; one pass a screen row since v0.45.0): one live JPEG to the screen's
  * 16-bit picture in one go. A context per thread (its buffers and film). fl_frame decodes (fitted inside
- * max_w x max_h) as Y'CbCr, or as RGB when the level is asked (FL_F_LEVEL reads RGB) or there is no film, writes
+ * max_w x max_h) as Y'CbCr, or as RGB when there is no film (or FL_F_RGB asks: the host tests), writes
  * the frame's signature (FL_FI_SIG) and stops there when FL_F_STILL finds the scene still (returns 1, nothing
  * written), applies the look (a table indexed by Y'CbCr, or the RGB one), reads the histogram of the looked
  * picture (FL_F_HIST: 64 bins, every other pixel of every other row), then for each of ow x oh screen pixels
@@ -84,18 +65,17 @@ int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int o
  * where it shows (opaque pixels at the nearest 4-bit colour, solid), blue-noise dither to 4 bits a channel
  * (moving with seq when FL_F_TEMPORAL), packed as format: FL_FMT_565 (opaque RGB565 holding the 4-bit values
  * exactly) or FL_FMT_4444 (nibbles at shifts[0..3]). jpeg NULL: the last frame again (the overlay changed;
- * FL_F_STILL ignored). info[FL_FRAME_INFO]: 0, 1 frame size; 2..4 level (FL_NO_READING when not read); 5..68
+ * FL_F_STILL ignored). info[FL_FRAME_INFO]: 0, 1 frame size; 2..4 spare (the level's until v0.45.0); 5..68
  * histogram; FL_FI_OVERLAY the overlay generation laid in (0: none); FL_FI_SIG.. the signature.
  * tm[FL_FRAME_TIMES]: ms per stage. 0, 1 (still), or -1. */
 typedef struct fl_frame_ctx fl_frame_ctx;
-#define FL_F_LEVEL 1
+#define FL_F_RGB 1     /* host tests: decoded as RGB, through the RGB film, as v0.44.1 did (the level's flag until v0.45.0) */
 #define FL_F_HIST 2
 #define FL_F_TEMPORAL 4
 #define FL_F_STILL 8   /* after decoding, stop (return 1) when the signature is within the still scene's (fl_set_still_ref) */
 #define FL_F_REFERENCE (1 << 30)   /* host test builds only (FL_FRAME_REFERENCE): v0.44.1's composer, to compare with */
 #define FL_FMT_565 0
 #define FL_FMT_4444 1
-#define FL_NO_READING (-999999)
 #define FL_FI_OVERLAY 69
 #define FL_FI_SIG 70      /* the decoded frame's signature: mean brightness (0..255) of FL_FI_SIG_W x FL_FI_SIG_H cells, row by row */
 #define FL_FI_SIG_W 8
@@ -103,7 +83,7 @@ typedef struct fl_frame_ctx fl_frame_ctx;
 #define FL_FI_SIG_N 48
 #define FL_FRAME_INFO 118
 #define FL_TM_DECODE 0
-#define FL_TM_READ 1
+#define FL_TM_READ 1      /* the sharpening, when it's built in (FL_SHARPEN); the level until v0.45.0 */
 #define FL_TM_LOOK 2
 #define FL_TM_COMPOSE 3
 #define FL_TM_BLEND 4     /* of compose: the rows blended, faded, dithered and packed, one pass (from every eighth row) */
@@ -138,18 +118,6 @@ typedef int (*fl_row_io)(void *ctx, int y, unsigned char *uyvy, int write);
 int fl_develop_uyvy(const char *lut_path, const int *params, int w, int h, fl_row_io io, void *ctx,
                     fl_progress_fn progress, void *pctx, char *err, int errlen);
 
-/* UYVY (Cb Y0 Cr Y1, full-range BT.601) <-> RGB for one row of w pixels (w even). */
-/* Speed test: the look's interchangeable inner loops, timed on in_path decoded at 1/scale; one line each. */
-int fl_bench(const char *in_path, const char *lut_path, const int *params, int scale, char *report, int len);
-/* Read only: the cores present / online, those Latent may use, its CPU group, and each core's load
- * over one second. One "key: value" line each. */
-int fl_cores(char *report, int len);
-/* The look on in_path (at 1/scale) on one core, then on two threads with the helper allowed onto every
- * core; reports what that request did, where each ran, both times, and that the pictures match. */
-int fl_bench_cores(const char *in_path, const char *lut_path, const int *params, int scale, char *report, int len);
-/* Which inner loop fl_develop_uyvy uses (0 = per pair, the default). */
-void fl_set_variant(int v);
-
 /* Block access with two buffers (buf 0 or 1): get reads rows y .. y + *n - 1 (packed UYVY, *stride bytes
  * apart) into that buffer to change in place, NULL on failure; put sends those rows on from it (0 = ok).
  * Blocks are read and sent in order, top to bottom; a buffer is only read into after its block was sent. */
@@ -158,27 +126,24 @@ typedef int (*fl_block_put)(void *ctx, int y, int n, int buf);
 /* The look a block at a time; params[FL_PARAM_THREADS] 1..3 = this core plus helpers on cores 1 and 2 (never 0). */
 int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_block_get get, fl_block_put put, void *ctx,
                       fl_progress_fn progress, void *pctx, char *err, int errlen);
-/* .cube rows read by Latent's own exact decimal reader (1, the default) or sscanf (0). */
-void fl_set_fast_cube(int on);
 /* Every cached film forgotten (and the block develop's table made from one, and the decoded previews): the next
  * look reads its file again. A look still using a film keeps it until it is done. */
 void fl_forget_lut(void);
 /* A film file read into the shared film cache (8 films, the least recently used dropped) unless it is there
  * already, so the next look on it, on any thread, needs no card read. 0, or -1 (err). Any thread. */
 int fl_cache_lut(const char *lut_path, char *err, int errlen);
-/* Reads path both ways: ms[0] ms with sscanf, ms[1] ms with the fast reader, ms[2] rows the fast reader took,
- * ms[3] rows it left to sscanf. 0 = identical tables and identical floats in every row it took, 1 = not, -1 = error. */
+/* Reads path both ways (the host tests' check of the fast .cube reader, tools/cube-test.sh): ms[0] ms with sscanf,
+ * ms[1] ms with the fast reader, ms[2] rows the fast reader took, ms[3] rows it left to sscanf. 0 = identical tables
+ * and identical floats in every row it took, 1 = not, -1 = error. */
 int fl_cube_check(const char *path, int *ms, char *err, int errlen);
 /* The next develop's film made ready on a thread of its own (file read, grain tile, Y'CbCr table), while
  * the caller waits on something else (Sony's encoder). Returns at once (once an earlier one is done); the
  * next block develop waits for it. */
 void fl_prewarm(const char *lut_path, const int *params);
-/* Block develops (per-pair loops) remember recent lookups in 2^bits entries per thread (bits 8..16), or don't
- * (0, the default). The picture is the same either way. */
-void fl_set_pair_memo(int bits);
 /* Threads the last fl_develop_blocks used; note gets why a helper didn't join, if one didn't. */
 int fl_last_threads(char *note, int len);
 
+/* UYVY (Cb Y0 Cr Y1, full-range BT.601) <-> RGB for one row of w pixels (w even). */
 void fl_uyvy_to_rgb(const unsigned char *uyvy, unsigned char *rgb, int w);
 void fl_rgb_to_uyvy(const unsigned char *rgb, unsigned char *uyvy, int w);
 

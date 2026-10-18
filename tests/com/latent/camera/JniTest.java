@@ -27,92 +27,16 @@ public class JniTest {
         rc = FilmCore.preview(in, null, p, FilmCore.PREVIEW_CROP, px, 432, 288, size);
         check(rc == 0 && size[0] == 432 && size[1] == 288, "crop preview without LUT");
 
-        // film files read Latent's own way (v0.39.0): the same floats in every row, and the same developed file
-        int[] cms = new int[4];
-        check(FilmCore.cubeCheck(lut, cms) == 0 && cms[2] > 30000 && cms[3] == 0, "fast film read matches sscanf row for row (" + cms[0] + " -> " + cms[1] + " ms) " + FilmCore.lastError());
-        check(FilmCore.cubeCheck(lut + ".missing", cms) < 0, "fast film read reports a missing file");
-        FilmCore.forgetLut();
-        FilmCore.setFastCube(true);
-        rc = FilmCore.process(in, outDir + "/FLF04491.JPG", lut, null, p, null);
-        FilmCore.setFastCube(false);
-        FilmCore.forgetLut();
-        check(rc == 0 && java.util.Arrays.equals(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(outDir, "FLA04491.JPG")),
-                java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(outDir, "FLF04491.JPG"))), "developed with the fast film read: the same file, byte for byte");
         rc = FilmCore.process(in, outDir + "/FLB04491.JPG", outDir + "/MISSING.CUB", null, p, null);
         check(rc != 0 && FilmCore.lastError().contains("cannot open look"), "missing LUT reported: " + FilmCore.lastError());
         rc = FilmCore.preview(in, lut, p, 0, new int[10], 432, 288, size);
         check(rc != 0 && FilmCore.lastError().contains("buffer"), "small buffer rejected");
         rc = FilmCore.process(outDir + "/NOPE.JPG", outDir + "/FLC04491.JPG", null, null, p, null);
         check(rc != 0, "missing source reported: " + FilmCore.lastError());
-        int[] bp = { -2, 1, 5, 2, 95, 1, 1 };
-        String bench = FilmCore.bench(in, lut, bp, 4);
-        check(bench != null && bench.split("\n").length == 2 + FilmCore.VARIANTS.length && bench.contains("colour reuse"),
-                "speed test reports every inner loop: " + (bench == null ? FilmCore.lastError() : bench.replace("\n", " | ")));
-        check(FilmCore.bench(in + ".missing", lut, bp, 4) == null && FilmCore.lastError().length() > 0, "speed test reports a missing photo");
-        String cores = FilmCore.cores();
-        check(cores != null && cores.contains("busy while idle"), "core report reads (on a Mac: unreadable)");
-        String two = FilmCore.benchCores(in, lut, bp, 4);
-        check(two != null && two.contains("pictures identical") && two.contains("widen:"), "two-thread run matches one core: " + (two == null ? FilmCore.lastError() : two.replace("\n", " | ")));
-        check(FilmCore.benchCores(in + ".missing", lut, bp, 4) == null, "two-thread run reports a missing photo");
         // the viewfinder: a live frame (here the screen preview, a small JPEG like the camera's) decoded from memory
         byte[] jpeg = read(outDir + "/PRV04491.JPG");
-        int[] lp = new int[FilmCore.L_COUNT], live = new int[320 * 240];
-        rc = FilmCore.live(jpeg, jpeg.length, lut, p, live, 320, 240, lp);
-        int sum = 0;
-        for (int i = 0; i < FilmCore.L_HIST_BINS; i++) sum += lp[FilmCore.L_HIST + i];
-        check(rc == 0 && lp[FilmCore.L_W] == 320 && lp[FilmCore.L_H] <= 240 && lp[FilmCore.L_H] >= 200, "live frame fitted to " + lp[FilmCore.L_W] + "x" + lp[FilmCore.L_H] + " " + FilmCore.lastError());
-        check(sum == lp[FilmCore.L_W] * lp[FilmCore.L_H] && (live[0] >>> 24) == 0xFF, "its histogram counts every pixel; pixels opaque");
-        check(lp[FilmCore.L_CONFIDENCE] >= 0 && lp[FilmCore.L_CONFIDENCE] <= 100, "level read: " + lp[FilmCore.L_ANGLE] / 100.0 + " degrees, confidence " + lp[FilmCore.L_CONFIDENCE]);
-        {   // the film is kept between frames (v0.37.0): another film changes the look, and coming back is exact
-            String other = new java.io.File(new java.io.File(lut).getParentFile(), "TRIX400.CUB").getPath();
-            int[] again = new int[320 * 240], mono = new int[320 * 240], back = new int[320 * 240];
-            FilmCore.live(jpeg, jpeg.length, lut, p, again, 320, 240, lp);
-            check(java.util.Arrays.equals(live, again), "the same film twice: the same frame");
-            check(FilmCore.live(jpeg, jpeg.length, other, p, mono, 320, 240, lp) == 0 && !java.util.Arrays.equals(live, mono), "another film: another look");
-            int[] hp = p.clone();
-            hp[FilmCore.HIGHLIGHT] = 3;
-            int[] bright = new int[320 * 240];
-            FilmCore.live(jpeg, jpeg.length, lut, hp, bright, 320, 240, lp);
-            check(!java.util.Arrays.equals(live, bright), "the film's highlight setting changes the look");
-            FilmCore.live(jpeg, jpeg.length, lut, p, back, 320, 240, lp);
-            check(java.util.Arrays.equals(live, back), "back to the first film: exactly as before");
-            check(FilmCore.live(jpeg, jpeg.length, lut + ".missing", p, back, 320, 240, lp) != 0, "a missing film refused: " + FilmCore.lastError());
-            FilmCore.live(jpeg, jpeg.length, lut, p, back, 320, 240, lp);
-            check(java.util.Arrays.equals(live, back), "and the first film still right after it");
-        }
-        rc = FilmCore.live(jpeg, jpeg.length / 3, lut, p, live, 320, 240, lp);
-        check(true, "a cut-off frame doesn't crash (rc " + rc + ")");
-        byte[] junk = new byte[2048];
-        check(FilmCore.live(junk, junk.length, lut, p, live, 320, 240, lp) != 0, "not a JPEG: refused (" + FilmCore.lastError() + ")");
-        check(FilmCore.live(jpeg, jpeg.length, lut, p, new int[100], 320, 240, lp) != 0 && FilmCore.lastError().contains("buffers"), "small buffer rejected");
-        check(FilmCore.live(jpeg, jpeg.length + 1, lut, p, live, 320, 240, lp) != 0, "a length past the array rejected");
-        {   // the live frame for the 16-bit screen: cropped to 3:2, stretched, dithered to 4 bits a channel
-            int w = 320, h = 216, ow = 540, oh = 480;
-            int[] argb = new int[w * h];
-            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) argb[y * w + x] = 0xFF000000 | (x < 160 ? 0x808080 : 0xFF0000 | (y * 255 / (h - 1)) << 8);
-            short[] o = new short[ow * oh];
-            int[] sh = { 12, 8, 4, 0 };
-            check(FilmCore.to4444(argb, w, h, o, ow, oh, 1500, sh) == 0, "16-bit frame made: " + FilmCore.lastError());
-            int sevens = 0, eights = 0, other = 0;
-            for (int y = 100; y < 140; y++) for (int x = 20; x < 100; x++) {   // the grey half: 128 lies between 7 (119) and 8 (136)
-                int v = o[y * ow + x] & 0xFFFF, r = v >> 12 & 15, g = v >> 8 & 15, bl = v >> 4 & 15, al = v & 15;
-                if (al != 15 || r != g || g != bl) other++; else if (r == 7) sevens++; else if (r == 8) eights++; else other++;
-            }
-            check(other == 0 && sevens > 0 && eights > 0, "mid-grey dithers between the two nearest levels (" + sevens + " 7s, " + eights + " 8s, " + other + " other)");
-            int right = o[240 * ow + 500] & 0xFFFF;
-            check((right >> 12 & 15) == 15 && (right & 15) == 15, "red lands in the red nibble, opaque");
-            check(FilmCore.to4444(argb, w, h, new short[100], ow, oh, 1500, sh) != 0, "a small output rejected");
-            check(FilmCore.to4444(argb, w, h, o, ow, oh, 1500, new int[] { 13, 8, 4, 0 }) != 0, "a bad channel shift rejected");
-            // 3:2 into the 540 x 480 the screen's 720 x 480 design space is: nothing of the frame's width lost
-            int[] edge = new int[w * h];
-            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) edge[y * w + x] = x < 4 ? 0xFFFFFFFF : 0xFF000000;   // a white stripe at the left edge
-            check(FilmCore.to4444(edge, w, h, o, ow, oh, 1500, sh) == 0 && (o[240 * ow] >> 12 & 15) == 15, "a 3:2 crop keeps the frame's left edge");
-            check(FilmCore.to4444(edge, w, h, o, ow, oh, 0, sh) == 0 && (o[240 * ow] >> 12 & 15) == 0, "a crop to the pixels' own shape loses it (v0.36.1's bug)");
-        }
         frameComposer(jpeg, lut, p);
         sharedCaches(in, jpeg, lut, p);
-        FilmCore.setVariant(1);
-        FilmCore.setVariant(0);
         System.out.println("JNI OK");
     }
 
@@ -125,7 +49,7 @@ public class JniTest {
         int[] info = new int[FilmCore.FI_COUNT], tm = new int[FilmCore.TM_COUNT];
         short[] a = new short[ow * oh], b = new short[ow * oh];
         FilmCore.setOverlay(null, 0, 0);
-        int rc = FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_LEVEL | FilmCore.F_HIST, 1, a, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
+        int rc = FilmCore.frame(c, jpeg, jpeg.length, lut, p, RGB | FilmCore.F_HIST, 1, a, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
         int sum = 0, mean = 0;
         for (int i = 0; i < 64; i++) { sum += info[5 + i]; mean += i * info[5 + i]; }
         check(rc == 0 && info[0] == 320 && info[1] > 200 && sum == ((info[0] + 1) / 2) * ((info[1] + 1) / 2),
@@ -138,23 +62,15 @@ public class JniTest {
             for (int i = 0; i < 64; i++) brighter += i * info3[5 + i];
             check(brighter > mean, "the histogram shows the look: brighter highlights, brighter histogram (" + mean / sum + " -> " + brighter / sum + ")");
         }
-        check(info[2] != FilmCore.NO_READING && info[FilmCore.FI_OVERLAY] == 0, "level read, no overlay laid in");
+        check(info[FilmCore.FI_OVERLAY] == 0, "no overlay laid in");
         boolean opaque = true;
         for (short v : a) if ((v & 15) != 15) { opaque = false; break; }
         check(opaque, "every 4444 pixel opaque");
-        // as bright as the 32-bit look, cropped the same way (another dither, so on average)
-        int[] live = new int[320 * 240], li = new int[FilmCore.L_COUNT];
-        FilmCore.live(jpeg, jpeg.length, lut, p, live, 320, 240, li);
-        short[] ref = new short[ow * oh];
-        FilmCore.to4444(live, li[FilmCore.L_W], li[FilmCore.L_H], ref, ow, oh, 1500, sh);
-        double ma = 0, mr = 0;
-        for (int i = 0; i < ow * oh; i++) { ma += (a[i] >> 12 & 15) + (a[i] >> 8 & 15) + (a[i] >> 4 & 15); mr += (ref[i] >> 12 & 15) + (ref[i] >> 8 & 15) + (ref[i] >> 4 & 15); }
-        check(Math.abs(ma - mr) / (ow * oh * 3) < 0.25, "as bright as the 32-bit look: " + String.format("%.2f vs %.2f", ma / (ow * oh * 3), mr / (ow * oh * 3)));
-        // without the level the frame is decoded as Y'CbCr and looked up in the film's Y'CbCr table (v0.45.0)
+        // as the viewfinder asks for it, the frame is decoded as Y'CbCr and looked up in the film's Y'CbCr table (v0.45.0)
         rc = FilmCore.frame(c, jpeg, jpeg.length, lut, p, 0, 1, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
         int changed = 0;
         for (int i = 0; i < ow * oh; i++) { int[] la = levels(a[i], FilmCore.FMT_4444), lb = levels(b[i], FilmCore.FMT_4444); for (int k = 0; k < 3; k++) if (la[k] != lb[k]) changed++; }
-        check(rc == 0 && info[2] == FilmCore.NO_READING && changed < ow * oh * 3 * 0.06, "no level asked: none read, decoded as Y'CbCr, "
+        check(rc == 0 && changed < ow * oh * 3 * 0.06, "decoded as Y'CbCr: "
                 + String.format("%.1f%%", changed * 100.0 / (ow * oh * 3)) + " of 4-bit values changed (RGB's within 6%)");
         System.arraycopy(b, 0, a, 0, a.length);
         FilmCore.frame(c, null, 0, lut, p, 0, 1, b, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
@@ -243,7 +159,7 @@ public class JniTest {
                 for (byte[] j : new byte[][] { jpeg, small }) for (int fmt = 0; fmt < 2; fmt++) {
                     short[] now = new short[ow * oh], was = new short[ow * oh];
                     int[] s1 = fmt == FilmCore.FMT_4444 ? sh : null;
-                    int r1 = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_TEMPORAL | FilmCore.F_LEVEL, 2, now, null, ow, oh, 1500, fmt, s1, 320, 240, info, tm);
+                    int r1 = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_TEMPORAL | RGB, 2, now, null, ow, oh, 1500, fmt, s1, 320, 240, info, tm);
                     int r2 = FilmCore.frame(c, j, j.length, lut, p, FilmCore.F_TEMPORAL | REFERENCE, 2, was, null, ow, oh, 1500, fmt, s1, 320, 240, info, tm);
                     double[] v = versus(now, was, fmt);
                     check(r1 == 0 && r2 == 0 && v[0] >= 0.90 && v[1] <= 1 && Math.abs(v[2]) <= 0.02,
@@ -299,7 +215,7 @@ public class JniTest {
         // two look threads at once, each its own composer, the overlay swapped meanwhile: the same pictures
         FilmCore.setOverlay(ov, ow, oh);
         final short[] want = new short[ow * oh];
-        FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL | FilmCore.F_LEVEL, 7, want, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info, tm);
+        FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL | RGB, 7, want, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, info, tm);
         final boolean[] ok = { true, true };
         Thread[] th = new Thread[2];
         for (int k = 0; k < 2; k++) {
@@ -310,7 +226,7 @@ public class JniTest {
                     short[] o = new short[ow * oh];
                     int[] in = new int[FilmCore.FI_COUNT];
                     for (int n = 0; n < 12; n++) {
-                        if (FilmCore.frame(cc, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL | FilmCore.F_LEVEL, 7, o, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, in, null) != 0) ok[kk] = false;
+                        if (FilmCore.frame(cc, jpeg, jpeg.length, lut, p, FilmCore.F_TEMPORAL | RGB, 7, o, null, ow, oh, 1500, FilmCore.FMT_565, null, 320, 240, in, null) != 0) ok[kk] = false;
                         else if (!java.util.Arrays.equals(o, want) && in[FilmCore.FI_OVERLAY] > 0) {
                             // the overlay may have been swapped for an identical one: the picture must still match
                             ok[kk] = false;
@@ -367,7 +283,7 @@ public class JniTest {
         check(FilmCore.cacheLut(lut + ".missing") == -1 && FilmCore.lastError().contains("cannot open look"), "a missing film refused: " + FilmCore.lastError());
         check(FilmCore.cacheLut(null) == 0, "no film: nothing to read");
 
-        // the decoded photo kept between previews: the hero's size and the samples' in turn, then the Lab's 100% view
+        // the decoded photo kept between previews: the hero's size and the samples' in turn, then a 100% view
         int[] hero = new int[720 * 480], hero2 = new int[720 * 480], sample = new int[w * h];
         check(FilmCore.preview(photo, films[1], p, FilmCore.PREVIEW_FIT, hero, 720, 480, size) == 0 && size[1] == 480, "the hero's size: " + size[0] + "x" + size[1]);
         FilmCore.preview(photo, films[2], p, FilmCore.PREVIEW_FIT, sample, w, h, size);
@@ -383,7 +299,7 @@ public class JniTest {
         FilmCore.preview(photo, films[0], p, FilmCore.PREVIEW_FIT, sample, w, h, size);
         FilmCore.preview(photo, films[3], gp, FilmCore.PREVIEW_CROP, c3, w, h, size);
         check(!java.util.Arrays.equals(c1, c2) && java.util.Arrays.equals(c1, c3) && java.util.Arrays.equals(sample, fresh[0]),
-                "Lab changes re-run only the look: another film and grain differ, the first again exactly as before");
+                "100% views re-run only the look: another film and grain differ, the first again exactly as before");
         FilmCore.preview(photo, null, gp, FilmCore.PREVIEW_CROP, c4, w, h, size);
         check(!java.util.Arrays.equals(c4, c1), "the crop without a film: a different picture");
 
@@ -432,6 +348,8 @@ public class JniTest {
 
     /** FL_F_REFERENCE: v0.44.1's composer instead (host builds only, tools/frame_ref.h). */
     static final int REFERENCE = 1 << 30;
+    /** FL_F_RGB: the frame decoded as RGB and looked up in the RGB film, as v0.44.1 did, so the composer itself is compared. */
+    static final int RGB = 1;
 
     /** now against was, 4-bit levels: the share of pixels identical, the largest channel difference, the mean difference. */
     static double[] versus(short[] now, short[] was, int fmt) {

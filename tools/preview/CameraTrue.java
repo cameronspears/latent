@@ -27,7 +27,7 @@ final class CameraTrue {
 
     /** The camera's screen for this state, at 640 x 480 dots (viewing size: view()). */
     static BufferedImage dots(UiState s, File fonts, BufferedImage video) throws Exception {
-        if (s.mode == UiState.PHOTO && s.liveImage != null && !s.live) return viewfinder(s, fonts);
+        if (s.mode == UiState.PHOTO && s.liveImage != null) return viewfinder(s, fonts);
         BufferedImage osd = new BufferedImage(DOTS, ROWS, BufferedImage.TYPE_INT_ARGB);   // transparent where nothing is drawn
         Graphics2D g = osd.createGraphics();
         g.scale(DOTS / s.width, 1);

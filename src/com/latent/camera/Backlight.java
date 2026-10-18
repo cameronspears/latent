@@ -6,15 +6,13 @@ package com.latent.camera;
  * now and which presses only wake it; MainActivity (and Relaunch) set the level through the window's
  * screenBrightness and ask again at next(). Pure logic, tested on the Mac (tests/RollTest).
  *
- *   working   the darkroom (and a Lab save, the Speed and Hardware tests): the darkroom's light. A turn of
- *             the wheel or an arrow in the darkroom brightens it for PEEK_MS, as an always-on display wakes
- *             when it's touched, then it goes down again.
+ *   working   the darkroom: the darkroom's light. A turn of the wheel or an arrow in the darkroom brightens
+ *             it for PEEK_MS, as an always-on display wakes when it's touched, then it goes down again.
  *   resting   a roll that developed with nobody there: what it ends on stays at the darkroom's light until
  *             a press (the camera was set down; the screen needn't light up for nobody).
- *   still     a screen that waits for you (the camera back, Load film, the menu, a contact sheet, the Lab,
- *             a test without the camera): after REST_AFTER_MS without a press it rests at REST, as a phone
- *             dims before it locks.
- *   otherwise the camera's own brightness: the viewfinder, the viewer, a test holding the camera.
+ *   still     a screen that waits for you (the camera back, Load film, the menu, a contact sheet): after
+ *             REST_AFTER_MS without a press it rests at REST, as a phone dims before it locks.
+ *   otherwise the camera's own brightness: the viewfinder, the viewer.
  *
  * The first press on a resting or rested screen only wakes it, so nothing is loaded or developed by a
  * press made to see the screen. The shutter button is the exception: it wakes the screen and acts, as

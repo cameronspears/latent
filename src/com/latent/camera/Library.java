@@ -36,11 +36,11 @@ final class Library {
         return home;
     }
     static File lutDir(File card) { return new File(home(card), "LUTS"); }
-    static File outDir(File card) { return new File(home(card), "OUT"); }
 
     /**
-     * Photos that are never exposures: the Shooting test's own shots and prints. LATENT/IGNORE.TXT,
-     * one "100MSDCF/DSC04680.JPG" per line (folder and name, so it reads the same on a computer).
+     * Photos that are never exposures: the camera tests' own shots and prints (the tests went in v0.45.0; their
+     * photos may still be on the card). LATENT/IGNORE.TXT, one "100MSDCF/DSC04680.JPG" per line (folder and
+     * name, so it reads the same on a computer).
      */
     static java.util.Set<String> ignored(File card) {
         java.util.Set<String> out = new java.util.HashSet<String>();
@@ -58,11 +58,6 @@ final class Library {
 
     static String key(File photo) {
         return (photo.getParentFile().getName() + "/" + photo.getName()).toUpperCase(Locale.US);
-    }
-
-    static void ignore(File card, File photo) throws IOException {
-        FileOutputStream o = new FileOutputStream(new File(home(card), "IGNORE.TXT"), true);
-        try { o.write((key(photo) + "\r\n").getBytes("UTF-8")); } finally { o.close(); }
     }
 
     /**
@@ -230,21 +225,5 @@ final class Library {
         String n = f.getName();
         int dot = n.lastIndexOf('.');
         return dot > 0 ? n.substring(0, dot) : n;
-    }
-
-    /** A free 8.3 output name for a source photo: DSC04491.JPG -> FLA04491.JPG, FLB04491.JPG ... */
-    static File outputFor(File card, File source) {
-        File dir = outDir(card);
-        String stem = source.getName();
-        int dot = stem.lastIndexOf('.');
-        if (dot > 0) stem = stem.substring(0, dot);
-        String digits = stem.replaceAll("[^0-9]", "");
-        if (digits.length() > 5) digits = digits.substring(digits.length() - 5);
-        while (digits.length() < 5) digits = "0" + digits;
-        for (char c = 'A'; c <= 'Z'; c++) {
-            File f = new File(dir, "FL" + c + digits + ".JPG");
-            if (!f.exists()) return f;
-        }
-        return null;
     }
 }

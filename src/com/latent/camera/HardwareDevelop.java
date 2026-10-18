@@ -38,7 +38,7 @@ import java.util.zip.CRC32;
  */
 final class HardwareDevelop {
     static final int RUN = Probe.RUN, OK = Probe.OK, FAIL = Probe.FAIL, INFO = Probe.INFO;
-    /** The steps, as the hardware test lists them. */
+    /** The steps, as the log names them. */
     static final String[] STEPS = { "Photo", "Hardware decode", "Memory check", "Output image", "Develop",
             "Save to camera roll", "New photo" };
     static final int S_PHOTO = 0, S_DECODE = 1, S_MEMORY = 2, S_IMAGE = 3, S_DEVELOP = 4, S_SAVE = 5, S_NEW = 6;
@@ -75,12 +75,11 @@ final class HardwareDevelop {
     private static volatile boolean hung;
     /** The transfer size the darkroom develops with, once verified on this camera (0 = not yet). */
     private static int block;
-    /** The darkroom's transfer size until the Develop test has chosen one (DevelopTest.P_BLOCK). */
+    /** The darkroom's transfer size (v0.38's test: 4 MB or 1 MB were no faster; docs/DEVELOP-SPEED.md). */
     static final int DARKROOM_BLOCK = 2 * 1024 * 1024;
-    /** Largest transfer verified on this camera so far, of those up to checkedUpTo (the Develop test checks up to 4 MB). */
-    private static int verified, checkedUpTo;
+    /** Largest transfer verified on this camera so far (up to DARKROOM_BLOCK). */
+    private static int verified;
 
-    static int verified() { return verified; }
     /** The transfer size develop() uses. */
     static int block() { return block; }
     /** Save at the encoder's best quality, unless it has refused that once. */
@@ -91,7 +90,6 @@ final class HardwareDevelop {
     private final ContentResolver cr;
     private final File card;
     private final StringBuilder log;
-    private final Probe.Listener steps;
     private String mediaId;
     private Uri uri;
     final long[] ms = new long[T_COUNT];
@@ -100,8 +98,8 @@ final class HardwareDevelop {
     final int[] look = new int[FilmCore.T_COUNT];
     int current;
 
-    HardwareDevelop(Context ctx, File card, StringBuilder log, Probe.Listener steps) {
-        this.cr = ctx.getContentResolver(); this.card = card; this.log = log; this.steps = steps;
+    HardwareDevelop(Context ctx, File card, StringBuilder log) {
+        this.cr = ctx.getContentResolver(); this.card = card; this.log = log;
     }
 
     static boolean hung() { return hung; }
@@ -110,24 +108,17 @@ final class HardwareDevelop {
         current = i;
         if (status != RUN) log.append(STEPS[i]).append(": ").append(status == OK ? "ok" : status == FAIL ? "FAILED" : "info")
                 .append(" - ").append(detail).append("\r\n");
-        if (steps != null) steps.step(i, status, detail);
     }
 
     // ------------------------------------------------------------------------------ setting up
 
     /**
-     * Once per darkroom visit: the card's catalogue, and (once per app run, or again when asked) the
-     * largest transfer size at which the private read/write agree with Sony's public buffer API.
+     * Once per darkroom visit: the card's catalogue, and (once per app run) the largest transfer size, up to
+     * DARKROOM_BLOCK, at which the private read/write agree with Sony's public buffer API.
      */
-    void prepare(boolean verifyAgain) throws Exception { prepare(verifyAgain, DARKROOM_BLOCK); }
-
-    /**
-     * The same, with transfers verified up to upTo bytes; the darkroom then develops with the largest
-     * verified size up to upTo (the Develop test checks up to 4 MB and times each size itself).
-     */
-    void prepare(boolean verifyAgain, int upTo) throws Exception {
+    void prepare() throws Exception {
         openCatalogue();
-        if (verified != 0 && checkedUpTo >= upTo && !verifyAgain) { block = Math.min(verified, upTo); return; }
+        if (verified != 0) { block = verified; return; }
         block = 0;
         verified = 0;
         step(S_MEMORY, RUN, "checking…");
@@ -136,8 +127,8 @@ final class HardwareDevelop {
         int good = 0;
         StringBuilder speeds = new StringBuilder();
         try {
-            for (int size : new int[] { 65536, 262144, 1048576, 2097152, 4194304 }) {
-                if (size > upTo) break;
+            for (int size : new int[] { 65536, 262144, 1048576, 2097152 }) {
+                if (size > DARKROOM_BLOCK) break;
                 String r = verifyBlock(proc, size);
                 if (r == null) break;   // this size could not be verified: keep the last good one
                 good = size;
@@ -148,8 +139,7 @@ final class HardwareDevelop {
         }
         if (good == 0) throw fail(S_MEMORY, "private read/write could not be verified; nothing else was touched");
         verified = good;
-        checkedUpTo = upTo;
-        block = Math.min(good, upTo);
+        block = good;
         log.append("transfer speeds (read/write ms): ").append(speeds).append("\r\n");
         step(S_MEMORY, OK, "verified up to " + verified / 1024 + " KB per transfer (" + speeds + ")");
     }
@@ -270,90 +260,10 @@ final class HardwareDevelop {
         }
     }
 
-    /** What the Develop test does with the two images: Sony handles and layouts of the source and the output. */
-    interface Bench { void run(int src, int[] sg, int full, int[] dg) throws Exception; }
-
-    /**
-     * For the Develop test: 'original' decoded and given an output image exactly as develop() does, then
-     * bench runs on them. Nothing is saved; both are released after (unless a Sony call never answered).
-     */
-    void bench(File original, Bench bench) throws Exception {
-        if (hung) throw new IllegalStateException("a camera call is still busy");
-        if (verified == 0 || uri == null) throw new IllegalStateException("not prepared");
-        Held o = new Held();
-        boolean stuck = false;
-        SONY.lock();
-        try {
-            int[] sg = new int[8], dg = new int[8];
-            openImages(original, o, sg, dg, null);
-            bench.run(SonyMemory.handle(o.src), sg, SonyMemory.handle(o.full), dg);
-        } catch (Stuck e) {
-            stuck = true;
-            hung = true;
-            step(current, FAIL, "no answer from the camera in time. If it doesn't recover, turn it off (or remove the battery).");
-            throw e;
-        } finally {
-            if (!stuck) for (Object x : new Object[] { o.half, o.src, o.proc, o.full }) if (x != null) try { call(x, "release"); } catch (Throwable ignored) { }
-            if (SONY.isHeldByCurrentThread()) SONY.unlock();
-        }
-    }
-
     /** What a develop holds of Sony's: released when it ends, unless a call never answered. */
-    static final class Held {
+    private static final class Held {
         Object src, half, full, proc;
-
-        /** Everything held given back to Sony (never after a call that didn't answer: Sony may still use it). */
-        void release() {
-            for (Object x : new Object[] { half, src, proc, full }) if (x != null) try { call(x, "release"); } catch (Throwable ignored) { }
-            half = src = proc = full = null;
-        }
     }
-
-    // ------------------------------------------------------------------------------ for the Develop test's save check
-
-    /** A photo decoded and given an output image, as a develop does (see openImages). Caller holds SONY. */
-    int open(File original, Held o, int[] sg, int[] dg) throws Exception { return openImages(original, o, sg, dg, null); }
-
-    /**
-     * Sony's encoder saves image into the camera roll, as a develop does (Extra Fine, or Fine where refused).
-     * 0 = saved, else the encoder's code. Throws Stuck if it never answers. Safe to call from another thread
-     * while the caller holds SONY: that is what the save check tries.
-     */
-    int save(Object image) throws Exception {
-        Saved s = export(image, mediaId, extraFine ? "EXTRAFINE" : "FINE");
-        if (s.code == -2 && extraFine) { s.settle.finish(); extraFine = false; s = export(image, mediaId, "FINE"); }
-        s.settle.finish();
-        return s.code;
-    }
-
-    /** The photos on the card now (to see which one a save added). */
-    Set<String> photoPaths() {
-        Set<String> out = new HashSet<String>();
-        for (File f : Library.photos(card)) out.add(f.getPath());
-        return out;
-    }
-
-    /** The photo a save added since 'before' (waited for up to 10 s), or null. */
-    File newPhoto(Set<String> before) throws InterruptedException {
-        for (int i = 0; i < 40; i++) {
-            if (i > 0) Thread.sleep(250);
-            for (File f : Library.photos(card)) if (!before.contains(f.getPath())) return f;
-        }
-        return null;
-    }
-
-    /** Whether f is in Sony's catalogue (shows in playback), asked for up to 2 s. */
-    boolean inCatalogue(File f) throws Exception {
-        for (int i = 0; i < 8; i++) {
-            if (i > 0) Thread.sleep(250);
-            Probe.Row row = Probe.find(Probe.query(cr, uri), f);
-            if (row != null && row.data != null) return true;
-        }
-        return false;
-    }
-
-    /** A Sony call never answered: leave the hardware alone until Latent restarts. */
-    static void markHung() { hung = true; }
 
     /**
      * The first half of a develop, under SONY: the photo's catalogue entry, its hardware decode (o.src)

@@ -139,7 +139,7 @@ public class LogicTest {
             check(!b.developEnded(90000, 1000), "a press during the develop: it doesn't rest");
             check(b.level(90000) == FULL && b.level(90000 + R) == REST, "lit at the end, resting a while after");
         }
-        {   // a Lab save or a test: the darkroom's light while it runs, lit after
+        {   // long work that ends (the darkroom made ready, then not needed): its light while it runs, lit after
             Backlight b = new Backlight(0);
             b.still(true, 0);
             b.work(true, 5000);

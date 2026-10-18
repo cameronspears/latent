@@ -3,8 +3,7 @@
  *
  *   fltool process IN.JPG OUT.JPG [--lut F.cub] [--hl N] [--sh N] [--grain N] [--size N] [--q N] [--seed N]
  *   fltool preview IN.JPG OUT.ppm [--crop] [... same options]
- *   fltool live IN.JPG OUT.ppm [--lut F.cub]       the viewfinder's frame path (from memory, 320x240)
- *   fltool level IN.JPG DEGREES [WIDTH]            the level on IN turned DEGREES anticlockwise, at WIDTH (320)
+ *   fltool live IN.JPG OUT.ppm [--lut F.cub]       the viewfinder's frame composer (from memory, 540x480)
  *   fltool cubecheck F.cub...                      the fast .cube reader against sscanf, row by row
  */
 #include <stdio.h>
@@ -12,73 +11,8 @@
 #include <string.h>
 #include <sys/time.h>
 
-#include <math.h>
 #include "filmcore.h"
 #include "jpeglib.h"
-
-/* IN decoded at about 1/4 size, RGB (malloc'd); *w, *h get its size. */
-static unsigned char *decode(const char *path, int *w, int *h) {
-    struct jpeg_decompress_struct d;
-    struct jpeg_error_mgr e;
-    FILE *f = fopen(path, "rb");
-    unsigned char *rgb;
-    if (!f) return NULL;
-    d.err = jpeg_std_error(&e);
-    jpeg_create_decompress(&d);
-    jpeg_stdio_src(&d, f);
-    jpeg_read_header(&d, TRUE);
-    d.out_color_space = JCS_RGB;
-    d.scale_num = 1;
-    d.scale_denom = d.image_width >= 2400 ? 4 : d.image_width >= 1200 ? 2 : 1;
-    jpeg_start_decompress(&d);
-    *w = (int)d.output_width; *h = (int)d.output_height;
-    rgb = malloc((size_t)*w * *h * 3);
-    while (d.output_scanline < d.output_height) {
-        JSAMPROW r = rgb + (size_t)d.output_scanline * *w * 3;
-        jpeg_read_scanlines(&d, &r, 1);
-    }
-    jpeg_finish_decompress(&d);
-    jpeg_destroy_decompress(&d);
-    fclose(f);
-    return rgb;
-}
-
-/* fltool level: the picture turned 'deg' anticlockwise (as if the camera were turned clockwise),
- * cropped to the largest centred rectangle of the same shape with no corners missing, scaled to
- * 'ow' wide as the camera's live frame would be, then fl_level. Prints "angle confidence blocks". */
-static int level_cmd(const char *path, double deg, int ow) {
-    int w, h, x, y, oh, out[3];
-    unsigned char *src = decode(path, &w, &h), *dst;
-    double t = deg * M_PI / 180, c = cos(t), s = sin(t), at = fabs(s), k1, k2, k;
-    if (!src) { fprintf(stderr, "cannot read %s\n", path); return 1; }
-    k1 = 1 / (c + (double)h / w * at);
-    k2 = 1 / (c + (double)w / h * at);
-    k = k1 < k2 ? k1 : k2;
-    oh = (int)((long)ow * h / w);
-    dst = malloc((size_t)ow * oh * 3);
-    for (y = 0; y < oh; y++) for (x = 0; x < ow; x++) {
-        /* box-average a few source samples per output pixel, as the camera's scaler would */
-        int acc[3] = { 0, 0, 0 }, n = 0, i, j, ch;
-        for (j = 0; j < 4; j++) for (i = 0; i < 4; i++) {
-            double u = ((x + (i + 0.5) / 4) / ow - 0.5) * w * k, v = ((y + (j + 0.5) / 4) / oh - 0.5) * h * k;
-            double sx = u * c - v * s + w / 2.0, sy = u * s + v * c + h / 2.0;
-            int ix = (int)sx, iy = (int)sy;
-            double fx = sx - ix, fy = sy - iy;
-            if (ix < 0 || iy < 0 || ix + 1 >= w || iy + 1 >= h) continue;
-            for (ch = 0; ch < 3; ch++) {
-                const unsigned char *p = src + ((size_t)iy * w + ix) * 3 + ch;
-                acc[ch] += (int)((p[0] * (1 - fx) + p[3] * fx) * (1 - fy) + (p[w * 3] * (1 - fx) + p[w * 3 + 3] * fx) * fy);
-            }
-            n++;
-        }
-        for (ch = 0; ch < 3; ch++) dst[((size_t)y * ow + x) * 3 + ch] = (unsigned char)(n ? acc[ch] / n : 0);
-    }
-    fl_level(dst, ow, oh, out);
-    printf("%.2f %d %d\n", out[0] / 100.0, out[1], out[2]);
-    free(src);
-    free(dst);
-    return 0;
-}
 
 static void progress(void *ctx, int pct) {
     (void)ctx;
@@ -107,15 +41,8 @@ int main(int argc, char **argv) {
         }
         return bad;
     }
-    if (argc >= 2 && !strcmp(argv[1], "cores")) {   /* fltool cores */
-        static char report[1024];
-        fl_cores(report, sizeof report);
-        fputs(report, stdout);
-        return 0;
-    }
-    if (argc >= 4 && !strcmp(argv[1], "level")) return level_cmd(argv[2], atof(argv[3]), argc >= 5 ? atoi(argv[4]) : 320);
     if (argc < 4) {
-        fprintf(stderr, "usage: %s process|preview IN OUT  |  bench IN SCALE [--lut F] [--hl N] [--sh N] [--grain N] [--size N] [--q N] [--seed N] [--crop]\n", argv[0]);
+        fprintf(stderr, "usage: %s process|preview|live|makepreview IN OUT [--lut F] [--hl N] [--sh N] [--grain N] [--size N] [--q N] [--seed N] [--crop]\n", argv[0]);
         return 2;
     }
     for (i = 4; i < argc; i++) {
@@ -138,19 +65,13 @@ int main(int argc, char **argv) {
             fprintf(stderr, "error: %s\n", err);
             return 1;
         }
-    } else if (!strcmp(argv[1], "bench2")) {   /* fltool bench2 IN SCALE [--lut F] ... */
-        static char report[1024];
-        if (fl_bench_cores(argv[2], lut, params, atoi(argv[3]), report, sizeof report) != 0) { fprintf(stderr, "error: %s\n", report); return 1; }
-        fputs(report, stdout);
-        return 0;
-    } else if (!strcmp(argv[1], "bench")) {   /* fltool bench IN SCALE [--lut F] [--grain N] ... */
-        static char report[2048];
-        if (fl_bench(argv[2], lut, params, atoi(argv[3]), report, sizeof report) != 0) { fprintf(stderr, "error: %s\n", report); return 1; }
-        fputs(report, stdout);
-        return 0;
     } else if (!strcmp(argv[1], "live")) {
-        int info[FL_LIVE_INFO], x, y, k;
-        unsigned int *px = malloc(sizeof(unsigned int) * 320 * 240);
+        /* the frame composer as the viewfinder runs it: overlay, 565 and 4444, the histogram, the last frame again */
+        static const int sh[4] = { 12, 8, 4, 0 };
+        fl_frame_ctx *fc = fl_frame_new();
+        unsigned short *o16 = malloc(sizeof(unsigned short) * 540 * 480);
+        unsigned int *ov = calloc(540 * 480, sizeof(unsigned int));
+        int fi[FL_FRAME_INFO], tm[FL_FRAME_TIMES], n, x, y;
         unsigned char *jpg;
         long len;
         double t1;
@@ -160,47 +81,23 @@ int main(int argc, char **argv) {
         jpg = malloc(len);
         if (fread(jpg, 1, len, f) != (size_t)len) { fprintf(stderr, "short read\n"); return 1; }
         fclose(f);
+        for (y = 0; y < 90; y++) for (x = 0; x < 540; x++) ov[y * 540 + x] = (unsigned int)(0x78 - y) << 24;
+        for (y = 200; y < 230; y++) for (x = 100; x < 400; x++) ov[y * 540 + x] = 0xFFF4F1EA;
+        if (!fc || !o16 || fl_set_overlay(ov, 540, 480) <= 0) { fprintf(stderr, "error: composer\n"); return 1; }
         t1 = now();
-        for (k = 0; k < 10; k++)
-            if (fl_live(jpg, (unsigned long)len, lut, params, px, 320, 240, info, err, sizeof err) != 0) { fprintf(stderr, "error: %s\n", err); return 1; }
-        fprintf(stderr, "live %dx%d in %.1f ms; level %.2f deg, confidence %d, %d blocks\n", info[0], info[1], (now() - t1) * 100, info[2] / 100.0, info[3], info[4]);
-        {   /* the same frame for the 16-bit screen, as the viewfinder makes it */
-            static const int sh[4] = { 12, 8, 4, 0 };
-            unsigned short *o16 = malloc(sizeof(unsigned short) * 540 * 480);
-            double t2 = now();
-            if (!o16 || fl_to4444(px, info[0], info[1], o16, 540, 480, 1500, sh) != 0) { fprintf(stderr, "error: 16-bit frame\n"); return 1; }
-            fprintf(stderr, "16-bit 540x480 in %.1f ms\n", (now() - t2) * 1000);
-            free(o16);
-        }
-        {   /* the frame composer (v0.38.0), as the viewfinder runs it: overlay, 565 and 4444, the last frame again */
-            static const int sh[4] = { 12, 8, 4, 0 };
-            fl_frame_ctx *fc = fl_frame_new();
-            unsigned short *o16 = malloc(sizeof(unsigned short) * 540 * 480);
-            unsigned int *ov = calloc(540 * 480, sizeof(unsigned int));
-            int fi[FL_FRAME_INFO], tm[FL_FRAME_TIMES], n;
-            double t3;
-            for (y = 0; y < 90; y++) for (x = 0; x < 540; x++) ov[y * 540 + x] = (unsigned int)(0x78 - y) << 24;
-            for (y = 200; y < 230; y++) for (x = 100; x < 400; x++) ov[y * 540 + x] = 0xFFF4F1EA;
-            if (!fc || !o16 || fl_set_overlay(ov, 540, 480) <= 0) { fprintf(stderr, "error: composer\n"); return 1; }
-            t3 = now();
-            for (n = 0; n < 10; n++)
-                if (fl_frame(fc, jpg, (unsigned long)len, lut, params, FL_F_LEVEL | FL_F_HIST | FL_F_TEMPORAL, n, o16, 540, 480, 540, 1500,
-                             n & 1 ? FL_FMT_565 : FL_FMT_4444, sh, 320, 240, fi, tm, err, sizeof err) != 0) { fprintf(stderr, "error: %s\n", err); return 1; }
-            fprintf(stderr, "composed 540x480 in %.2f ms (decode %d, read %d, look %d, compose %d)\n", (now() - t3) * 100, tm[0], tm[1], tm[2], tm[3]);
-            if (fl_frame(fc, NULL, 0, lut, params, 0, 3, o16, 540, 480, 540, 1500, FL_FMT_565, sh, 320, 240, fi, tm, err, sizeof err) != 0) { fprintf(stderr, "error: again: %s\n", err); return 1; }
-            fl_set_overlay(NULL, 0, 0);
-            fl_frame_free(fc);
-            free(o16); free(ov);
-        }
+        for (n = 0; n < 10; n++)
+            if (fl_frame(fc, jpg, (unsigned long)len, lut, params, FL_F_HIST | FL_F_TEMPORAL, n, o16, 540, 480, 540, 1500,
+                         n & 1 ? FL_FMT_565 : FL_FMT_4444, sh, 320, 240, fi, tm, err, sizeof err) != 0) { fprintf(stderr, "error: %s\n", err); return 1; }
+        fprintf(stderr, "composed 540x480 from %dx%d in %.2f ms (decode %d, read %d, look %d, compose %d)\n", fi[0], fi[1], (now() - t1) * 100,
+                tm[0], tm[1], tm[2], tm[3]);
+        if (fl_frame(fc, NULL, 0, lut, params, 0, 3, o16, 540, 480, 540, 1500, FL_FMT_4444, sh, 320, 240, fi, tm, err, sizeof err) != 0) { fprintf(stderr, "error: again: %s\n", err); return 1; }
         f = fopen(argv[3], "wb");
-        fprintf(f, "P6\n%d %d\n255\n", info[0], info[1]);
-        for (y = 0; y < info[1]; y++)
-            for (x = 0; x < info[0]; x++) {
-                unsigned int p = px[y * info[0] + x];
-                fputc((p >> 16) & 255, f); fputc((p >> 8) & 255, f); fputc(p & 255, f);
-            }
+        fprintf(f, "P6\n540 480\n255\n");
+        for (n = 0; n < 540 * 480; n++) { fputc((o16[n] >> 12 & 15) * 17, f); fputc((o16[n] >> 8 & 15) * 17, f); fputc((o16[n] >> 4 & 15) * 17, f); }
         fclose(f);
-        free(px); free(jpg);
+        fl_set_overlay(NULL, 0, 0);
+        fl_frame_free(fc);
+        free(o16); free(ov); free(jpg);
     } else if (!strcmp(argv[1], "makepreview")) {
         if (fl_make_preview(argv[2], argv[3], err, sizeof err) != 0) { fprintf(stderr, "error: %s\n", err); return 1; }
     } else if (!strcmp(argv[1], "preview")) {

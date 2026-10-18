@@ -30,48 +30,11 @@ final class FilmCore {
     /** Fill pixels (ARGB) with a preview; size[0], size[1] receive the produced size. 0 = ok. */
     static native int preview(String inPath, String lutPath, int[] params, int mode, int[] pixels, int w, int h, int[] size);
 
-    /** live()'s info: the size produced, the level (1/100 degree, confidence 0..100, blocks agreeing), a 64-bin histogram. */
-    static final int L_W = 0, L_H = 1, L_ANGLE = 2, L_CONFIDENCE = 3, L_SUPPORT = 4, L_HIST = 5, L_HIST_BINS = 64, L_COUNT = 69;
-
-    /**
-     * The viewfinder: one live frame (the camera's small JPEG, jpeg[0..len)) decoded in memory, fitted
-     * inside w x h, with the look but no grain, into pixels (ARGB); info[L_COUNT] gets its size, the level
-     * read from its straight edges, and its brightness histogram. 0 = ok.
-     */
-    static native int live(byte[] jpeg, int len, String lutPath, int[] params, int[] pixels, int w, int h, int[] info);
-
     /** Phase timings of the last successful process() call, into out[T_COUNT]. */
     static native void timing(int[] out);
 
-    /** The look's inner loops, named as fl_bench reports them; setVariant picks one for developing. */
-    static final String[] VARIANTS = { "per pair", "colour reuse", "packed table", "smaller table" };
-
-    /**
-     * Speed test: decodes inPath at 1/scale and times every inner loop on the same pixels, with each
-     * one's difference from the full-precision reference. One line per loop, or null (lastError).
-     */
-    static native String bench(String inPath, String lutPath, int[] params, int scale);
-
-    /**
-     * Read only: cores present and online, those Latent may use, its CPU group, and each core's load
-     * over one second ("key: value" lines). Takes a second.
-     */
-    static native String cores();
-
-    /**
-     * The look on inPath (at 1/scale) on one core, then on two threads with the helper allowed onto
-     * every core: what that request did, where each ran, both times, and whether the pictures match.
-     */
-    static native String benchCores(String inPath, String lutPath, int[] params, int scale);
-
     /** Why a helper core didn't join the last develop ("" when all did). */
     static native String helperNote();
-
-    /**
-     * Film files (.cube) read with Latent's own exact decimal reader (true, the default since v0.42.0: the
-     * camera's check found every row of every film identical) or sscanf (false).
-     */
-    static native void setFastCube(boolean on);
 
     /**
      * The next develop's film (lutPath, highlight, shadow, grain, grain size from params) made ready on a
@@ -86,44 +49,22 @@ final class FilmCore {
      */
     static native int cacheLut(String lutPath);
 
-    /**
-     * Block develops remember recent per-pair lookups, 2^bits entries per thread (8..16), or don't (0, the
-     * default). The picture is the same either way; the Develop test chooses whether it is faster.
-     */
-    static native void setPairMemo(int bits);
-
-    /** Every cached film forgotten (and the decoded previews): the next develop reads its file from the card again. */
+    /** Every cached film forgotten (and the decoded previews): the next look reads its file again (the host tests start cold). */
     static native void forgetLut();
-
-    /**
-     * A film file read both ways: ms[0] ms with sscanf, ms[1] with the fast reader, ms[2] rows the fast
-     * reader took, ms[3] rows it left to sscanf. 0 identical, 1 different (lastError says where), -1 error.
-     */
-    static native int cubeCheck(String path, int[] ms);
-
-    /** Which inner loop developing uses (index into VARIANTS). */
-    static native void setVariant(int v);
 
     /** Why the last call failed. */
     static native String lastError();
-
-    /**
-     * A live frame (argb, w x h) for the 16-bit screen: cropped from the centre to aspect1000/1000 (0: ow:oh),
-     * stretched to ow x oh (the panel's pixels aren't square) and ordered-dithered to 4 bits a channel, into
-     * out as 16-bit pixels, each channel's nibble at shifts[0..3] (red, green, blue, alpha). 0, or -1.
-     */
-    static native int to4444(int[] argb, int w, int h, short[] out, int ow, int oh, int aspect1000, int[] shifts);
 
     /** The calling thread onto one core of the camera's four (Latent starts on core 3 only). 0, or -1 (lastError). */
     static native int pinCore(int core);
 
     // ---- the viewfinder's frame composer (v0.38.0): one live JPEG to the screen's 16-bit picture in one go
     /**
-     * F_LEVEL: read the level (the frame is then decoded as RGB; otherwise as Y'CbCr, a third quicker, through
-     * the film's Y'CbCr table). F_HIST: the histogram of the picture with the look, as it will develop (every
-     * other pixel of every other row). F_TEMPORAL: the dither moves with seq.
+     * F_HIST: the histogram of the picture with the look, as it will develop (every other pixel of every other
+     * row). F_TEMPORAL: the dither moves with seq. (A frame is decoded as Y'CbCr, through the film's Y'CbCr table;
+     * 1, the level's flag until v0.45.0, is the host tests' RGB decode now.)
      */
-    static final int F_LEVEL = 1, F_HIST = 2, F_TEMPORAL = 4;
+    static final int F_HIST = 2, F_TEMPORAL = 4;
     /**
      * F_STILL: after decoding, compare the frame's signature (info[FI_SIG..], FI_SIG_N cells of mean
      * brightness, 8 across x 6 down, 0..255) with the one setStillRef gave; when no cell differs by more than
@@ -132,11 +73,12 @@ final class FilmCore {
      */
     static final int F_STILL = 8;
     static final int FMT_565 = 0, FMT_4444 = 1;
-    static final int NO_READING = -999999, FI_OVERLAY = 69, FI_SIG = 70, FI_SIG_N = 48, FI_COUNT = 118;
+    /** frame()'s info: the frame's size (0, 1), its histogram (FI_HIST, 64 bins), the overlay laid in, the signature. */
+    static final int FI_HIST = 5, FI_HIST_BINS = 64, FI_OVERLAY = 69, FI_SIG = 70, FI_SIG_N = 48, FI_COUNT = 118;
     /**
-     * frame()'s ms per stage: decode, read (the level), look, compose; of compose (from every eighth row), TM_BLEND
-     * the rows in one pass (blend, fades, dither, packing: v0.45.0) and TM_DITHER the overlay's own pixels (the
-     * type); the rest of compose is stretching.
+     * frame()'s ms per stage: decode, read (the sharpening, when it's built in; the level until v0.45.0), look,
+     * compose; of compose (from every eighth row), TM_BLEND the rows in one pass (blend, fades, dither, packing:
+     * v0.45.0) and TM_DITHER the overlay's own pixels (the type); the rest of compose is stretching.
      */
     static final int TM_DECODE = 0, TM_READ = 1, TM_LOOK = 2, TM_COMPOSE = 3, TM_BLEND = 4, TM_DITHER = 5, TM_COUNT = 6;
 
@@ -145,14 +87,13 @@ final class FilmCore {
     static native void frameFree(long ctx);
 
     /**
-     * One frame: jpeg decoded (fitted inside maxW x maxH), its signature written, the level read when flags ask,
-     * the look, its histogram when asked, then for each of ow x oh screen pixels the 3:2 (aspect1000) crop
+     * One frame: jpeg decoded (fitted inside maxW x maxH), its signature written, the look, its histogram when asked, then for each of ow x oh screen pixels the 3:2 (aspect1000) crop
      * stretched, the overlay laid in (opaque type at the nearest 4-bit colour, solid), dithered (blue noise,
      * moving with seq under F_TEMPORAL) to 4 bits a channel in format (FMT_565 opaque, or FMT_4444 with shifts),
      * one pass a row. Written into bitmap (an android.graphics.Bitmap, ow x oh, that format) when given, else
      * into out. jpeg null: the last frame again, with the overlay as it is now (F_STILL ignored). info[FI_COUNT]:
-     * frame size, level (NO_READING when not read), histogram, FI_OVERLAY the overlay generation laid in, the
-     * signature at FI_SIG; tm[TM_COUNT] ms per stage. Returns 0, 1 (F_STILL and the scene is still: nothing
+     * frame size, histogram (2..4 are spare: the level's until v0.45.0), FI_OVERLAY the overlay generation laid in,
+     * the signature at FI_SIG; tm[TM_COUNT] ms per stage. Returns 0, 1 (F_STILL and the scene is still: nothing
      * written; size, signature and TM_DECODE given), -1 (lastError), or -2 when bitmaps can't be written here.
      */
     static native int frame(long ctx, byte[] jpeg, int len, String lutPath, int[] params, int flags, int seq,

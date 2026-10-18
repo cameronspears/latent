@@ -29,15 +29,13 @@ for img in "$@"; do
   done
   run "preview crop $img" out/host/fltool-ubsan preview "$img" out/test/sanitize.ppm --crop --grain 7 --size 2
   run "preview fit $img" out/host/fltool-ubsan preview "$img" out/test/sanitize.ppm --lut assets/luts/PORTRA4W.CUB
-  # the viewfinder: a live frame from memory, and the level at a few sizes (down to too small to read)
+  # the viewfinder: a live frame from memory through the frame composer
   run "live $img" out/host/fltool-ubsan live "$img" out/test/sanitize.ppm --lut assets/luts/CLASSNEG.CUB
   run "live gmalloc $img" env DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_PROTECT_BEFORE=1 \
     out/host/fltool live "$img" out/test/sanitize.ppm --lut assets/luts/TRIX400.CUB
-  for w in 320 97 30 12; do run "level $img at $w px" out/host/fltool-ubsan level "$img" 3 "$w"; done
-  run "level gmalloc $img" env DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_PROTECT_BEFORE=1 out/host/fltool level "$img" -2 160
 done
 # the fast .cube reader against sscanf, every shipped film, under both
 run "cubecheck ubsan" out/host/fltool-ubsan cubecheck assets/luts/*.CUB
 run "cubecheck gmalloc" env DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_PROTECT_BEFORE=1 out/host/fltool cubecheck assets/luts/*.CUB
-[ $fail = 0 ] && echo "clean: $# photos x ${#SETTINGS[@]} settings under UBSan and Guard Malloc, plus previews, live frames and the level"
+[ $fail = 0 ] && echo "clean: $# photos x ${#SETTINGS[@]} settings under UBSan and Guard Malloc, plus previews and live frames"
 exit $fail

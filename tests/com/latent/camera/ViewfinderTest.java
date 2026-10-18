@@ -6,8 +6,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Host test of the viewfinder's logic: the shutter button (Release), the level's steadying (Level),
- * the pictures the card's listing doesn't show yet (Library.withShots), the exposure readout, and
+ * Host test of the viewfinder's logic: the shutter button (Release), the pictures the card's listing
+ * doesn't show yet (Library.withShots), the exposure readout, and
  * (v0.45.0) when frames are asked for (FrameScheduler), the pace (Pacer), the store quiet, the /proc
  * readings, the catalogue's new pictures and the overlay's bands.
  *
@@ -17,7 +17,6 @@ public class ViewfinderTest {
     public static void main(String[] a) throws Exception {
         release();
         always();
-        level();
         shots(new File(a[0]));
         words();
         exposure();
@@ -35,7 +34,7 @@ public class ViewfinderTest {
     /** VF-04: a press held through focus is taken inside focused(), so the viewfinder reads exposure only when it wasn't. */
     static void shutterOrder() {
         Cam c = new Cam();
-        Release r = new Release(c, true, true);
+        Release r = new Release(c, true);
         r.halfDown();
         r.fullDown();
         c.take();
@@ -257,7 +256,7 @@ public class ViewfinderTest {
     static void release() {
         // the camera's own button: it focuses and shoots by itself; Latent follows its reports
         Cam c = new Cam();
-        Release r = new Release(c, true, false);
+        Release r = new Release(c, false);
         r.halfDown();
         check(r.state == Release.SEARCHING && !r.app && c.take().equals(""), "a half-press: the camera focuses by itself");
         r.cameraFocus(Release.AF_LOCK);
@@ -275,7 +274,7 @@ public class ViewfinderTest {
 
         // the camera can't lock while held: Latent takes the button and tries again, up to MAX_TRIES
         c = new Cam();
-        r = new Release(c, true, false);
+        r = new Release(c, false);
         r.halfDown();
         r.cameraFocus(Release.AF_WARN);
         check(r.state == Release.NO_LOCK && !r.app && c.pending.size() == 1, "the camera couldn't lock: a retry is scheduled");
@@ -294,7 +293,7 @@ public class ViewfinderTest {
 
         // a retry, then a lock, then a full press: Latent takes the picture, then hands the button back
         c = new Cam();
-        r = new Release(c, true, false);
+        r = new Release(c, false);
         r.halfDown();
         r.cameraFocus(Release.AF_WARN);
         c.runLater();
@@ -311,7 +310,7 @@ public class ViewfinderTest {
 
         // focus first in app mode: a full press while searching waits for the lock
         c = new Cam();
-        r = new Release(c, true, false);
+        r = new Release(c, false);
         r.halfDown();
         r.cameraFocus(Release.AF_WARN);
         c.runLater();
@@ -322,7 +321,7 @@ public class ViewfinderTest {
 
         // focus first, never locks: no picture
         c = new Cam();
-        r = new Release(c, true, false);
+        r = new Release(c, false);
         r.halfDown();
         r.cameraFocus(Release.AF_WARN);
         c.runLater();
@@ -332,23 +331,9 @@ public class ViewfinderTest {
         r.fullDown();
         check(r.state == Release.SEARCHING && r.waiting && r.tries == 1, "another full press starts Latent's focus again");
 
-        // focus first off: Latent shoots at once in app mode
-        c = new Cam();
-        r = new Release(c, false, false);
-        r.halfDown();
-        r.cameraFocus(Release.AF_WARN);
-        c.runLater();
-        c.take();
-        r.fullDown();
-        check(r.shooting && c.take().equals("cS"), "focus first off: the search is cancelled and it shoots");
-        r.focused(true);
-        check(r.shooting, "a late focus answer while shooting is ignored");
-        r.shot(false);
-        check(!r.app && !r.shooting && c.take().equals("B"), "the camera wouldn't shoot: the button goes back");
-
         // a retry scheduled before the button was let go doesn't run after
         c = new Cam();
-        r = new Release(c, true, false);
+        r = new Release(c, false);
         r.halfDown();
         r.cameraFocus(Release.AF_WARN);
         r.halfUp();
@@ -357,7 +342,7 @@ public class ViewfinderTest {
 
         // letting go while Latent's picture is taken: it finishes, then the button goes back
         c = new Cam();
-        r = new Release(c, false, false);
+        r = new Release(c, false);
         r.halfDown();
         r.cameraFocus(Release.AF_WARN);
         c.runLater();
@@ -370,7 +355,7 @@ public class ViewfinderTest {
 
         // the roll is full: the button becomes Latent's and takes nothing
         c = new Cam();
-        r = new Release(c, true, false);
+        r = new Release(c, false);
         r.lock();
         check(r.app && r.locked && c.take().equals("T"), "full roll: Latent takes the button");
         r.halfDown();
@@ -384,7 +369,7 @@ public class ViewfinderTest {
     /** The button always Latent's (no direct shutter): v0.32.0's way, the Shooting test's. */
     static void always() {
         Cam c = new Cam();
-        Release r = new Release(c, true, true);
+        Release r = new Release(c, true);
         check(r.app, "the button is Latent's from the start");
         r.halfDown();
         check(r.state == Release.SEARCHING && r.tries == 1 && c.take().equals("F"), "a half-press is Latent's focus");
@@ -405,42 +390,6 @@ public class ViewfinderTest {
         check(r.waiting && !r.shooting, "focus first: waits for the lock");
         for (int i = 0; i < Release.MAX_TRIES; i++) { r.focused(false); c.runLater(); }
         check(r.refused && !r.shooting, "never locked: no picture");
-        Release o = new Release(c, false, true);
-        o.halfDown();
-        c.take();
-        o.fullDown();
-        check(o.shooting && c.take().equals("cS"), "focus first off: shoots at once");
-        o.shot(false);
-        check(o.app && !o.shooting, "the camera wouldn't: still Latent's button");
-    }
-
-    static void level() {
-        Level l = new Level();
-        long t = 0;
-        l.frame(250, 10, 40, t);
-        check(!l.shown, "unsure frames (low confidence) don't show the level");
-        l.frame(250, 80, 3, t += 140);
-        check(!l.shown, "nor do frames with too few edges");
-        l.frame(250, 60, 30, t += 140);
-        check(l.shown && near(l.angle, 2.5f) && !l.level, "a sure frame shows it at once: 2.5 degrees, not level");
-        l.frame(150, 60, 30, t += 140);
-        check(l.angle < 2.5f && l.angle > 1.5f, "it eases toward the next reading: " + l.angle);
-        for (int i = 0; i < 20; i++) l.frame(30, 60, 30, t += 140);
-        check(near(l.angle, 0.3f) && l.level, "settled at 0.3 degrees: level (green)");
-        l.frame(70, 60, 30, t += 140);
-        for (int i = 0; i < 5; i++) l.frame(70, 60, 30, t += 140);
-        check(l.level, "0.7 degrees: still green (it leaves only past " + Level.LEVEL_OUT + ")");
-        for (int i = 0; i < 20; i++) l.frame(120, 60, 30, t += 140);
-        check(!l.level, "1.2 degrees: no longer level");
-        l.frame(-900, 60, 30, t += 140);
-        check(near(l.angle, 1.2f), "one odd reading far away is ignored");
-        l.frame(-900, 60, 30, t += 140);
-        l.frame(-900, 60, 30, t += 140);
-        check(near(l.angle, -9f), "three in a row: the camera really turned");
-        l.tick(t += 1000);
-        check(l.shown, "still shown a second after the last sure frame");
-        l.frame(0, 5, 2, t += 600);
-        check(!l.shown && !l.level, "hidden once no sure frame came for " + Level.HOLD_MS + " ms");
     }
 
     static void shots(File card) throws Exception {
@@ -488,8 +437,6 @@ public class ViewfinderTest {
                 && Viewfinder.afModeText("af-s", "manual").equals("MF"), "focus modes");
         check(Viewfinder.areaText("center").equals("Centre") && Viewfinder.areaText("flex-spot").equals("Spot") && Viewfinder.areaText("wide").equals("Wide"), "focus areas");
     }
-
-    static boolean near(float a, float b) { return Math.abs(a - b) < 0.05f; }
 
     static void touch(File f, long time) throws Exception {
         FileOutputStream o = new FileOutputStream(f);

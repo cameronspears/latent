@@ -119,10 +119,6 @@ JNIEXPORT jboolean JNICALL Java_com_latent_camera_CameraSettings_available(JNIEn
     return load() == 0 ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jint JNICALL Java_com_latent_camera_CameraSettings_attr(JNIEnv *env, jclass cls, jint id) {
-    return ask(REQ_ATTR, 1, id, 0, 0);
-}
-
 JNIEXPORT jbyteArray JNICALL Java_com_latent_camera_CameraSettings_read(JNIEnv *env, jclass cls, jint id) {
     unsigned char *buf;
     jbyteArray out;

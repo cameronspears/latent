@@ -7,12 +7,7 @@
  * bundled. Every call is checked first: the handle must be a valid image or buffer, its real size
  * (asked from Sony) must match what the public API reported, every transfer must fit inside the
  * allocation and be no larger than a block size first verified on a scratch buffer, and a develop
- * must read and write two separate images, except the in-place develop below.
- *
- * In place (sb_develop_inplace): the look applied to one image, as the camera hands it over during
- * a capture (Sony's own capture-time apps change the developed image before storing it). Safe
- * because blocks go strictly forward: each block of rows is read before it is written back, and no
- * row is read again after it was written (the read-ahead only ever reads rows further on).
+ * must read and write two separate images.
  *
  * Each Sony transfer costs ~11 ms however small (it maps shared memory), so a develop moves many
  * rows per call: one call per row took 90 s for a 24 MP frame.
@@ -23,7 +18,6 @@
 #include <jni.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #include "filmcore.h"
 
@@ -256,41 +250,6 @@ int sb_develop(void *src, const int *sg, void *dst, const int *dg, int block, co
     return develop_any(src, sg, dst, dg, block, lut, params, progress, pctx);
 }
 
-/* The look applied to one image in place (see the top of this file). */
-int sb_develop_inplace(void *img, const int *g, int block, const char *lut, const int *params, fl_progress_fn progress, void *pctx) {
-    s_err[0] = 0;
-    return develop_any(img, g, img, g, block, lut, params, progress, pctx);
-}
-
-/*
- * Before an in-place develop: the first 'size' bytes of the picture are read, written back
- * unchanged, and read again; they must match. Proves the transfers on this very image (no scratch
- * buffer can be had while the camera is open). Returns 0 when verified.
- */
-int sb_verify_inplace(void *img, const int *g, int size) {
-    int total;
-    long long offset;
-    unsigned char *a, *b;
-    int ok;
-    s_err[0] = 0;
-    if (load() != 0) return -1;
-    total = checked_size(img, 1);
-    if (total < 0 || !geometry_ok(g, total)) { snprintf(s_err, sizeof s_err, "not a valid Sony image"); return -1; }
-    offset = row_offset(g, 0);
-    if (size <= 0 || size > MAX_TRANSFER || offset + size > total) { snprintf(s_err, sizeof s_err, "check out of bounds"); return -1; }
-    a = (unsigned char *)malloc((size_t)size);
-    b = (unsigned char *)malloc((size_t)size);
-    if (!a || !b) { free(a); free(b); snprintf(s_err, sizeof s_err, "out of memory"); return -1; }
-    ok = S.read(img, a, (unsigned)size, (unsigned)offset) == size
-            && S.write(img, a, (unsigned)size, (unsigned)offset) == size
-            && S.read(img, b, (unsigned)size, (unsigned)offset) == size
-            && memcmp(a, b, (size_t)size) == 0;
-    if (!ok) snprintf(s_err, sizeof s_err, "read / write back / read did not match at %d bytes", size);
-    free(a);
-    free(b);
-    return ok ? 0 : -1;
-}
-
 static int develop_any(void *src, const int *sg, void *dst, const int *dg, int block, const char *lut, const int *params,
                        fl_progress_fn progress, void *pctx) {
     develop_ctx c;
@@ -333,92 +292,6 @@ static int develop_any(void *src, const int *sg, void *dst, const int *dg, int b
     return rc;
 }
 
-static long long now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
-}
-
-/*
- * The Develop test's check that two develops gave the same picture: a 64-bit hash of every picture
- * byte of an image (each row's TW * 2 bytes, padding left out), read in blocks of at most 'block'
- * bytes. Only reads. out_us gets the time it took. 0 when done.
- */
-int sb_hash(void *img, const int *g, int block, unsigned long long *out, long long *out_us) {
-    long long t0 = now_us(), st = (long long)g[G_CW] * 2;
-    unsigned long long hash = 1469598103934665603ULL;
-    unsigned char *buf;
-    int total, rows, y, i, k;
-    s_err[0] = 0;
-    if (load() != 0) return -1;
-    total = checked_size(img, 1);
-    if (total < 0 || !geometry_ok(g, total)) { snprintf(s_err, sizeof s_err, "not a valid Sony image"); return -1; }
-    if (block > MAX_TRANSFER) block = MAX_TRANSFER;
-    rows = block / (int)st;
-    if (rows < 1) rows = 1;
-    buf = (unsigned char *)malloc((size_t)rows * st);
-    if (!buf) { snprintf(s_err, sizeof s_err, "out of memory"); return -1; }
-    for (y = 0; y < g[G_TH]; y += rows) {
-        int n = rows < g[G_TH] - y ? rows : g[G_TH] - y;
-        long long offset = row_offset(g, y);
-        unsigned bytes = (unsigned)((n - 1) * st + (long long)g[G_TW] * 2);
-        if (offset < 0 || offset + bytes > g[G_SIZE] || S.read(img, buf, bytes, (unsigned)offset) != (int)bytes) {
-            snprintf(s_err, sizeof s_err, "reading rows from %d failed", y);
-            free(buf);
-            return -1;
-        }
-        for (i = 0; i < n; i++) {   /* FNV-1a over 32-bit words: any one changed word changes the result */
-            const unsigned char *r = buf + (size_t)i * st;
-            for (k = 0; k + 4 <= g[G_TW] * 2; k += 4) {
-                unsigned w = r[k] | (unsigned)r[k + 1] << 8 | (unsigned)r[k + 2] << 16 | (unsigned)r[k + 3] << 24;
-                hash = (hash ^ w) * 1099511628211ULL;
-            }
-        }
-    }
-    free(buf);
-    *out = hash;
-    *out_us = now_us() - t0;
-    return 0;
-}
-
-/*
- * The Develop test's raw transfer timing: 'count' reads of 'size' bytes walking down the image's
- * canvas from its first byte (back to the top when the canvas runs out). With write_back, each block
- * read is written straight back where it came from, unchanged, and those writes are timed too (only
- * ever asked for on the output image, which the develop then overwrites anyway). out_us[0] reads,
- * out_us[1] writes. 0 when done.
- */
-int sb_speed(void *img, const int *g, int size, int count, int write_back, long long *out_us) {
-    long long canvas = (long long)g[G_CW] * g[G_CH] * 2, pos = 0, t;
-    unsigned char *buf;
-    int total, i;
-    s_err[0] = 0;
-    out_us[0] = out_us[1] = 0;
-    if (load() != 0) return -1;
-    total = checked_size(img, 1);
-    if (total < 0 || !geometry_ok(g, total)) { snprintf(s_err, sizeof s_err, "not a valid Sony image"); return -1; }
-    if (size <= 0 || size > MAX_TRANSFER || size > canvas || count < 1) { snprintf(s_err, sizeof s_err, "bad transfer size %d", size); return -1; }
-    buf = (unsigned char *)malloc((size_t)size);
-    if (!buf) { snprintf(s_err, sizeof s_err, "out of memory"); return -1; }
-    for (i = 0; i < count; i++) {
-        long long offset;
-        if (pos + size > canvas) pos = 0;
-        offset = g[G_OFF] + pos;
-        if (offset < 0 || offset + size > g[G_SIZE]) { snprintf(s_err, sizeof s_err, "transfer out of bounds"); free(buf); return -1; }
-        t = now_us();
-        if (S.read(img, buf, (unsigned)size, (unsigned)offset) != size) { snprintf(s_err, sizeof s_err, "read %d failed", i); free(buf); return -1; }
-        out_us[0] += now_us() - t;
-        if (write_back) {
-            t = now_us();
-            if (S.write(img, buf, (unsigned)size, (unsigned)offset) != size) { snprintf(s_err, sizeof s_err, "write %d failed", i); free(buf); return -1; }
-            out_us[1] += now_us() - t;
-        }
-        pos += size;
-    }
-    free(buf);
-    return 0;
-}
-
 const char *sb_last_error(void) { return s_err; }
 
 JNIEXPORT jboolean JNICALL Java_com_latent_camera_SonyMemory_lastDirect(JNIEnv *env, jclass cls) {
@@ -455,74 +328,8 @@ JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_develop(JNIEnv *env, jc
     return rc;
 }
 
-JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_developInPlace(JNIEnv *env, jclass cls, jint img, jintArray jg,
-        jint block, jstring jlut, jintArray jparams, jobject listener) {
-    struct progress_ctx pc;
-    int g[G_COUNT], params[FL_PARAM_COUNT], rc;
-    const char *lut = NULL;
-    (void)cls;
-    s_err[0] = 0;
-    if (!jg || (*env)->GetArrayLength(env, jg) < G_COUNT || !jparams || (*env)->GetArrayLength(env, jparams) < FL_PARAM_COUNT) {
-        snprintf(s_err, sizeof s_err, "bad arguments");
-        return -1;
-    }
-    (*env)->GetIntArrayRegion(env, jg, 0, G_COUNT, (jint *)g);
-    (*env)->GetIntArrayRegion(env, jparams, 0, FL_PARAM_COUNT, (jint *)params);
-    pc.env = env;
-    pc.listener = listener;
-    pc.method = NULL;
-    if (listener) {
-        jclass lc = (*env)->GetObjectClass(env, listener);
-        pc.method = (*env)->GetMethodID(env, lc, "onProgress", "(I)V");
-        (*env)->DeleteLocalRef(env, lc);
-    }
-    if (jlut) lut = (*env)->GetStringUTFChars(env, jlut, NULL);
-    rc = sb_develop_inplace((void *)(intptr_t)img, g, block, lut, params, on_progress, &pc);
-    if (jlut) (*env)->ReleaseStringUTFChars(env, jlut, lut);
-    return rc;
-}
-
-JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_verifyInPlace(JNIEnv *env, jclass cls, jint img, jintArray jg, jint size) {
-    int g[G_COUNT];
-    (void)cls;
-    if (!jg || (*env)->GetArrayLength(env, jg) < G_COUNT) { snprintf(s_err, sizeof s_err, "bad arguments"); return -1; }
-    (*env)->GetIntArrayRegion(env, jg, 0, G_COUNT, (jint *)g);
-    return sb_verify_inplace((void *)(intptr_t)img, g, size);
-}
-
 JNIEXPORT jstring JNICALL Java_com_latent_camera_SonyMemory_lastError(JNIEnv *env, jclass cls) {
     (void)cls;
     return (*env)->NewStringUTF(env, s_err);
 }
 
-JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_hash(JNIEnv *env, jclass cls, jint img, jintArray jg, jint block, jlongArray jout) {
-    int g[G_COUNT], rc;
-    unsigned long long hash = 0;
-    long long us = 0;
-    jlong out[2];
-    (void)cls;
-    s_err[0] = 0;
-    if (!jg || (*env)->GetArrayLength(env, jg) < G_COUNT || !jout || (*env)->GetArrayLength(env, jout) < 2) { snprintf(s_err, sizeof s_err, "bad arguments"); return -1; }
-    (*env)->GetIntArrayRegion(env, jg, 0, G_COUNT, (jint *)g);
-    rc = sb_hash((void *)(intptr_t)img, g, block, &hash, &us);
-    out[0] = (jlong)hash;
-    out[1] = (jlong)us;
-    if (rc == 0) (*env)->SetLongArrayRegion(env, jout, 0, 2, out);
-    return rc;
-}
-
-JNIEXPORT jint JNICALL Java_com_latent_camera_SonyMemory_speed(JNIEnv *env, jclass cls, jint img, jintArray jg, jint size, jint count,
-        jboolean write_back, jlongArray jout) {
-    int g[G_COUNT], rc;
-    long long us[2];
-    jlong out[2];
-    (void)cls;
-    s_err[0] = 0;
-    if (!jg || (*env)->GetArrayLength(env, jg) < G_COUNT || !jout || (*env)->GetArrayLength(env, jout) < 2) { snprintf(s_err, sizeof s_err, "bad arguments"); return -1; }
-    (*env)->GetIntArrayRegion(env, jg, 0, G_COUNT, (jint *)g);
-    rc = sb_speed((void *)(intptr_t)img, g, size, count, write_back == JNI_TRUE, us);
-    out[0] = (jlong)us[0];
-    out[1] = (jlong)us[1];
-    if (rc == 0) (*env)->SetLongArrayRegion(env, jout, 0, 2, out);
-    return rc;
-}

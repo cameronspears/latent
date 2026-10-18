@@ -1,8 +1,8 @@
 /*
  * Mac test for the image core's shared caches (v0.45.0: films, grain tiles, decoded previews, the block
  * develop's table), as the camera uses them at once: three viewfinder composers on three threads, each
- * changing film every few frames, while two more threads make home-screen and Lab previews in other films
- * (the samples' size, the hero's and the Lab's 100% view: more pictures than the preview cache keeps), read
+ * changing film every few frames, while two more threads make home-screen and 100% previews in other films
+ * (the samples' size, the hero's and a 100% view: more pictures than the preview cache keeps), read
  * films ahead (fl_cache_lut), make the next develop's film ready (fl_prewarm) and now and then forget every
  * film (fl_forget_lut). More film files than the film cache holds, so films are dropped while other threads
  * still use them. Every frame and every preview must be exactly what one thread alone made.
@@ -29,7 +29,7 @@ static int g_rounds = 40;
 static const int PARAMS[FL_PARAM_COUNT] = { -1, 1, 6, 2, 95, 42, 1 };
 static const int SHIFTS[4] = { 12, 8, 4, 0 };
 
-/* the previews: the samples' size, the hero's, the Lab's 100% view */
+/* the previews: the samples' size, the hero's, a 100% view */
 #define NKINDS 3
 static const int KIND[NKINDS][3] = { { 0, 420, 280 }, { 0, 720, 480 }, { 1, 420, 280 } };   /* mode, w, h */
 static const char *KIND_NAME[NKINDS] = { "sample", "hero", "100% view" };

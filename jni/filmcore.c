@@ -147,10 +147,10 @@ static short *resample_lut(const short *src, int n, int m) {
  * gives exactly the floats sscanf does: each number becomes the correctly rounded double (digits / 10^k,
  * both exact, one division), then a float; the only case where a float could come out differently (the
  * double landing exactly halfway between two floats) and anything that isn't a plain decimal go to
- * sscanf. On by default since v0.42.0 (the camera's own check, v0.39.1: every row of all six films
- * identical, 537 -> 204 ms a film); 0 = sscanf for every row, as before (fl_cube_check compares the two).
+ * sscanf. The only way films are read since v0.45.0 (the default since v0.42.0; the camera's own check,
+ * v0.39.1: every row of all six films identical, 537 -> 204 ms a film). fl_cube_check compares it with sscanf
+ * for the host tests.
  */
-static int g_fast_cube = 1;
 
 static const double POW10[] = { 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
                                 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22 };
@@ -191,7 +191,7 @@ static int fast_triple(const char *p, float *r, float *g, float *b) {
     return *p ? -1 : 0;
 }
 
-/* fast: rows read by fast_triple where it can (g_fast_cube), else all by sscanf with the default stdio buffer */
+/* fast: rows read by fast_triple where it can, else all by sscanf with the default stdio buffer (fl_cube_check) */
 static int load_cube(fl_look *L, const char *path, int fast, char *err, int errlen) {
     FILE *f;
     char line[256];
@@ -245,8 +245,8 @@ static int load_cube(fl_look *L, const char *path, int fast, char *err, int errl
 /*
  * The films read so far, kept for the life of the process (v0.45.0; one film until then): reading a .cube
  * (36,000 text lines) takes ~200 ms on the camera even with the fast reader, and the home screen's six
- * samples, the hero, the Lab, the viewfinder's three look threads, the darkroom and its prewarm all ask
- * for films, often for each other's. Up to FILM_SLOTS films (29.5 KB each at 17 points); when another
+ * samples, the hero, the viewfinder's three look threads, the darkroom and its prewarm all ask for
+ * films, often for each other's. Up to FILM_SLOTS films (29.5 KB each at 17 points); when another
  * comes, the least recently used is dropped. Keyed by path, size and modification time, so an edited file
  * on the card is read again. Any thread: one mutex guards the table, and every look holds a reference to
  * its film (look_free gives it back), so a film dropped from the table is freed only when the last look
@@ -356,7 +356,7 @@ static int look_init(fl_look *L, const char *lut_path, const int *params, char *
     build_tone(L, params[FL_PARAM_HIGHLIGHT], params[FL_PARAM_SHADOW]);
     if (lut_path && lut_path[0] && stat(lut_path, &st) == 0) e = film_find(lut_path, (long)st.st_size, (long)st.st_mtime);
     if (!e) {
-        if (load_cube(L, lut_path, g_fast_cube, err, errlen) != 0) return -1;
+        if (load_cube(L, lut_path, 1, err, errlen) != 0) return -1;
         if (L->data && stat(lut_path, &st) == 0) e = film_keep(lut_path, (long)st.st_size, (long)st.st_mtime, L->n, L->data);
     }
     if (e) {   /* the table's copy (when keeping it found another thread's, L's own was freed) */
@@ -378,8 +378,6 @@ static void look_free(fl_look *L) {
 
 static long now_ms(void);
 
-void fl_set_fast_cube(int on) { g_fast_cube = on ? 1 : 0; }
-
 int fl_cache_lut(const char *lut_path, char *err, int errlen) {
     static const int neutral[FL_PARAM_COUNT];
     fl_look L;
@@ -389,7 +387,7 @@ int fl_cache_lut(const char *lut_path, char *err, int errlen) {
 }
 
 /* Every film read is forgotten, and what was made from them: the next develop reads its look from the card
- * again (the Develop test). The decoded previews go too, so all the memory comes back. */
+ * again (the host tests start from cold so). The decoded previews go too, so all the memory comes back. */
 static void ycc_forget(void);
 static void warm_wait(void);
 static void prev_forget(void);
@@ -1391,10 +1389,10 @@ static unsigned char *mpf_preview(FILE *f, unsigned long *len) {
 /*
  * The neutral pictures the last previews were made from (v0.45.0): fl_preview's decode, before the look,
  * kept so the next preview of the same photo at the same size only runs the look. The home screen shows one
- * photo in seven films (the hero and six samples), and the Lab changes one film or setting at a time, so
- * all but the first of those skip the card read and the decode. Keyed by the photo's path, size and
+ * photo in seven films (the hero and six samples), so all but the first of those skip the card read and the
+ * decode. Keyed by the photo's path, size and
  * modification time, the mode and the size asked for (which fix the decode's scale); PREVIEW_SLOTS kept
- * (a 420x280 sample or Lab crop is 353 KB, the 720x480 hero 1 MB), the least recently used dropped. Any
+ * (a 420x280 sample or 100% crop is 353 KB, the 720x480 hero 1 MB), the least recently used dropped. Any
  * thread: g_prev_mu guards the table, and a preview holds a reference to the picture it reads, so one
  * dropped meanwhile is freed when that preview is done.
  */
@@ -1660,309 +1658,12 @@ int fl_preview(const char *in_path, const char *lut_path, const int *params, int
 }
 
 /* ------------------------------------------------------------------------------------------ */
-/* the viewfinder: live frames                                                                  */
-
-/* Block size and limits of the horizon search (see fl_level). */
-#define LV_BLOCK 8
-#define LV_RANGE 12           /* degrees either side of level that count as a level cue      */
-#define LV_BINS (LV_RANGE * 8 + 1)   /* 0.25 degree bins                                      */
-
-int fl_level(const unsigned char *rgb, int w, int h, int *out) {
-    int bw = (w - 2) / LV_BLOCK, bh = (h - 2) / LV_BLOCK, nb = bw * bh, i, x, y, bx, by, n = 0, near = 0, peak = 0;
-    unsigned char *luma, *blur;
-    float *ang, *wt, hist[LV_BINS], smooth[LV_BINS], total = 0, mass = 0, sum = 0, mean_e = 0, floor_e;
-    int *je;
-    out[0] = out[1] = out[2] = 0;
-    if (bw < 4 || bh < 4) return -1;
-    luma = (unsigned char *)malloc((size_t)w * h);
-    blur = (unsigned char *)malloc((size_t)w * h);
-    ang = (float *)malloc(sizeof(float) * nb);
-    wt = (float *)malloc(sizeof(float) * nb);
-    je = (int *)malloc(sizeof(int) * nb * 3);
-    if (!luma || !blur || !ang || !wt || !je) { free(luma); free(blur); free(ang); free(wt); free(je); return -1; }
-    /* brightness, softened a little ([1 2 1] each way): Scharr's derivative on a softened picture
-     * reads an edge's angle to within 1% (Sobel on sharp edges read 10% low) */
-    for (i = 0; i < w * h; i++) blur[i] = (unsigned char)((rgb[i * 3] * 77 + rgb[i * 3 + 1] * 150 + rgb[i * 3 + 2] * 29) >> 8);
-    for (y = 0; y < h; y++) {
-        unsigned char *r = blur + y * w;
-        int prev = r[0];
-        for (x = 0; x < w; x++) {
-            int cur = r[x], next = x + 1 < w ? r[x + 1] : cur;
-            luma[y * w + x] = (unsigned char)((prev + 2 * cur + next + 2) >> 2);
-            prev = cur;
-        }
-    }
-    for (x = 0; x < w; x++) {
-        int prev = luma[x];
-        for (y = 0; y < h; y++) {
-            int cur = luma[y * w + x], next = y + 1 < h ? luma[(y + 1) * w + x] : cur;
-            blur[y * w + x] = (unsigned char)((prev + 2 * cur + next + 2) >> 2);
-            prev = cur;
-        }
-    }
-    /* per block, the structure tensor of the gradient (y pointing up): Jxx, Jyy, Jxy. Integer per
-     * pixel (a gradient is at most 4080, so a block's sums stay inside 31 bits) */
-    for (by = 0; by < bh; by++) for (bx = 0; bx < bw; bx++) {
-        int sxx = 0, syy = 0, sxy = 0;
-        for (y = 1 + by * LV_BLOCK; y < 1 + (by + 1) * LV_BLOCK; y++) {
-            const unsigned char *a = blur + (y - 1) * w, *b = blur + y * w, *c = blur + (y + 1) * w;
-            for (x = 1 + bx * LV_BLOCK; x < 1 + (bx + 1) * LV_BLOCK; x++) {
-                int gx = 3 * (a[x + 1] - a[x - 1]) + 10 * (b[x + 1] - b[x - 1]) + 3 * (c[x + 1] - c[x - 1]);
-                int gy = 3 * (a[x - 1] - c[x - 1]) + 10 * (a[x] - c[x]) + 3 * (a[x + 1] - c[x + 1]);   /* up is positive */
-                sxx += gx * gx >> 8; syy += gy * gy >> 8; sxy += gx * gy >> 8;
-            }
-        }
-        i = by * bw + bx;
-        je[i * 3] = sxx; je[i * 3 + 1] = syy; je[i * 3 + 2] = sxy;
-        mean_e += (float)sxx + syy;
-    }
-    mean_e /= nb;
-    /* a block counts when it holds one clear straight edge: stronger than the frame's average
-     * texture and than sensor noise, and all one direction (coherence) */
-    floor_e = (float)(LV_BLOCK * LV_BLOCK) * 160 * 160 / 256;   /* an edge of about 10 levels */
-    if (floor_e < mean_e) floor_e = mean_e;
-    memset(hist, 0, sizeof hist);
-    for (i = 0; i < nb; i++) {
-        float xx = (float)je[i * 3], yy = (float)je[i * 3 + 1], xy = (float)je[i * 3 + 2], e = xx + yy, coh, a, d, pos, f;
-        int k;
-        if (e < floor_e) continue;
-        coh = (float)sqrt((double)((xx - yy) * (xx - yy) + 4 * xy * xy)) / e;
-        if (coh < 0.7f) continue;
-        /* the gradient's direction, then the edge's (at right angles), in degrees, -90..90 */
-        a = (float)(0.5 * atan2(2.0 * xy, (double)(xx - yy)) * 180.0 / M_PI) + 90;
-        if (a > 90) a -= 180;
-        d = a > 45 ? a - 90 : a < -45 ? a + 90 : a;   /* a vertical edge says as much as a horizontal one */
-        if (d < -LV_RANGE || d > LV_RANGE) continue;
-        f = coh * coh * (float)sqrt((double)e) * (a > 45 || a < -45 ? 0.8f : 1.0f);
-        ang[n] = d; wt[n] = f; n++;
-        pos = (d + LV_RANGE) * 4;
-        k = (int)pos;
-        if (k >= LV_BINS - 1) { hist[LV_BINS - 1] += f; }
-        else { hist[k] += f * (1 - (pos - k)); hist[k + 1] += f * (pos - k); }
-        total += f;
-    }
-    if (n > 0) {
-        for (i = 0; i < LV_BINS; i++) {   /* a little blur: one degree wide */
-            int k;
-            smooth[i] = 0;
-            for (k = -2; k <= 2; k++) if (i + k >= 0 && i + k < LV_BINS) smooth[i] += hist[i + k] * (3 - (k < 0 ? -k : k));
-            if (smooth[i] > smooth[peak]) peak = i;
-        }
-        /* the answer: the weighted mean of the edges within a degree of the peak */
-        for (i = 0; i < n; i++) {
-            float d = ang[i] - (peak / 4.0f - LV_RANGE);
-            if (d >= -1 && d <= 1) { sum += ang[i] * wt[i]; mass += wt[i]; near++; }
-        }
-        if (mass > 0) {
-            out[0] = (int)(sum / mass * 100 + (sum >= 0 ? 0.5f : -0.5f));
-            out[1] = (int)(mass / total * 100 + 0.5f);
-            out[2] = near;
-        }
-    }
-    free(luma); free(blur); free(ang); free(wt); free(je);
-    return 0;
-}
-
-/* The 4-bit value of 0..255 with an ordered-dither threshold t (0..15 of a 4-bit step): [t][v]. A table,
- * as the camera's core has no divide instruction (three a pixel, 260K pixels a frame, were half the look). */
-static unsigned char g_q4[16][256];
-static pthread_once_t g_q4_once = PTHREAD_ONCE_INIT;   /* made once, by whichever thread asks first */
-
-static void q4_make(void) {
-    int t, v;
-    for (t = 0; t < 16; t++) {
-        int off = (t * 255 + 128) / 16;
-        for (v = 0; v < 256; v++) { int q = (v * 15 + off) / 255; g_q4[t][v] = (unsigned char)(q > 15 ? 15 : q); }
-    }
-}
-
-static void q4_init(void) { pthread_once(&g_q4_once, q4_make); }
-
-/* One source row stretched across: per output column and channel, the two neighbours blended (0..65280). */
-static void stretch_row(const unsigned int *r, const int *xi, const int *xw, int ow, unsigned short *h) {
-    int x;
-    for (x = 0; x < ow; x++, h += 3) {
-        unsigned int a = r[xi[x]], b = r[xi[x] + 1];
-        int wx = xw[x], ux = 256 - wx;
-        h[0] = (unsigned short)(((a >> 16) & 255) * ux + ((b >> 16) & 255) * wx);
-        h[1] = (unsigned short)(((a >> 8) & 255) * ux + ((b >> 8) & 255) * wx);
-        h[2] = (unsigned short)((a & 255) * ux + (b & 255) * wx);
-    }
-}
-
-int fl_to4444(const unsigned int *argb, int w, int h, unsigned short *out, int ow, int oh, int aspect1000, const int *shifts) {
-    static const unsigned char bayer[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
-    int x, y, rs, gs, bs, as, held[2];
-    int *xi, *xw;
-    unsigned short *hrow[2], alpha;
-    double sw, sh, sx0, sy0;
-    if (!argb || !out || !shifts || w < 2 || h < 2 || ow < 1 || oh < 1 || ow > 4096 || oh > 4096) return -1;
-    rs = shifts[0]; gs = shifts[1]; bs = shifts[2]; as = shifts[3];
-    if (rs < 0 || rs > 12 || gs < 0 || gs > 12 || bs < 0 || bs > 12 || as < 0 || as > 12) return -1;
-    q4_init();
-    alpha = (unsigned short)(15 << as);
-    /* the source rectangle of the wanted shape (aspect1000, else ow:oh), centred, in source pixels */
-    {
-        double want = aspect1000 > 0 ? aspect1000 / 1000.0 : (double)ow / oh;
-        if ((double)w / h > want) { sh = h; sw = h * want; } else { sw = w; sh = w / want; }
-        sx0 = (w - sw) / 2; sy0 = (h - sh) / 2;
-    }
-    xi = (int *)malloc(sizeof(int) * ow * 2 + sizeof(unsigned short) * ow * 6);
-    if (!xi) return -1;
-    xw = xi + ow;
-    hrow[0] = (unsigned short *)(xw + ow);
-    hrow[1] = hrow[0] + ow * 3;
-    held[0] = held[1] = -1;
-    for (x = 0; x < ow; x++) {   /* per column: the left source pixel and its weight (0..256) */
-        double fx = sx0 + (x + 0.5) * sw / ow - 0.5;
-        int ix = (int)fx;
-        if (fx < 0) { fx = 0; ix = 0; }
-        if (ix > w - 2) { ix = w - 2; fx = w - 1; }
-        xi[x] = ix;
-        xw[x] = (int)((fx - ix) * 256 + 0.5);
-    }
-    /* separable: each source row is stretched across once (the screen has ~2x the rows), then rows blend */
-    for (y = 0; y < oh; y++) {
-        double fy = sy0 + (y + 0.5) * sh / oh - 0.5;
-        int iy = (int)fy, wy, uy, k;
-        const unsigned short *h0, *h1;
-        const unsigned char *q[4];
-        unsigned short *o = out + (size_t)y * ow;
-        if (fy < 0) { fy = 0; iy = 0; }
-        if (iy > h - 2) { iy = h - 2; fy = h - 1; }
-        wy = (int)((fy - iy) * 256 + 0.5);
-        uy = 256 - wy;
-        if (held[0] != iy) {
-            if (held[1] == iy) {   /* moved down a row: the lower becomes the upper */
-                unsigned short *t = hrow[0]; hrow[0] = hrow[1]; hrow[1] = t;
-                held[0] = iy; held[1] = -1;
-            } else { stretch_row(argb + (size_t)iy * w, xi, xw, ow, hrow[0]); held[0] = iy; }
-        }
-        if (held[1] != iy + 1) { stretch_row(argb + (size_t)(iy + 1) * w, xi, xw, ow, hrow[1]); held[1] = iy + 1; }
-        h0 = hrow[0]; h1 = hrow[1];
-        for (k = 0; k < 4; k++) q[k] = g_q4[bayer[(y & 3) * 4 + k]];
-        for (x = 0; x < ow; x++, h0 += 3, h1 += 3) {
-            const unsigned char *t = q[x & 3];
-            int r = (h0[0] * uy + h1[0] * wy + 32768) >> 16;
-            int g = (h0[1] * uy + h1[1] * wy + 32768) >> 16;
-            int b = (h0[2] * uy + h1[2] * wy + 32768) >> 16;
-            o[x] = (unsigned short)((t[r] << rs) | (t[g] << gs) | (t[b] << bs) | alpha);
-        }
-    }
-    free(xi);
-    return 0;
-}
-
-/* The film for live view, kept between frames (a frame used to stat the LUT and build its tables each
- * time): its own copy of the LUT, so a develop's cache never pulls it away. fl_live holds g_live_mu
- * throughout, so frames from two threads take turns (only the Live look test still uses fl_live). */
-static struct { char path[512]; int highlight, shadow, ready; fl_look L; } g_live;
-static pthread_mutex_t g_live_mu = PTHREAD_MUTEX_INITIALIZER;
-
-static const fl_look *live_look(const char *lut_path, const int *params, char *err, int errlen) {
-    const char *p = lut_path ? lut_path : "";
-    fl_look L;
-    if (g_live.ready && strcmp(g_live.path, p) == 0 && g_live.highlight == params[FL_PARAM_HIGHLIGHT]
-            && g_live.shadow == params[FL_PARAM_SHADOW]) return &g_live.L;
-    if (strlen(p) >= sizeof g_live.path) { set_err(err, errlen, "LUT path too long"); return NULL; }
-    if (look_init(&L, lut_path, params, err, errlen) != 0) return NULL;
-    if (g_live.ready) free(g_live.L.data);
-    g_live.ready = 0;
-    g_live.L = L;
-    g_live.L.data = NULL;
-    g_live.L.film = NULL;   /* L's reference, given back below: the copy has its own table */
-    if (L.data) {
-        size_t bytes = sizeof(short) * 3 * (size_t)L.n * L.n * L.n;
-        g_live.L.data = (short *)malloc(bytes);
-        if (!g_live.L.data) { look_free(&L); set_err(err, errlen, "out of memory"); return NULL; }
-        memcpy(g_live.L.data, L.data, bytes);
-    }
-    g_live.L.shared = 1;
-    look_free(&L);
-    strcpy(g_live.path, p);
-    g_live.highlight = params[FL_PARAM_HIGHLIGHT];
-    g_live.shadow = params[FL_PARAM_SHADOW];
-    g_live.ready = 1;
-    return &g_live.L;
-}
-
-static int live_frame(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
-                      unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen);
-
-int fl_live(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
-            unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen) {
-    int rc;
-    pthread_mutex_lock(&g_live_mu);
-    rc = live_frame(jpeg, len, lut_path, params, argb, max_w, max_h, info, err, errlen);
-    pthread_mutex_unlock(&g_live_mu);
-    return rc;
-}
-
-static int live_frame(const unsigned char *jpeg, unsigned long len, const char *lut_path, const int *params,
-                      unsigned int *argb, int max_w, int max_h, int *info, char *err, int errlen) {
-    struct jpeg_decompress_struct d;
-    struct fl_jerr je;
-    const fl_look *L;
-    fl_thumb P;
-    unsigned char *volatile row = NULL, *volatile rgb = NULL;
-    int ow, oh, i;
-
-    memset(&P, 0, sizeof P);
-    memset(info, 0, sizeof(int) * FL_LIVE_INFO);
-    if ((L = live_look(lut_path, params, err, errlen)) == NULL) return -1;
-    fl_jerr_init(&je);
-    d.err = &je.pub;
-    if (setjmp(je.jump)) {
-        set_err(err, errlen, "%s", je.msg);
-        jpeg_destroy_decompress(&d); free(row); free(rgb); thumb_free(&P);
-        return -1;
-    }
-    jpeg_create_decompress(&d);
-    jpeg_mem_src(&d, (unsigned char *)jpeg, len);
-    jpeg_read_header(&d, TRUE);
-    d.out_color_space = JCS_RGB;
-    d.dct_method = JDCT_IFAST;
-    d.do_fancy_upsampling = FALSE;
-    d.scale_num = 1;
-    d.scale_denom = 8;
-    while (d.scale_denom > 1 && (int)(d.image_width / d.scale_denom) < max_w && (int)(d.image_height / d.scale_denom) < max_h)
-        d.scale_denom /= 2;
-    jpeg_start_decompress(&d);
-    if (thumb_init(&P, (int)d.output_width, (int)d.output_height, max_w, max_h, 0) != 0) longjmp(je.jump, 1);
-    row = (unsigned char *)malloc(d.output_width * 3);
-    if (!row) longjmp(je.jump, 1);
-    while (d.output_scanline < d.output_height) {
-        int y = (int)d.output_scanline;
-        JSAMPROW r = row;
-        jpeg_read_scanlines(&d, &r, 1);
-        thumb_row(&P, row, y);
-    }
-    jpeg_finish_decompress(&d);
-    jpeg_destroy_decompress(&d);
-    ow = P.W;
-    oh = P.H;
-    rgb = (unsigned char *)malloc((size_t)ow * oh * 3);
-    if (!rgb) { thumb_free(&P); free(row); set_err(err, errlen, "out of memory"); return -1; }
-    thumb_rgb(&P, rgb);
-    /* the level and the histogram read the picture as it comes from the camera, before the look */
-    fl_level(rgb, ow, oh, info + 2);
-    for (i = 0; i < ow * oh; i++) info[5 + ((rgb[i * 3] * 77 + rgb[i * 3 + 1] * 150 + rgb[i * 3 + 2] * 29) >> 10)]++;
-    look_row(L, &(fl_grain){ 0 }, rgb, ow * oh, 0);
-    for (i = 0; i < ow * oh; i++) argb[i] = to_argb(rgb + i * 3);
-    info[0] = ow;
-    info[1] = oh;
-    free(row); free(rgb);
-    thumb_free(&P);
-    return 0;
-}
-
-/* ------------------------------------------------------------------------------------------ */
 /* the viewfinder's frame composer                                                               */
 /*
  * One live frame, start to finish, for the camera's 16-bit screen: the JPEG decoded straight into a
- * kept buffer (as Y'CbCr, unless the level wants RGB), its signature (a still scene can stop here), the
- * level read (when asked), the film's look (a word a pixel, already in the dither's units), its histogram
- * (when asked), then each source row stretched once and each screen row made in one pass that blends two
+ * kept buffer (as Y'CbCr), its signature (a still scene can stop here), the film's look (a word a pixel,
+ * already in the dither's units), its histogram (when asked), then each source row stretched once and each
+ * screen row made in one pass that blends two
  * stretched rows, lays the fades over them and dithers to 4 bits a channel with blue noise, landing on
  * the 4-bit levels directly, two pixels a store; Latent's own type (the overlay, drawn by the screen only
  * when it changes) follows over its runs. The screen then copies one opaque picture a frame. A context
@@ -2811,8 +2512,8 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
     if (jpeg) {
         const fl_look *L = frame_film(c, lut_path, params, err, errlen);
         if (!L) return -1;
-        /* Y'CbCr straight from the decoder unless the level wants RGB (or there is no film) */
-        c->ycc = !(flags & FL_F_LEVEL) && c->film.Y.n;
+        /* Y'CbCr straight from the decoder, unless there is no film (or the host tests ask for RGB) */
+        c->ycc = !(flags & FL_F_RGB) && c->film.Y.n;
         if (frame_decode(c, jpeg, len, max_w, max_h, !c->ycc, err, errlen) != 0) return -1;
         t = now_ms(); if (tm) tm[FL_TM_DECODE] = (int)(t - t0); t0 = t;
         frame_signature(c, info + FL_FI_SIG);
@@ -2821,8 +2522,6 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
             info[1] = c->sh;
             return 1;
         }
-        if (flags & FL_F_LEVEL) fl_level(c->rgb, c->sw, c->sh, info + 2);
-        else info[2] = info[3] = info[4] = FL_NO_READING;
         if (g_sharpen && c->ycc && c->sw >= 3 && c->sh >= 3) {
             if (c->sharp_cap < c->sw) {
                 free(c->sharp);
@@ -2846,7 +2545,6 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
         t = now_ms(); if (tm) tm[FL_TM_LOOK] = (int)(t - t0); t0 = t;
     } else {
         if (!c->px) { set_err(err, errlen, "no frame yet"); return -1; }
-        info[2] = info[3] = info[4] = FL_NO_READING;
     }
     if (flags & FL_F_TEMPORAL) {   /* the grain moves each frame, as film's does */
         unsigned int hsh = hash32((unsigned int)seq * 2654435761u + 1);
@@ -2964,51 +2662,30 @@ static int build_ycc_look(const fl_look *rgb, fl_look *Y, int grid) {
 #define PAIR_SPLIT 8   /* a pair whose brightnesses differ more than this (an edge) is looked up pixel by pixel */
 
 /*
- * The look on the camera's own values (Cb Y0 Cr Y1 per pair), in a few interchangeable ways. They give
- * the same picture to within a level or so; which is fastest depends on the chip (cache size, no
- * NEON), so fl_bench times them all on the camera itself, on the same pixels.
+ * The look on the camera's own values (Cb Y0 Cr Y1 per pair): one lookup per pair of pixels in the
+ * Y'CbCr table (ycc_pairs). The camera's Speed test timed it against three other ways (colour reuse, a
+ * 4-short table, a smaller table) and kept it; since v0.45.0 it is the only one.
  */
-enum { V_PAIRS, V_REUSE, V_PACKED, V_SMALL, V_COUNT };
-static const char *const V_NAMES[V_COUNT] = { "per pair", "colour reuse", "packed table", "smaller table" };
-static int g_variant = V_PAIRS;
 static int g_last_threads = 1;          /* threads the last block develop used */
 static char g_helper_note[96];          /* why a helper didn't join, if one didn't */
 
 typedef struct {
     fl_look L;                        /* the Y'CbCr table: 3 shorts per node */
-    short *pad;                       /* the same with 4 shorts per node (8-byte aligned), or NULL */
     int ypos[256];                    /* brightness as a position in the table (x 256), as build_index places it */
-    int o4R[256], o4G[256], o4B[256]; /* node offsets in pad */
 } ycc_look;
 
-static int ycc_make(const fl_look *rgb, ycc_look *Y, int grid, int padded) {
-    int i, n = grid * grid * grid;
+static int ycc_make(const fl_look *rgb, ycc_look *Y) {
+    const int grid = FL_YCC_GRID;
+    int i;
     memset(Y, 0, sizeof *Y);
     if (build_ycc_look(rgb, &Y->L, grid) != 0) return -1;
-    for (i = 0; i < 256; i++) {
-        Y->ypos[i] = i * (grid - 1) * 256 / 255;
-        Y->o4R[i] = Y->L.idx[i] * 4;
-        Y->o4G[i] = Y->L.idx[i] * grid * 4;
-        Y->o4B[i] = Y->L.idx[i] * grid * grid * 4;
-    }
-    if (padded) {
-        Y->pad = (short *)malloc(sizeof(short) * 4 * n);
-        if (!Y->pad) { free(Y->L.data); Y->L.data = NULL; return -1; }
-        for (i = 0; i < n; i++) {
-            Y->pad[i * 4] = Y->L.data[i * 3];
-            Y->pad[i * 4 + 1] = Y->L.data[i * 3 + 1];
-            Y->pad[i * 4 + 2] = Y->L.data[i * 3 + 2];
-            Y->pad[i * 4 + 3] = 0;
-        }
-    }
+    for (i = 0; i < 256; i++) Y->ypos[i] = i * (grid - 1) * 256 / 255;
     return 0;
 }
 
 static void ycc_free(ycc_look *Y) {
     free(Y->L.data);
-    free(Y->pad);
     Y->L.data = NULL;
-    Y->pad = NULL;
 }
 
 /*
@@ -3034,35 +2711,29 @@ static inline void ycc_tetra(const short *c0, int st, int sg, int sb, int fr, in
 
 static inline int clamp255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
-static inline void add_grain(const fl_grain *G, const signed char *t, int x, int *o0, int *o1) {
-    *o0 = clamp255(*o0 + ((t[(x + G->ox) & TILE_MASK] * G->amp[*o0]) >> 8));
-    *o1 = clamp255(*o1 + ((t[(x + 1 + G->ox) & TILE_MASK] * G->amp[*o1]) >> 8));
-}
-
 #define PAIR_SPLIT 8   /* a pair whose brightnesses differ more than this (an edge) is looked up pixel by pixel */
 
 /*
  * One lookup per pair: the two pixels share their colour, so the table is read once at their average
  * brightness, and each pixel's own brightness follows the table's slope from there (exact while both
- * stay in the same tetrahedron). Pairs straddling an edge are looked up one by one. packed: read the
- * 4-short table. Grain goes on brightness only.
+ * stay in the same tetrahedron). Pairs straddling an edge are looked up one by one. Grain goes on
+ * brightness only.
  */
 /*
  * A per-thread memory of recent per-pair lookups: what ycc_tetra gave for (brightness, Cb, Cr), which
  * is a pure function of those three for one look. Photos come back to the same colours far more often
  * than the previous pair alone catches (a 4K-entry memory finds 38-71% of the remaining lookups in the
  * test photos), and a remembered entry is one 12-byte read instead of four table nodes and the
- * tetrahedron's arithmetic. The picture is the same bit for bit. Whether it pays depends on the chip's
- * caches (on a Mac: -12% to +15% by photo), so its size is the Develop test's to choose: 2^g_memo_bits
- * entries a thread, 0 = off (the default).
+ * tetrahedron's arithmetic. The picture is the same bit for bit. 2^PAIR_MEMO_BITS entries a thread: 1K,
+ * as v0.43.0's Develop test chose on the camera (2863 -> 2225 ms a frame; 4K and 16K no faster), the
+ * default since v0.43.2 and fixed since v0.45.0.
  */
 typedef struct { unsigned key; int acc; short slope; unsigned char cb, cr; } pair_memo;
-static int g_memo_bits;
-void fl_set_pair_memo(int bits) { g_memo_bits = bits >= 8 && bits <= 16 ? bits : 0; }
+#define PAIR_MEMO_BITS 10
 
 static pair_memo *memo_new(void) {
-    pair_memo *m = (pair_memo *)malloc(sizeof(pair_memo) << g_memo_bits);
-    if (m) memset(m, 0xff, sizeof(pair_memo) << g_memo_bits);   /* key 0xffffffff: no (m, cb, cr) has it */
+    pair_memo *m = (pair_memo *)malloc(sizeof(pair_memo) << PAIR_MEMO_BITS);
+    if (m) memset(m, 0xff, sizeof(pair_memo) << PAIR_MEMO_BITS);   /* key 0xffffffff: no (m, cb, cr) has it */
     return m;
 }
 
@@ -3083,16 +2754,16 @@ typedef unsigned int pair_word __attribute__((may_alias, aligned(1)));
  * ~60-70 MB/s in fl_probe), and the 2 MB block left the cache long ago, so each new 32-byte line used to
  * stall the look; PLD (a hint, which never faults) asks for the line two ahead as each line begins.
  */
-static inline __attribute__((always_inline)) void pairs_core(const ycc_look *Y, int packed, const fl_grain *G, unsigned char *u, int w,
+static inline __attribute__((always_inline)) void pairs_core(const ycc_look *Y, const fl_grain *G, unsigned char *u, int w,
                                                              int y, pair_memo *memo) {
     const fl_look *L = &Y->L;
-    const int st = packed ? 4 : 3, sg = L->n * st, sb = L->n * L->n * st;
-    const short *data = packed ? Y->pad : L->data;
+    const int st = 3, sg = L->n * st, sb = L->n * L->n * st;
+    const short *data = L->data;
     const int *ypos = Y->ypos, *frac = L->frac;
-    const int *oR = packed ? Y->o4R : L->offR, *oG = packed ? Y->o4G : L->offG, *oB = packed ? Y->o4B : L->offB;
+    const int *oR = L->offR, *oG = L->offG, *oB = L->offB;
     const signed char *t = G->on ? G->tile + (((y + G->oy) & TILE_MASK) << TILE_BITS) : NULL;
     const int *amp = G->amp;
-    const int shift = 32 - g_memo_bits;   /* only read with a memo, which exists only while g_memo_bits is set */
+    const int shift = 32 - PAIR_MEMO_BITS;   /* only read with a memo */
     unsigned char *const end = u + (size_t)(w >> 1) * 4;
     unsigned pkey = 0xffffffffu;          /* the last lookup's m << 16 | cb << 8 | cr (none has all ones) */
     unsigned chroma = 0;                  /* and its Cb' | Cr' << 16, where they sit in the pair's word */
@@ -3139,7 +2810,7 @@ static inline __attribute__((always_inline)) void pairs_core(const ycc_look *Y, 
         }
         o0 = clamp255(o0);
         o1 = clamp255(o1);
-        if (t) {   /* grain on brightness, as add_grain */
+        if (t) {   /* grain on brightness, as look_row's (the same in R, G and B is a change in Y alone) */
             o0 = clamp255(o0 + ((t[gx & TILE_MASK] * amp[o0]) >> 8));
             o1 = clamp255(o1 + ((t[(gx + 1) & TILE_MASK] * amp[o1]) >> 8));
         }
@@ -3149,79 +2820,9 @@ static inline __attribute__((always_inline)) void pairs_core(const ycc_look *Y, 
 #undef NODE
 }
 
-/* one copy of the loop for each table layout, each with its node size known (GCC left the 4-short one to a
- * run-time choice once the loop changed), and only those two */
-__attribute__((noinline)) static void ycc_pairs(const ycc_look *Y, const fl_grain *G, unsigned char *u, int w, int y, pair_memo *memo) { pairs_core(Y, 0, G, u, w, y, memo); }
-__attribute__((noinline)) static void ycc_pairs_packed(const ycc_look *Y, const fl_grain *G, unsigned char *u, int w, int y, pair_memo *memo) { pairs_core(Y, 1, G, u, w, y, memo); }
-
-/*
- * Colour reuse: interpolate across colour (Cb, Cr) once on the two brightness planes either side,
- * then each pixel only blends between those two along brightness. While neighbouring pairs keep the
- * same colour and brightness cell (common in smooth areas) the table isn't read at all.
- * This is trilinear interpolation, not tetrahedral: a slightly different, equally smooth blend.
- */
-/* Bilinear across colour on brightness planes j and j + 1: b0 = plane j, db = plane j + 1 minus plane j (x 4096). */
-static inline void colour_planes(const fl_look *L, int j, int cb, int cr, int b0[3], int db[3]) {
-    const int sg = L->n * 3, sb = L->n * L->n * 3;
-    const short *p = L->data + j * 3 + L->offG[cb] + L->offB[cr];
-    int fg = L->frac[cb], fb = L->frac[cr], k;
-    for (k = 0; k < 3; k++) {
-        int c00 = p[k], c10 = p[sg + k], c01 = p[sb + k], c11 = p[sg + sb + k];
-        int d00 = p[3 + k], d10 = p[3 + sg + k], d01 = p[3 + sb + k], d11 = p[3 + sg + sb + k];
-        int lo = (c00 << 8) + fg * (c10 - c00) + fb * (c01 - c00) + ((fg * fb * (c11 - c10 - c01 + c00)) >> 8);
-        int hi = (d00 << 8) + fg * (d10 - d00) + fb * (d01 - d00) + ((fg * fb * (d11 - d10 - d01 + d00)) >> 8);
-        b0[k] = lo;
-        db[k] = hi - lo;
-    }
-}
-
-static void ycc_reuse(const ycc_look *Y, const fl_grain *G, unsigned char *u, int w, int y) {
-    const fl_look *L = &Y->L;
-    const signed char *t = G->on ? G->tile + (((y + G->oy) & TILE_MASK) << TILE_BITS) : NULL;
-    int x, kj = -1, kcb = -1, kcr = -1, b0[3] = { 0, 0, 0 }, db[3] = { 0, 0, 0 };
-    for (x = 0; x + 1 < w; x += 2, u += 4) {
-        int cb = u[0], y0 = u[1], cr = u[2], y1 = u[3], j = L->idx[y0], o0, o1, f0, f1;
-        if (L->idx[y1] != j) {   /* the pair spans two brightness cells (an edge): each pixel on its own */
-            int a0[3], d0[3], a1[3], d1[3], j1 = L->idx[y1];
-            colour_planes(L, j, cb, cr, a0, d0);
-            colour_planes(L, j1, cb, cr, a1, d1);
-            f0 = Y->ypos[y0] - j * 256;
-            f1 = Y->ypos[y1] - j1 * 256;
-            o0 = clamp255((a0[0] + ((d0[0] * f0) >> 8) + 2048) >> 12);
-            o1 = clamp255((a1[0] + ((d1[0] * f1) >> 8) + 2048) >> 12);
-            u[0] = (unsigned char)clamp255((a0[1] + ((d0[1] * f0) >> 8) + a1[1] + ((d1[1] * f1) >> 8) + 4096) >> 13);
-            u[2] = (unsigned char)clamp255((a0[2] + ((d0[2] * f0) >> 8) + a1[2] + ((d1[2] * f1) >> 8) + 4096) >> 13);
-        } else {
-            int fm;
-            if (j != kj || cb != kcb || cr != kcr) {   /* same colour and cell as the last pair: nothing to read */
-                colour_planes(L, j, cb, cr, b0, db);
-                kj = j; kcb = cb; kcr = cr;
-            }
-            f0 = Y->ypos[y0] - j * 256;
-            f1 = Y->ypos[y1] - j * 256;
-            fm = (f0 + f1) >> 1;
-            o0 = clamp255((b0[0] + ((db[0] * f0) >> 8) + 2048) >> 12);
-            o1 = clamp255((b0[0] + ((db[0] * f1) >> 8) + 2048) >> 12);
-            u[0] = (unsigned char)clamp255((b0[1] + ((db[1] * fm) >> 8) + 2048) >> 12);
-            u[2] = (unsigned char)clamp255((b0[2] + ((db[2] * fm) >> 8) + 2048) >> 12);
-        }
-        if (t) add_grain(G, t, x, &o0, &o1);
-        u[1] = (unsigned char)o0;
-        u[3] = (unsigned char)o1;
-    }
-}
-
-/* The grid each variant's table uses. */
-static int variant_grid(int v) { return v == V_SMALL ? 17 : FL_YCC_GRID; }
-
-/* memo: this thread's lookup memory, or NULL (pairs variants only; the others ignore it) */
-static void look_variant(int v, const ycc_look *Y, const fl_grain *G, unsigned char *u, int w, int y, pair_memo *memo) {
-    if (v == V_REUSE) ycc_reuse(Y, G, u, w, y);
-    else if (v == V_PACKED) ycc_pairs_packed(Y, G, u, w, y, memo);
-    else ycc_pairs(Y, G, u, w, y, memo);
-}
-
-void fl_set_variant(int v) { g_variant = v >= 0 && v < V_COUNT ? v : V_PAIRS; }
+/* the loop as its own function, around the inlined core: written as one function, gcc 4.9 spent 8 more instructions
+ * and 4 more stack references on a pair at an edge (tools/asm-budget.sh, ASM_FUNCS=ycc_pairs) */
+__attribute__((noinline)) static void ycc_pairs(const ycc_look *Y, const fl_grain *G, unsigned char *u, int w, int y, pair_memo *memo) { pairs_core(Y, G, u, w, y, memo); }
 
 static int develop_rows(const char *lut_path, const int *params, int w, int h, fl_row_io io,
                         void *ctx, fl_progress_fn progress, void *pctx, char *err, int errlen);
@@ -3239,7 +2840,7 @@ static int develop_rows(const char *lut_path, const int *params, int w, int h, f
     fl_grain G, none;
     unsigned char *uyvy = NULL, *rgb = NULL;
     long t0 = now_ms(), cpu0 = cpu_ms(), t, t_read = 0, t_look = 0, t_write = 0;
-    int y, x, last = -1, rc = 0, v = g_variant;
+    int y, x, last = -1, rc = 0;
 
     memset(g_timing, 0, sizeof g_timing);
     if (w < 2 || h < 1 || (w & 1) || w > 20000 || h > 20000) { set_err(err, errlen, "bad image size %dx%d", w, h); return -1; }
@@ -3248,7 +2849,7 @@ static int develop_rows(const char *lut_path, const int *params, int w, int h, f
     if (grain_init(&G, params, err, errlen) != 0) { look_free(&L); return -1; }
     memset(&none, 0, sizeof none);
     memset(&Y, 0, sizeof Y);
-    if (FL_YCC_GRID && ycc_make(&L, &Y, variant_grid(v), v == V_PACKED) != 0) { set_err(err, errlen, "out of memory for the look"); rc = -1; goto done; }
+    if (FL_YCC_GRID && ycc_make(&L, &Y) != 0) { set_err(err, errlen, "out of memory for the look"); rc = -1; goto done; }
     uyvy = (unsigned char *)malloc((size_t)w * 2);
     rgb = (unsigned char *)malloc((size_t)w * 3);
     if (!uyvy || !rgb) { set_err(err, errlen, "out of memory"); rc = -1; goto done; }
@@ -3264,7 +2865,7 @@ static int develop_rows(const char *lut_path, const int *params, int w, int h, f
         fl_rgb_to_uyvy(rgb, row, w);
         (void)x; (void)none;
 #elif FL_YCC_PAIRS
-        look_variant(v, &Y, &G, row, w, y, NULL);
+        ycc_pairs(&Y, &G, row, w, y, NULL);
         (void)none; (void)x;
 #else
         /* each pixel as (Y, Cb, Cr): a pair shares its chroma */
@@ -3313,236 +2914,13 @@ done:
 }
 
 /* ------------------------------------------------------------------------------------------ */
-/* speed test: the look-loop variants timed against each other on the same pixels              */
-
-/*
- * Decodes in_path at 1/scale into the camera's pixel layout (UYVY), applies the look with every
- * variant, and reports each one's time and how far its picture is from the full-precision reference
- * (through RGB). Nothing is written to the card. 0 = ok; report gets one line per variant.
- */
-/* Decodes in_path at 1/scale (1, 2, 4 or 8) into packed UYVY rows (malloc'd), as the camera holds pixels. */
-static int decode_uyvy(const char *in_path, int scale, unsigned char **out, int *pw, int *ph, char *err, int len) {
-    struct jpeg_decompress_struct d;
-    struct fl_jerr je;
-    FILE *f;
-    unsigned char *volatile buf = NULL, *volatile rgb = NULL;
-    size_t stride;
-    int w, h, y;
-    f = fopen(in_path, "rb");
-    if (!f) { set_err(err, len, "cannot open %s", in_path); return -1; }
-    setvbuf(f, NULL, _IOFBF, IO_BUFFER);   /* the card read in big pieces, not 1 KB at a time */
-    fl_jerr_init(&je);
-    d.err = &je.pub;
-    if (setjmp(je.jump)) {
-        if (je.msg[0]) set_err(err, len, "%s", je.msg);
-        jpeg_destroy_decompress(&d); fclose(f); free(buf); free(rgb);
-        return -1;
-    }
-    jpeg_create_decompress(&d);
-    jpeg_stdio_src(&d, f);
-    jpeg_read_header(&d, TRUE);
-    d.out_color_space = JCS_RGB;
-    d.scale_num = 1;
-    d.scale_denom = (unsigned)(scale == 1 || scale == 2 || scale == 4 || scale == 8 ? scale : 2);
-    jpeg_start_decompress(&d);
-    w = (int)d.output_width & ~1;
-    h = (int)d.output_height;
-    stride = (size_t)w * 2;
-    buf = (unsigned char *)malloc(stride * h);
-    rgb = (unsigned char *)malloc((size_t)d.output_width * 3);
-    if (!buf || !rgb) { set_err(err, len, "out of memory for %dx%d", w, h); je.msg[0] = 0; longjmp(je.jump, 1); }
-    while (d.output_scanline < d.output_height) {
-        JSAMPROW r = rgb;
-        y = (int)d.output_scanline;
-        jpeg_read_scanlines(&d, &r, 1);
-        fl_rgb_to_uyvy(rgb, buf + (size_t)y * stride, w);
-    }
-    jpeg_finish_decompress(&d);
-    jpeg_destroy_decompress(&d);
-    fclose(f);
-    free(rgb);
-    *out = buf; *pw = w; *ph = h;
-    return 0;
-}
-
-int fl_bench(const char *in_path, const char *lut_path, const int *params, int scale, char *report, int len) {
-    unsigned char *src = NULL, *ref = NULL, *work = NULL, *rgb = NULL;
-    fl_look L;
-    fl_grain G;
-    int w, h, y, v, rep, pos = 0;
-    size_t stride, total;
-    long t, best;
-
-    report[0] = 0;
-    if (look_init(&L, lut_path, params, report, len) != 0) return -1;
-    if (grain_init(&G, params, report, len) != 0) { look_free(&L); return -1; }
-    yc_tables();
-    if (decode_uyvy(in_path, scale, &src, &w, &h, report, len) != 0) { look_free(&L); grain_free(&G); return -1; }
-    stride = (size_t)w * 2;
-    total = stride * h;
-    ref = (unsigned char *)malloc(total);
-    work = (unsigned char *)malloc(total);
-    rgb = (unsigned char *)malloc((size_t)w * 3);
-    if (!ref || !work || !rgb) {
-        set_err(report, len, "out of memory for %dx%d", w, h);
-        free(src); free(ref); free(work); free(rgb); look_free(&L); grain_free(&G);
-        return -1;
-    }
-
-    /* the reference: every pixel through RGB at full precision */
-    memcpy(ref, src, total);
-    t = now_ms();
-    for (y = 0; y < h; y++) {
-        fl_uyvy_to_rgb(ref + (size_t)y * stride, rgb, w);
-        look_row(&L, &G, rgb, w, y);
-        fl_rgb_to_uyvy(rgb, ref + (size_t)y * stride, w);
-    }
-    pos += snprintf(report + pos, len - pos, "%dx%d; through RGB %ld ms\n", w, h, now_ms() - t);
-
-    /* two plain copies of the image: what moving rows in and out of a buffer costs */
-    t = now_ms();
-    memcpy(work, src, total);
-    memcpy(work, ref, total);
-    pos += snprintf(report + pos, len - pos, "two copies of the image %ld ms\n", now_ms() - t);
-
-    for (v = 0; v < V_COUNT && pos < len - 1; v++) {
-        ycc_look Y;
-        long build, diff = 0;
-        int maxd = 0;
-        size_t i;
-        t = now_ms();
-        if (ycc_make(&L, &Y, variant_grid(v), v == V_PACKED) != 0) { pos += snprintf(report + pos, len - pos, "%s: out of memory\n", V_NAMES[v]); continue; }
-        build = now_ms() - t;
-        best = -1;
-        for (rep = 0; rep < 2; rep++) {   /* best of two: the camera may be doing something else */
-            memcpy(work, src, total);
-            t = now_ms();
-            for (y = 0; y < h; y++) look_variant(v, &Y, &G, work + (size_t)y * stride, w, y, NULL);
-            t = now_ms() - t;
-            if (best < 0 || t < best) best = t;
-        }
-        for (i = 0; i < total; i++) {
-            int dd = work[i] - ref[i];
-            if (dd < 0) dd = -dd;
-            diff += dd;
-            if (dd > maxd) maxd = dd;
-        }
-        pos += snprintf(report + pos, len - pos, "%s %ld ms (table %ld ms), vs reference mean %.2f max %d\n",
-                        V_NAMES[v], best, build, (double)diff / (double)total, maxd);
-        ycc_free(&Y);
-    }
-    free(src); free(ref); free(work); free(rgb);
-    look_free(&L); grain_free(&G);
-    return 0;
-}
-
-/* ------------------------------------------------------------------------------------------ */
-/* cores: what the camera lets Latent use, and whether a second core speeds the look up        */
+/* cores: a thread onto one core of the camera's four                                            */
 
 #ifdef __linux__
 #include <sys/syscall.h>
+
+static int my_tid(void) { return (int)syscall(__NR_gettid); }
 #endif
-
-/* First line of a small file (or the rest of the line starting with key), trimmed. */
-static void read_text(const char *path, const char *key, char *out, int n) {
-    char line[256];
-    FILE *f = fopen(path, "r");
-    out[0] = 0;
-    if (!f) { snprintf(out, n, "unreadable"); return; }
-    while (fgets(line, sizeof line, f)) {
-        char *v = line;
-        if (key) {
-            if (strncmp(line, key, strlen(key)) != 0) continue;
-            v = line + strlen(key);
-            while (*v == ' ' || *v == '\t') v++;
-        }
-        v[strcspn(v, "\r\n")] = 0;
-        snprintf(out, n, "%s", v);
-        break;
-    }
-    fclose(f);
-}
-
-/* Per-core busy and total jiffies from /proc/stat; returns how many cores it saw (at most 8). */
-static int read_stat(long long busy[8], long long total[8]) {
-    char line[256];
-    int n = 0;
-    FILE *f = fopen("/proc/stat", "r");
-    if (!f) return 0;
-    while (fgets(line, sizeof line, f) && n < 8) {
-        long long u, ni, sy, id, io = 0, irq = 0, sirq = 0;
-        int cpu;
-        if (strncmp(line, "cpu", 3) != 0 || line[3] < '0' || line[3] > '9') continue;
-        if (sscanf(line, "cpu%d %lld %lld %lld %lld %lld %lld %lld", &cpu, &u, &ni, &sy, &id, &io, &irq, &sirq) < 5 || cpu < 0 || cpu >= 8) continue;
-        busy[cpu] = u + ni + sy + irq + sirq;
-        total[cpu] = busy[cpu] + id + io;
-        if (cpu + 1 > n) n = cpu + 1;
-    }
-    fclose(f);
-    return n;
-}
-
-/*
- * Read only: which cores exist and are on, which Latent may use, its CPU group, and how busy each
- * core is over one second while Latent sits idle. One "key: value" line each.
- */
-int fl_cores(char *report, int len) {
-    char a[128], b[128], c[128], d[128], e[160];
-    long long b0[8] = { 0 }, t0[8] = { 0 }, b1[8] = { 0 }, t1[8] = { 0 };
-    int pos = 0, n, i;
-    read_text("/sys/devices/system/cpu/present", NULL, a, sizeof a);
-    read_text("/sys/devices/system/cpu/online", NULL, b, sizeof b);
-    read_text("/proc/self/status", "Cpus_allowed_list:", c, sizeof c);
-    read_text("/proc/self/cpuset", NULL, d, sizeof d);
-    read_text("/proc/self/cgroup", NULL, e, sizeof e);
-    pos += snprintf(report + pos, len - pos, "cores present: %s\nonline: %s\nLatent allowed: %s\ncpuset: %s\ncgroup: %s\n", a, b, c, d, e);
-    n = read_stat(b0, t0);
-    usleep(1000000);
-    read_stat(b1, t1);
-    pos += snprintf(report + pos, len - pos, "busy while idle:");
-    for (i = 0; i < n && pos < len - 1; i++) {
-        long long dt = t1[i] - t0[i];
-        if (dt <= 0) pos += snprintf(report + pos, len - pos, " cpu%d off", i);
-        else pos += snprintf(report + pos, len - pos, " cpu%d %lld%%", i, (b1[i] - b0[i]) * 100 / dt);
-    }
-    if (pos < len - 1) pos += snprintf(report + pos, len - pos, "\n");
-    return 0;
-}
-
-/* Which core a thread last ran on (field 39 of its stat), or -1. */
-static int thread_cpu(int tid) {
-#ifdef __linux__
-    char path[64], buf[1024], *p;
-    int field = 1, cpu = -1;
-    FILE *f;
-    snprintf(path, sizeof path, "/proc/self/task/%d/stat", tid);
-    f = fopen(path, "r");
-    if (!f) return -1;
-    if (!fgets(buf, sizeof buf, f)) { fclose(f); return -1; }
-    fclose(f);
-    p = strrchr(buf, ')');   /* the name may contain spaces: count from after it (field 2) */
-    if (!p) return -1;
-    field = 2;
-    for (p++; *p; p++) {
-        if (*p == ' ') {
-            field++;
-            if (field == 39) { cpu = atoi(p + 1); break; }
-        }
-    }
-    return cpu;
-#else
-    (void)tid;
-    return -1;
-#endif
-}
-
-static int my_tid(void) {
-#ifdef __linux__
-    return (int)syscall(__NR_gettid);
-#else
-    return 0;
-#endif
-}
 
 int fl_pin_core(int core, int *err_no) {
     *err_no = 0;
@@ -3557,97 +2935,6 @@ int fl_pin_core(int core, int *err_no) {
 #else
     return 0;
 #endif
-}
-
-typedef struct {
-    const ycc_look *Y;
-    const fl_grain *G;
-    unsigned char *pix;
-    size_t stride;
-    int w, y0, y1, variant;
-    int widen;                      /* ask to be allowed onto every core first */
-    char note[128];                 /* what the affinity request did */
-    int cpu;                        /* where it ran */
-} rows_job;
-
-static void *rows_worker(void *p) {
-    rows_job *j = (rows_job *)p;
-    int y;
-    j->note[0] = 0;
-#ifdef __linux__
-    if (j->widen) {
-        unsigned long want = 0, got = 0;
-        long ncpu = sysconf(_SC_NPROCESSORS_CONF), i;
-        for (i = 0; i < ncpu && i < (long)(8 * sizeof want); i++) want |= 1UL << i;
-        if (syscall(__NR_sched_setaffinity, my_tid(), sizeof want, &want) != 0)
-            snprintf(j->note, sizeof j->note, "refused (errno %d)", errno);
-        else if (syscall(__NR_sched_getaffinity, my_tid(), sizeof got, &got) < 0)
-            snprintf(j->note, sizeof j->note, "asked %#lx, read-back failed (errno %d)", want, errno);
-        else
-            snprintf(j->note, sizeof j->note, "asked %#lx, got %#lx", want, got);
-    }
-#endif
-    for (y = j->y0; y < j->y1; y++) look_variant(j->variant, j->Y, j->G, j->pix + (size_t)y * j->stride, j->w, y, NULL);
-    j->cpu = thread_cpu(my_tid());
-    return NULL;
-}
-
-/*
- * Times the look on in_path (decoded at 1/scale) on one core, then split across two threads with the
- * helper allowed onto every core, and checks both pictures are identical. Report lines say what the
- * affinity request did, where each thread ran, and the two times.
- */
-int fl_bench_cores(const char *in_path, const char *lut_path, const int *params, int scale, char *report, int len) {
-    unsigned char *src = NULL, *one = NULL, *two = NULL;
-    int w = 0, h = 0, pos = 0, rc = -1;
-    size_t stride, total;
-    fl_look L;
-    fl_grain G;
-    ycc_look Y;
-    rows_job main_job, helper;
-    pthread_t th;
-    long t, t_one, t_two;
-
-    report[0] = 0;
-    if (decode_uyvy(in_path, scale, &src, &w, &h, report, len) != 0) return -1;
-    stride = (size_t)w * 2;
-    total = stride * h;
-    if (look_init(&L, lut_path, params, report, len) != 0) { free(src); return -1; }
-    if (grain_init(&G, params, report, len) != 0) { look_free(&L); free(src); return -1; }
-    memset(&Y, 0, sizeof Y);
-    one = (unsigned char *)malloc(total);
-    two = (unsigned char *)malloc(total);
-    if (!one || !two || ycc_make(&L, &Y, variant_grid(g_variant), g_variant == V_PACKED) != 0) { set_err(report, len, "out of memory"); goto done; }
-
-    memset(&main_job, 0, sizeof main_job);
-    main_job.Y = &Y; main_job.G = &G; main_job.stride = stride; main_job.w = w; main_job.variant = g_variant;
-    helper = main_job;
-
-    memcpy(one, src, total);   /* one core: every row on this thread */
-    main_job.pix = one; main_job.y0 = 0; main_job.y1 = h;
-    t = now_ms();
-    rows_worker(&main_job);
-    t_one = now_ms() - t;
-
-    memcpy(two, src, total);   /* two: the helper takes the bottom half */
-    main_job.pix = two; main_job.y0 = 0; main_job.y1 = h / 2;
-    helper.pix = two; helper.y0 = h / 2; helper.y1 = h; helper.widen = 1;
-    t = now_ms();
-    if (pthread_create(&th, NULL, rows_worker, &helper) != 0) { set_err(report, len, "no second thread"); goto done; }
-    rows_worker(&main_job);
-    pthread_join(th, NULL);
-    t_two = now_ms() - t;
-
-    pos += snprintf(report + pos, len - pos, "picture: %dx%d\nwiden: %s\n", w, h, helper.note[0] ? helper.note : "not tried (not Linux)");
-    pos += snprintf(report + pos, len - pos, "ran on: main cpu %d, helper cpu %d\n", main_job.cpu, helper.cpu);
-    pos += snprintf(report + pos, len - pos, "one core %ld ms, two threads %ld ms, pictures %s\n", t_one, t_two,
-                    memcmp(one, two, total) == 0 ? "identical" : "DIFFERENT");
-    rc = 0;
-done:
-    free(src); free(one); free(two);
-    ycc_free(&Y);
-    look_free(&L); grain_free(&G);
-    return rc;
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -3671,7 +2958,7 @@ typedef struct {
     int gen, finished, quit, ready, threads;   /* threads: this one plus the helpers that started well */
     const ycc_look *Y;
     const fl_grain *G;
-    int variant, w;
+    int w;
     unsigned char *rows;                       /* the block in hand */
     int stride, y0, n;
     int next;                                  /* next row of the block nobody has taken yet */
@@ -3682,7 +2969,7 @@ typedef struct {
     pthread_t th;
     int core, index, ok, started;
     long cpu;   /* CPU ms it ran, filled in as it quits */
-    pair_memo *memo;   /* its own lookup memory (g_pair_memo), or NULL */
+    pair_memo *memo;   /* its own lookup memory, or NULL */
     char why[96];
 } look_helper;
 
@@ -3694,7 +2981,7 @@ typedef struct {
 static int pool_slice(look_pool *P, pair_memo *memo) {
     int r, done = 0;
     while ((r = __sync_fetch_and_add(&P->next, 1)) < P->n) {
-        look_variant(P->variant, P->Y, P->G, P->rows + (size_t)r * P->stride, P->w, P->y0 + r, memo);
+        ycc_pairs(P->Y, P->G, P->rows + (size_t)r * P->stride, P->w, P->y0 + r, memo);
         done++;
     }
     return done;
@@ -3740,7 +3027,7 @@ static void *pool_helper(void *arg) {
 
 /*
  * The look's tables, kept between develops: the last Y'CbCr table made, keyed by everything it is made
- * from (film file, its size and time, highlight, shadow, grid, layout). A develop with the same film
+ * from (film file, its size and time, highlight, shadow). A develop with the same film
  * and settings uses it as is; and fl_prewarm makes the next frame's while the camera saves this one.
  * Any thread: g_ycc_mu guards it, and a develop holds a reference to its table (ycc_put gives it back),
  * so a table replaced meanwhile is freed only when the develop using it is done.
@@ -3748,7 +3035,7 @@ static void *pool_helper(void *arg) {
 typedef struct {
     char path[512];
     long size, mtime;
-    int hl, sh, grid, padded;
+    int hl, sh;
     int refs, listed;          /* develops holding it; in g_ycc (0: freed with its last reference) */
     ycc_look Y;
 } ycc_entry;
@@ -3773,8 +3060,8 @@ static void ycc_forget(void) {
     pthread_mutex_unlock(&g_ycc_mu);
 }
 
-/* The key of the table for this film and these settings into c (0), or -1 if it can't be keyed. */
-static int ycc_key(const char *lut, const int *params, int grid, int padded, long *size, long *mtime) {
+/* The key of the table for this film (its file's size and time) and these settings (0), or -1 if it can't be keyed. */
+static int ycc_key(const char *lut, const int *params, long *size, long *mtime) {
     struct stat st;
     *size = *mtime = 0;
     if (lut && lut[0]) {
@@ -3782,20 +3069,19 @@ static int ycc_key(const char *lut, const int *params, int grid, int padded, lon
         *size = (long)st.st_size;
         *mtime = (long)st.st_mtime;
     }
-    (void)params; (void)grid; (void)padded;
+    (void)params;
     return 0;
 }
 
 /* The table made before for this film and these settings, with a reference taken, or NULL. */
-static ycc_entry *ycc_get(const char *lut, const int *params, int grid, int padded) {
+static ycc_entry *ycc_get(const char *lut, const int *params) {
     long size, mtime;
     ycc_entry *e;
-    if (ycc_key(lut, params, grid, padded, &size, &mtime) != 0) return NULL;
+    if (ycc_key(lut, params, &size, &mtime) != 0) return NULL;
     pthread_mutex_lock(&g_ycc_mu);
     e = g_ycc;
     if (e && (strcmp(e->path, lut ? lut : "") != 0 || e->size != size || e->mtime != mtime
-            || e->hl != params[FL_PARAM_HIGHLIGHT] || e->sh != params[FL_PARAM_SHADOW]
-            || e->grid != grid || e->padded != padded)) e = NULL;
+            || e->hl != params[FL_PARAM_HIGHLIGHT] || e->sh != params[FL_PARAM_SHADOW])) e = NULL;
     if (e) e->refs++;
     pthread_mutex_unlock(&g_ycc_mu);
     return e;
@@ -3812,9 +3098,9 @@ static void ycc_put(ycc_entry *e) {
  * with a reference for the caller. Unkeyed (a path too long, a file gone) it is the caller's alone, never
  * matched, and goes with ycc_put. NULL (Y freed) when there's no memory for an entry.
  */
-static ycc_entry *ycc_keep(const char *lut, const int *params, int grid, int padded, ycc_look *Y) {
+static ycc_entry *ycc_keep(const char *lut, const int *params, ycc_look *Y) {
     long size, mtime;
-    int keyed = ycc_key(lut, params, grid, padded, &size, &mtime) == 0;
+    int keyed = ycc_key(lut, params, &size, &mtime) == 0;
     ycc_entry *e = (ycc_entry *)calloc(1, sizeof *e);
     if (!e) { ycc_free(Y); return NULL; }
     e->Y = *Y;
@@ -3823,7 +3109,6 @@ static ycc_entry *ycc_keep(const char *lut, const int *params, int grid, int pad
     strcpy(e->path, lut ? lut : "");
     e->size = size; e->mtime = mtime;
     e->hl = params[FL_PARAM_HIGHLIGHT]; e->sh = params[FL_PARAM_SHADOW];
-    e->grid = grid; e->padded = padded;
     e->listed = 1;
     pthread_mutex_lock(&g_ycc_mu);
     ycc_unlist();
@@ -3844,7 +3129,6 @@ static ycc_entry *ycc_keep(const char *lut, const int *params, int grid, int pad
 static pthread_mutex_t g_warm_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_warm_cv = PTHREAD_COND_INITIALIZER;
 static int g_warm_running;     /* a prewarm thread is at work (detached; it clears this as it ends) */
-static int g_warm_variant;
 static char g_warm_lut[512];
 static int g_warm_params[FL_PARAM_COUNT];
 
@@ -3865,7 +3149,6 @@ static void *warm_main(void *arg) {
     fl_look L;
     char err[160];
     const char *lut = g_warm_lut[0] ? g_warm_lut : NULL;   /* stays as it is until warm_done */
-    int grid = variant_grid(g_warm_variant), padded = g_warm_variant == V_PACKED;
     ycc_entry *e;
     (void)arg;
 #ifdef __linux__
@@ -3880,10 +3163,10 @@ static void *warm_main(void *arg) {
             int size = g_warm_params[FL_PARAM_GRAINSIZE];
             grain_tile(size < 1 ? 1 : size > 3 ? 3 : size);
         }
-        if (!(e = ycc_get(lut, g_warm_params, grid, padded))) {
+        if (!(e = ycc_get(lut, g_warm_params))) {
             ycc_look Y;
             memset(&Y, 0, sizeof Y);
-            if (ycc_make(&L, &Y, grid, padded) == 0) e = ycc_keep(lut, g_warm_params, grid, padded, &Y);
+            if (ycc_make(&L, &Y) == 0) e = ycc_keep(lut, g_warm_params, &Y);
         }
         if (e) ycc_put(e);
         look_free(&L);
@@ -3901,7 +3184,6 @@ void fl_prewarm(const char *lut_path, const int *params) {
     while (g_warm_running) pthread_cond_wait(&g_warm_cv, &g_warm_mu);   /* the last one finished first */
     strcpy(g_warm_lut, lut_path ? lut_path : "");
     memcpy(g_warm_params, params, sizeof g_warm_params);
-    g_warm_variant = g_variant;
     g_warm_running = 1;
     pthread_mutex_unlock(&g_warm_mu);
     if (pthread_attr_init(&at) == 0) {
@@ -3928,7 +3210,7 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
     look_pool P;
     look_helper helpers[MAX_HELPERS];
     long t0 = now_ms(), cpu0 = cpu_ms(), t, t_read = 0, t_look = 0, t_write = 0, t_wait = 0, hcpu = 0, t_setup = 0;
-    int y = 0, last = -1, rc = 0, i, nh = 0, want, v = g_variant, own_rows = 0, warm = 0;
+    int y = 0, last = -1, rc = 0, i, nh = 0, want, own_rows = 0, warm = 0;
     pair_memo *memo = NULL;   /* this thread's lookup memory; each helper has its own */
 
     memset(g_timing, 0, sizeof g_timing);
@@ -3938,12 +3220,11 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
     yc_tables();
     if (look_init(&L, lut_path, params, err, errlen) != 0) return -1;
     if (grain_init(&G, params, err, errlen) != 0) { look_free(&L); return -1; }
-    ye = ycc_get(lut_path, params, variant_grid(v), v == V_PACKED);   /* made before: by the last develop, or fl_prewarm */
+    ye = ycc_get(lut_path, params);   /* made before: by the last develop, or fl_prewarm */
     if (ye) warm = 1;
     else {
         memset(&Y, 0, sizeof Y);
-        if (ycc_make(&L, &Y, variant_grid(v), v == V_PACKED) != 0
-                || !(ye = ycc_keep(lut_path, params, variant_grid(v), v == V_PACKED, &Y))) {   /* the cache owns it now */
+        if (ycc_make(&L, &Y) != 0 || !(ye = ycc_keep(lut_path, params, &Y))) {   /* the cache owns it now */
             set_err(err, errlen, "out of memory for the look");
             look_free(&L); grain_free(&G);
             return -1;
@@ -3955,14 +3236,12 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
     pthread_mutex_init(&P.mu, NULL);
     pthread_cond_init(&P.go, NULL);
     pthread_cond_init(&P.done, NULL);
-    P.Y = Yp; P.G = &G; P.variant = v; P.w = w; P.threads = 1;
+    P.Y = Yp; P.G = &G; P.w = w; P.threads = 1;
     want = params[FL_PARAM_THREADS] - 1;
     if (want > MAX_HELPERS) want = MAX_HELPERS;
     memset(helpers, 0, sizeof helpers);
-    if (g_memo_bits && (v == V_PAIRS || v == V_PACKED)) {   /* a fresh memory each develop: the look's tables are new */
-        memo = memo_new();
-        for (i = 0; i < want; i++) helpers[i].memo = memo_new();   /* a thread without one just looks everything up */
-    }
+    memo = memo_new();   /* a fresh memory each develop: the look's tables are new */
+    for (i = 0; i < want; i++) helpers[i].memo = memo_new();   /* a thread without one just looks everything up */
     for (i = 0; i < want; i++) {
         helpers[i].P = &P;
         helpers[i].core = HELPER_CORES[i];

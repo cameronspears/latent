@@ -128,22 +128,19 @@ public class RenderScreens {
 
         // ---- the menu, its rows from Ui.menuRows (as MainActivity builds them): a roll loaded, 9 shot
         Ui.Menu m = new Ui.Menu();
-        m.roll = true; m.developNow = true; m.changeFilm = true; m.exposed = 9; m.rolls = true; m.viewfinder = true; m.focusFirst = true;
-        m.liveLook = true; m.threeCores = true; m.threeCoresOk = true; m.neutral = true; m.looks = true; m.version = "0.45.0";
-        s = menu(m, Ui.PAGE_MENU, 1, classic);
+        m.roll = true; m.developNow = true; m.changeFilm = true; m.exposed = 9; m.photos = true; m.version = "0.45.0";
+        s = menu(m, 1, classic);
         render(s, "6-menu");
-        s = menu(m, Ui.PAGE_MENU, 5, classic);
-        render(s, "6c-menu-viewfinder");
-        s = menu(m, Ui.PAGE_MENU, 99, classic);
-        render(s, "6b-menu-scrolled");
-        s = menu(m, Ui.PAGE_CHECKS, 1, classic);
-        render(s, "6d-menu-camera-checks");
-        Ui.Menu busy = new Ui.Menu();
-        busy.rolls = false; busy.viewfinder = true; busy.looks = true; busy.cameraBusy = true; busy.version = "0.45.0";
-        s = menu(busy, Ui.PAGE_CHECKS, 5, null);
-        render(s, "6f-menu-checks-camera-busy");
-        s = menu(busy, Ui.PAGE_MENU, 8, null);
-        render(s, "6e-menu-cores-unavailable");
+        s = menu(m, 3, classic);
+        render(s, "6c-menu-photos");
+        Ui.Menu endless = new Ui.Menu();   // an endless roll: no Develop now (it develops as you go)
+        endless.roll = true; endless.changeFilm = true; endless.endless = true; endless.exposed = 23; endless.photos = true; endless.version = "0.45.0";
+        s = menu(endless, 1, trix);
+        render(s, "6b-menu-endless");
+        Ui.Menu empty = new Ui.Menu();   // no roll, nothing developed yet: the photos grey, and the footer says why
+        empty.version = "0.45.0";
+        s = menu(empty, 1, null);
+        render(s, "6e-menu-no-photos");
 
         // ---- the viewfinder (in-app shooting): every focus state, a look change, a shot developing
         int[] hist = new int[64];
@@ -173,18 +170,12 @@ public class RenderScreens {
         s = vf(six, 5, img(samples, "PEOPLE-PARTY800.png"));
         s.endless = true; s.exposed = 37; s.flash = true; s.printImage = img(samples, "STREET-PARTY800.png"); s.printProgress = 0.1f; s.developing = 1;
         render(s, "8g-vf-endless-shot");
-        // the level, read from the picture: off level, then level
-        s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
-        s.levelShown = true; s.levelAngle = 2.6f;
-        render(s, "8h-vf-level-tilted");
-        s.levelAngle = 0.2f; s.levelOk = true; s.afState = 2; s.shutter = "1/250"; s.aperture = "F8";
-        render(s, "8i-vf-level-locked");
         s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
         s.clean = true; s.vfNote = "Clean";
         render(s, "8j-vf-clean");
         // centre: the camera's own live view (drawn here under the screen, as the camera's video plane is)
         s = vf(six, 2, null);
-        s.liveThrough = true; s.lookLive = false; s.vfNote = "Film look off  \u00b7  the camera's own view"; s.levelShown = true; s.levelAngle = -1.4f;
+        s.liveThrough = true; s.lookLive = false; s.vfNote = "Film look off  \u00b7  the camera's own view";
         renderOver(s, "8k-vf-camera-view", img(samples, "HOUSE-NATURAL.png"));
         s = vf(six, 0, img(samples, "PEOPLE-NATURAL.png"));
         s.exposed = 12; s.length = 12; s.vfNote = "Roll finished"; s.printImage = img(samples, "PEOPLE-NATURAL.png"); s.printProgress = 0.6f; s.developing = 3;
@@ -218,15 +209,15 @@ public class RenderScreens {
         e2.ev = 2;
         if (!Ui.overlayKey(s).equals(Ui.overlayKey(e2))) problems.add("overlayKey changes with the exposure while its scale is open (it's drawn in the side bar)");
         s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
-        s.evEdit = true; s.ev = -5; s.levelShown = true; s.levelAngle = 0.3f; s.levelOk = true;
-        render(s, "8t-vf-exposure-minus-level");
+        s.evEdit = true; s.ev = -5;
+        render(s, "8t-vf-exposure-minus");
         s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
-        s.ev = -2; s.exposed = 7; s.printImage = img(samples, "HOUSE-CLASSNEG.png"); s.printProgress = 0.7f; s.levelShown = true; s.levelAngle = 3.1f;
+        s.ev = -2; s.exposed = 7; s.printImage = img(samples, "HOUSE-CLASSNEG.png"); s.printProgress = 0.7f;
         s.shutter = "1/250"; s.aperture = "F8"; s.iso = "400"; s.isoAuto = true;
-        render(s, "8u-vf-live-look-print-level");
+        render(s, "8u-vf-live-look-print");
         layers(s, "8w-vf-layers");
         s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
-        s.evEdit = true; s.ev = 4; s.afState = 2; s.levelShown = true; s.levelAngle = -0.2f; s.levelOk = true; s.grid = true; s.hist = new int[64];
+        s.evEdit = true; s.ev = 4; s.afState = 2; s.grid = true; s.hist = new int[64];
         for (int i = 0; i < 64; i++) s.hist[i] = 20 + (i * 37 % 50);
         layers(s, "8x-vf-layers-ev-grid");
         windowKeys(six, img(samples, "STREET-CLASSNEG.png"));
@@ -268,63 +259,7 @@ public class RenderScreens {
         s.viewImage = prv.getSubimage(0, 0, Math.min(prv.getWidth(), 317), prv.getHeight());   // upright, and an odd width: edges off whole dots
         render(s, "10b-view-fit-upright");
 
-        s = state();
-        s.mode = UiState.PROBE; s.probeStage = 0; s.probeTitle = "Hardware develop test"; s.probeSteps = HardwareTest.STEPS;
-        s.probePlan = Ui.HARDWARE_PLAN; s.probeFooter = Ui.HARDWARE_FOOTER;
-        render(s, "13-probe-intro");
-        s = state();
-        s.mode = UiState.PROBE; s.probeStage = 0; s.probeTitle = "Screen test"; s.probeSteps = ScreenTest.STEPS;
-        s.probePlan = Ui.SCREEN_PLAN; s.probeFooter = Ui.SCREEN_FOOTER;
-        render(s, "13s-screen-test-intro");
-        s = state();
-        s.mode = UiState.PROBE; s.probeStage = 0; s.probeTitle = "Shooting test"; s.probeSteps = ShootingTest.STEPS;
-        s.probePlan = Ui.SHOOT_PLAN; s.probeFooter = Ui.SHOOT_FOOTER;
-        render(s, "13b-shooting-intro");
-        s.probeStage = 2;
-        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.INFO, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
-        s.probeDetail = new String[] { "opened in 662 ms", "on screen", "af-s, center, faces [off, on]", "no sensor readings; display roll 0",
-                "locked in 1049 ms", "DSC04681.JPG stored: shutter 31 ms, in the catalogue 79 ms later", "29 in 3.0 s (9.6 a second), 640x424, 31 KB each",
-                "Tri-X: 640x424 on 1 core 419 ms, 640x424 on 3 cores 412 ms, 320x212 on 3 cores 142 ms", "Tri-X: DSC04682.JPG in 7.9 s",
-                "live view stopped, camera released" };
-        render(s, "13c-shooting-results");
-        s.probeStage = 2; s.probeTitle = "Camera roll test"; s.probeSteps = Probe.STEPS;
-        s.probeStatus = new int[] { Probe.INFO, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.FAIL, Probe.OK };
-        s.probeDetail = new String[] { "ILCE-5100, Android 2.3.7, build 3.10", "all present: catalog, catalog query, catalog delete, hardware decoder",
-                "4 of 4 found (not loaded, not called)", "212 photos catalogued on card 1", "6000x4000 in 1012 ms (our software decode: about 10,000 ms)",
-                "the camera did not catalogue it (212 -> 212 photos; no catalog events)", "removed (it was never catalogued)" };
-        render(s, "14-probe-results");
-        s.probeStage = 0; s.probeTitle = "Camera settings check"; s.probeSteps = SettingsCheck.STEPS;
-        s.probePlan = Ui.SETTINGS_PLAN; s.probeFooter = Ui.SETTINGS_FOOTER;
-        render(s, "15-settings-intro");
-        s.probeStage = 2;
-        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.INFO, Probe.OK };
-        s.probeDetail = new String[] { "15 of 15 settings read; nothing written", "Auto", "menu A2 / G1;  Auto applies A2 / G1", "Standard",
-                "contrast 0, saturation +1, sharpness 0", "Picture Effect Off, DRO Auto, exposure 0/3", "yes: none of them is write-protected (nothing was written)" };
-        render(s, "16-settings-results");
-        s.probeStage = 2; s.probeTitle = "Speed test"; s.probeSteps = SpeedTest.STEPS;
-        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.INFO, Probe.INFO, Probe.INFO, Probe.OK, Probe.OK };
-        s.probeDetail = new String[] { "DSC04625.JPG, 3000x2000; through RGB 2874 ms", "1395 ms at half size, off by 0.33 on average",
-                "none clearly faster (colour reuse 2171, packed table 1378, smaller table 1395 ms)", "present 0-3, on 0-3, Latent allowed 3",
-                "cpu0 4% cpu1 0% cpu2 1% cpu3 38%", "1.9x (1395 -> 731 ms), same picture; main cpu 3, helper cpu 1; asked 0xf, got 0xf",
-                "per pair, one core (two cores not used yet)" };
-        render(s, "17-speed-results");
-        s.probeStage = 0; s.probeTitle = "Develop test"; s.probeSteps = DevelopTest.STEPS;
-        s.probePlan = Ui.DEVTEST_PLAN; s.probeFooter = Ui.DEVTEST_FOOTER;
-        render(s, "17b-develop-intro");
-        s.probeStage = 2;
-        s.probeStatus = new int[] { Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK, Probe.OK };
-        s.probeDetail = new String[] { "DSC04811.JPG, then DSC04810.JPG", "verified up to 2048 KB per transfer", "decode 576, image 445, develop 2240 ms",
-                "yes: decode 560, image 440 ms", "1750 ms, DSC04812.JPG", "both in 1880 ms, one after the other 2750",
-                "identical, byte for byte", "yes: about 870 ms a frame to gain" };
-        render(s, "17c-develop-results");
-
-        s = state();
-        s.mode = UiState.LAB; s.labImage = img(samples, "PEOPLE-PORTRA4W.png"); s.labCaption = "DSC04547.JPG";
-        s.labRows = new String[] { "Photo", "Film", "Highlight", "Shadow", "Grain", "Grain size", "Preview", "Save copy" };
-        s.labValues = new String[] { "3 of 212", "Portra 400", "\u20131", "\u20131", "4", "Fine", "Whole", "" };
-        s.labRow = 1;
-        render(s, "12-lab");
-        partials(six, m, thumbs, s.labImage);
+        partials(six, m, thumbs);
 
         s = state();
         s.film = classic; s.rollNumber = 12; s.exposed = 9; s.length = 24;
@@ -340,13 +275,13 @@ public class RenderScreens {
         System.out.println("checks: layers, overlay bands, window key, text sizes, contrast, overlaps, side-bar fit, palette: all pass");
     }
 
-    /** The menu on this page with this row chosen, as MainActivity builds it. */
-    static UiState menu(Ui.Menu m, int page, int sel, UiState.Film film) {
+    /** The menu with this row chosen, as MainActivity builds it. */
+    static UiState menu(Ui.Menu m, int sel, UiState.Film film) {
         UiState s = state();
         s.mode = UiState.SETTINGS;
         s.film = film;
-        Ui.menuState(s, page, m, sel);
-        while (s.rowSel < s.rows.size() - 1 && s.rows.get(s.rowSel)[1].length() == 0) Ui.menuState(s, page, m, s.rowSel + 1);   // headings are passed over
+        Ui.menuState(s, m, sel);
+        while (s.rowSel < s.rows.size() - 1 && s.rows.get(s.rowSel)[1].length() == 0) Ui.menuState(s, m, s.rowSel + 1);   // headings are passed over
         return s;
     }
 
@@ -388,7 +323,7 @@ public class RenderScreens {
         ImageIO.write(img, "png", new File(out, name + ".png"));
         camera(s, name, (BufferedImage) video);
         if (s.mode == UiState.PHOTO) bands(s, name);
-        else if (!s.live) covered(s, name);
+        else covered(s, name);
         rendered.add(name);
     }
 
@@ -452,8 +387,8 @@ public class RenderScreens {
         partialShare += Math.min(1, r[2] * r[3] / (b.width * 480));
     }
 
-    /** The keys that redraw only part of the screen, each checked (Choose film, the menu, the contact sheet, the Lab). */
-    static void partials(List<UiState.Film> six, Ui.Menu m, List<Object> thumbs, Object labImage) throws Exception {
+    /** The keys that redraw only part of the screen, each checked (Choose film, the menu, the contact sheet). */
+    static void partials(List<UiState.Film> six, Ui.Menu m, List<Object> thumbs) throws Exception {
         for (int f : new int[] { 2, 4 }) for (int l = 0; l < 3; l++) {   // UP/DOWN on Choose film
             UiState a = state();
             a.mode = UiState.LOAD; a.films = six; a.filmSel = f; a.lengthSel = l; a.liveCaption = "on";
@@ -462,23 +397,16 @@ public class RenderScreens {
             partial(a, b, "Choose film, length " + l + " to " + (l + 1));
             partial(b, a, "Choose film, length " + (l + 1) + " to " + l);
         }
-        for (int page = Ui.PAGE_MENU; page <= Ui.PAGE_CHECKS; page++) {   // the menu, a row at a time
-            List<String[]> rows = Ui.menuRows(page, m);
-            int prev = -1;
-            for (int i = 0; i < rows.size(); i++) {
-                if (rows.get(i)[1].length() == 0) continue;
-                if (prev >= 0) {
-                    UiState a = menu(m, page, prev, null), b = menu(m, page, i, null);
-                    if (Ui.dirty(a, b) != null) { partial(a, b, "menu " + prev + " to " + i); partial(b, a, "menu " + i + " to " + prev); }
-                }
-                prev = i;
+        List<String[]> rows = Ui.menuRows(m);   // the menu, a row at a time
+        int prev = -1;
+        for (int i = 0; i < rows.size(); i++) {
+            if (rows.get(i)[1].length() == 0) continue;
+            if (prev >= 0) {
+                UiState a = menu(m, prev, null), b = menu(m, i, null);
+                if (Ui.dirty(a, b) != null) { partial(a, b, "menu " + prev + " to " + i); partial(b, a, "menu " + i + " to " + prev); }
             }
+            prev = i;
         }
-        Ui.Menu off = new Ui.Menu();   // a switch turned off where it was on
-        off.roll = m.roll; off.developNow = m.developNow; off.changeFilm = m.changeFilm; off.exposed = m.exposed; off.rolls = m.rolls;
-        off.viewfinder = false; off.focusFirst = m.focusFirst; off.liveLook = m.liveLook; off.threeCores = m.threeCores; off.threeCoresOk = m.threeCoresOk;
-        off.neutral = m.neutral; off.looks = m.looks; off.version = m.version;
-        partial(menu(m, Ui.PAGE_MENU, 5, null), menu(off, Ui.PAGE_MENU, 5, null), "menu, a switch");
         for (int[] t : new int[][] { { 6, 7 }, { 7, 6 }, { 4, 5 }, { 0, 1 }, { 13, 14 } }) {   // the contact sheet, a frame along
             UiState a = state();
             a.mode = UiState.SHEET; a.film = six.get(3); a.rollNumber = 3; a.thumbs = thumbs; a.sheetSel = t[0];
@@ -486,21 +414,6 @@ public class RenderScreens {
             b.sheetSel = t[1];
             partial(a, b, "contact sheet, frame " + t[0] + " to " + t[1]);
         }
-        UiState a = state();   // the Lab: a row, then a value
-        a.mode = UiState.LAB; a.labImage = labImage; a.labCaption = "DSC04547.JPG";
-        a.labRows = new String[] { "Photo", "Film", "Highlight", "Shadow", "Grain", "Grain size", "Preview", "Save copy" };
-        a.labValues = new String[] { "3 of 212", "Portra 400", "–1", "–1", "4", "Fine", "Whole", "" };
-        a.labRow = 1;
-        UiState b = a.copy();
-        b.labRow = 2;
-        partial(a, b, "Lab, a row");
-        UiState c = b.copy();
-        c.labValues = a.labValues.clone();
-        c.labValues[2] = "0";
-        partial(b, c, "Lab, a value");
-        UiState d = b.copy();
-        d.labRow = 7;
-        partial(b, d, "Lab, to Save copy");
         System.out.println("partial redraws: " + partials + " key changes checked, " + Math.round(partialShare * 100 / Math.max(1, partials)) + "% of the screen redrawn on average");
     }
 
@@ -835,8 +748,8 @@ public class RenderScreens {
 
     /** The screens to judge side by side: an earlier version's camera render (left) and this one's (right). */
     static final String[] COMPARE = { "1-home-choose-classic", "1b-home-choose-trix-endless", "1e-home-first-run", "3-home-roll", "2b-home-settling",
-            "5-home-finished-lowbattery", "6-menu", "6d-menu-camera-checks", "8-vf-ready", "8c-vf-locked", "8d-vf-cant-focus", "8s-vf-exposure-plus-third",
-            "8q-vf-endless-film-card", "8y-vf-coach", "8z-vf-fatal", "8l-vf-roll-finished", "8-darkroom", "9-sheet", "10-view-fit", "12-lab", "13-probe-intro" };
+            "5-home-finished-lowbattery", "6-menu", "6c-menu-photos", "8-vf-ready", "8c-vf-locked", "8d-vf-cant-focus", "8s-vf-exposure-plus-third",
+            "8q-vf-endless-film-card", "8y-vf-coach", "8z-vf-fatal", "8l-vf-roll-finished", "8-darkroom", "9-sheet", "10-view-fit" };
 
     /** compare/NAME.png: before | after, labelled, at the camera's look. */
     static void compare(File base) throws Exception {

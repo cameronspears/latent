@@ -5,7 +5,7 @@ import java.util.List;
 
 /** Everything a screen shows, filled in by MainActivity (or by the Mac preview tool). Plain data. */
 final class UiState implements Cloneable {
-    static final int BACK = 0, LOAD = 1, DARKROOM = 2, SHEET = 3, VIEW = 4, LAB = 5, PROBE = 6, PHOTO = 7, SETTINGS = 8;
+    static final int BACK = 0, LOAD = 1, DARKROOM = 2, SHEET = 3, VIEW = 4, PHOTO = 7, SETTINGS = 8;   // (5 and 6: the Lab and the camera tests until v0.45.0)
 
     /** How a film stock is shown: names and its two canister colours plus a UI accent. */
     static final class Film {
@@ -18,8 +18,6 @@ final class UiState implements Cloneable {
     float width = 640;                 // logical width: 480 x the panel's real aspect (853 on a 16:9 panel)
     int battery = -1;                  // percent, -1 unknown
     boolean loading;                   // Load film: the chosen roll is being loaded
-    boolean live;                      // the camera's live view is showing behind this screen
-    String liveNote = "";              // a short line over it
     String toast = "";                 // a short notice, shown near the top and faded out by the caller
 
     // camera back
@@ -36,7 +34,7 @@ final class UiState implements Cloneable {
     /**
      * The viewfinder in layers (v0.38.0): ALL draws everything; OVERLAY only Latent's type and fades over
      * the picture (drawn once when they change, then laid into every frame natively); SCREEN everything
-     * else (the picture, already carrying the overlay, and what moves: the level, focus, the print).
+     * else (the picture, already carrying the overlay, and what moves: focus, the print).
      */
     static final int LAYER_ALL = 0, LAYER_OVERLAY = 1, LAYER_SCREEN = 2;
     int vfLayer;
@@ -76,15 +74,13 @@ final class UiState implements Cloneable {
     float printProgress;               // 0 latent .. 1 developed
     boolean liveThrough;               // the camera's own live view shows in the picture (no look on it)
     boolean clean;                     // the clean display: the picture, focus and the counter only
-    boolean levelShown, levelOk;       // the level (read from the picture), and whether it's level
-    float levelAngle;                  // degrees, positive when the scene's lines rise to the right
     String vfNote = "";                // a short word under the counter ("Grid and histogram", "Roll finished")
     String cardNote = "";              // under the film's name on its card, in place of the tagline
     String fatal;                      // the viewfinder can't go on (a photo isn't saving): what to do, full screen; null normally
     boolean coach;                     // the first visit: the viewfinder's keys, once, for a few seconds
 
-    // Settings
-    List<String[]> rows = new ArrayList<String[]>();   // {label, value, why not}: value "on"/"off" draws a switch, "›" opens, "" is a heading; why not "" when it can act now
+    // the menu
+    List<String[]> rows = new ArrayList<String[]>();   // {label, value, why not}: value "›" opens, "" is a heading; why not "" when it can act now
     int rowSel;
     String footer = "";
 
@@ -113,22 +109,7 @@ final class UiState implements Cloneable {
     Object viewImage;
     boolean viewCaption, viewFill;
 
-    // camera tests
-    String probeTitle = "";
-    String[] probeSteps = new String[0], probePlan = new String[0];
-    String probeFooter = "";
-    int probeStage;                    // 0 = about to run, 1 = running, 2 = finished
-    int[] probeStatus = new int[0];    // Probe.RUN / OK / FAIL / SKIP / INFO, -1 = not reached
-    String[] probeDetail = new String[0];
-
-    // lab
-    Object labImage;
-    String[] labRows = new String[0], labValues = new String[0];
-    int labRow, labProgress = -1;
-    String labCaption = "";
-
     // ---- the screens (v0.45.0, the UI stream)
-    int menuPage;                      // the menu's page: Ui.PAGE_MENU, or Ui.PAGE_CHECKS (the camera tests)
     int readyIn = -1;                  // camera back: a shoot waits for the camera to settle, seconds to go (0: a moment); -1 none
     int readyTotal;                    // ... of this many seconds in all
     long developMs = -1;               // camera back: about how long the roll (or what's left of it) takes to develop; -1 unknown

@@ -27,11 +27,11 @@ final class Ui {
             INK = 0xFFFFFFEE,       // 20:1
             INK2 = 0xFF999988,      // 7.3:1
             INK3 = 0xFF777766,      // 4.6:1: the lowest colour any text may use
-            DIM = 0xFF444433,       // decoration only: empty ticks, a switch that's off
+            DIM = 0xFF444433,       // decoration only: empty ticks, the exposure scale's minor marks
             LINE = 0xFF333322,
             SURFACE = 0xFF222222,
             SELECT = 0xFF333333;    // the chosen row's plate
-    static final int GREEN = 0xFF55DD88,   // the one green: focus locked, a switch on, a check passed
+    static final int GREEN = 0xFF55DD88,   // the one green: focus locked
             AMBER = 0xFFFFAA33;            // can't focus
     // the darkroom's safelight: RED for text (5.5:1), RED2 for text of 18 px and up (3.2:1), RED3 and RED4 decoration only
     static final int RED = 0xFFEE4433, RED2 = 0xFFAA3322, RED3 = 0xFF331111, RED4 = 0xFF552211;
@@ -67,10 +67,6 @@ final class Ui {
     static final int OVL_TOP_END = 64, OVL_BOTTOM_START = 384;
 
     static void draw(Gfx g, UiState s) {
-        if (s.live) {   // live view shows through: only a quiet label over it
-            liveOverlay(g, s);
-            return;
-        }
         boolean vf = s.mode == UiState.PHOTO;
         if (vf && s.vfLayer == UiState.LAYER_OVERLAY) { photo(g, s); return; }   // the type over the picture, alone
         if (s.fatal != null) {   // the camera can't go on: nothing else, in every part
@@ -96,8 +92,6 @@ final class Ui {
             case UiState.DARKROOM: darkroom(g, s); break;
             case UiState.SHEET: sheet(g, s); break;
             case UiState.VIEW: view(g, s); break;
-            case UiState.LAB: lab(g, s); break;
-            case UiState.PROBE: probe(g, s); break;
             case UiState.PHOTO: photo(g, s); break;
             case UiState.SETTINGS: settings(g, s); break;
             default: break;
@@ -300,14 +294,13 @@ final class Ui {
 
     /**
      * What moves, drawn over the picture every frame (on its own surface, by the presenter): the histogram,
-     * the level, focus, its dot, the print, a note, the film's card and the first visit's keys. Notes, the card
-     * and the keys sit on opaque plates: the 16-bit surface would band anything translucent.
+     * focus, its dot, the print, a note, the film's card and the first visit's keys. Notes, the card and the
+     * keys sit on opaque plates: the 16-bit surface would band anything translucent.
      */
     private static void photoMovingPicture(Gfx g, UiState s, UiState.Film f, float ix, float iw, float ir, int accent) {
         float x1 = ir - INSET;
         if (s.hist != null) histogram(g, s, s.hist, x1 - 112, 76, 112, 40);
-        // ---- the level, then focus (both out of the way while the look card is up)
-        if (s.levelShown && !s.lookShown) level(g, s, ix + iw / 2, H / 2);
+        // ---- focus (out of the way while the look card is up)
         if (!s.lookShown) afBrackets(g, s, ix, iw);
         if (!s.evEdit && (s.afState == 2 || s.afState == 3)) g.circle(ix + 26, 442, 4.5f, s.afState == 2 ? GREEN : AMBER);   // focus: Fuji's dot
         print(g, s, x1, 448, accent);
@@ -363,7 +356,7 @@ final class Ui {
     static String windowKey(UiState s) {
         UiState.Film f = look(s);
         StringBuilder k = new StringBuilder(64);
-        k.append(s.mode).append(s.live).append('|').append(s.width).append('|').append(s.clean).append('|')
+        k.append(s.mode).append('|').append(s.width).append('|').append(s.clean).append('|')
                 .append(s.afMode).append('|').append(s.afArea).append('|').append(s.shotsLeft).append('|').append(s.afLamp)
                 .append(s.afState).append('|').append(s.evEdit).append(s.ev).append('|').append(f == null ? INK : f.accent).append('|')
                 .append(s.developing > 0).append('|').append(s.fatal);
@@ -564,25 +557,6 @@ final class Ui {
         }
     }
 
-    /**
-     * The level, read from the picture: a line along the scene's horizon, broken where the focus
-     * brackets sit, between two fixed marks that are the frame's own level. Turn the camera until the
-     * line meets the marks; then it turns green, as a camera's own level does.
-     */
-    private static void level(Gfx g, UiState s, float cx, float cy) {
-        float a = Math.max(-12, Math.min(12, s.levelAngle)) * (float) Math.PI / 180, c = (float) Math.cos(a), sn = (float) Math.sin(a);
-        int col = s.levelOk ? GREEN : 0xE6FFFFEE;
-        float stroke = s.levelOk ? 2.2f : 1.6f, in = 96, out = 214;
-        for (int side = -1; side <= 1; side += 2) {
-            float x1 = cx + side * in * c, y1 = cy - side * in * sn, x2 = cx + side * out * c, y2 = cy - side * out * sn;
-            g.line(x1 + 0.8f, y1 + 0.8f, x2 + 0.8f, y2 + 0.8f, stroke + 1.6f, 0x55000000);
-            g.line(x1, y1, x2, y2, stroke, col);
-            float m0 = cx + side * 226, m1 = cx + side * 246;   // the frame's level: fixed marks beyond the line's ends
-            g.line(m0 + 0.8f, cy + 0.8f, m1 + 0.8f, cy + 0.8f, 3.6f, 0x55000000);
-            g.line(m0, cy, m1, cy, 2f, s.levelOk ? GREEN : 0xB3FFFFEE);
-        }
-    }
-
     /** Four corner marks around a rectangle, over a soft shadow so they read on any picture. */
     private static void corners(Gfx g, float x, float y, float w, float h, float len, float stroke, int c) {
         if ((c >>> 24) > 0x60) corners1(g, x + 0.8f, y + 0.8f, w, h, len, stroke + 1.6f, 0x55000000);
@@ -651,73 +625,42 @@ final class Ui {
 
     // ------------------------------------------------------------------------------ settings
 
-    /** What the menu's rows depend on: MainActivity fills it from the roll and its prefs, the Mac preview by hand. */
+    /** What the menu's rows depend on: MainActivity fills it from the roll and the card, the Mac preview by hand. */
     static final class Menu {
         boolean roll;                    // a roll is loaded
         boolean developNow;              // a film roll part-way through: it can be ended and developed now
         boolean changeFilm;              // its film can change (it isn't developing)
         boolean endless;
         int exposed;
-        boolean rolls;                   // the card has a roll to look at
-        boolean viewfinder, focusFirst, liveLook, threeCores, threeCoresOk, neutral;
-        boolean looks;                   // the card has film looks
-        boolean cameraBusy;              // the viewfinder holds the camera this visit (until Latent is left)
-        boolean developing;              // a photo is developing (the darkroom and the camera never overlap)
+        boolean photos;                  // the card has developed photos to look at
         String version = "";
     }
 
-    static final int PAGE_MENU = 0, PAGE_CHECKS = 1;
-
     /**
-     * The menu's rows, the same on the camera and in the previews: {label, value, action, why not}. Value "on"
-     * or "off" draws a switch, "›" opens something, "" is a heading. "Why not" is empty when the row can act now;
-     * otherwise the row is grey and the footer says why (Hasselblad). The camera tests are on their own page.
+     * The menu's rows, the same on the camera and in the previews: {label, value, action, why not}. Value "›"
+     * opens something, "" is a heading. "Why not" is empty when the row can act now; otherwise the row is grey
+     * and the footer says why (Hasselblad). The roll's two actions when they apply, then the photos: nothing to
+     * set (v0.45.0: what the settings and the camera checks settled is how Latent works now).
      */
-    static List<String[]> menuRows(int page, Menu m) {
+    static List<String[]> menuRows(Menu m) {
         List<String[]> rows = new ArrayList<String[]>();
-        if (page == PAGE_CHECKS) {
-            String camera = m.cameraBusy ? "The camera is in use. Leave Latent and open it again to run this check."
-                    : m.developing ? "A photo is developing. Try again when it's done." : "";
-            rows.add(new String[] { "Read only", "", "", "" });
-            rows.add(new String[] { "Settings check", "\u203a", "settingsCheck", "" });
-            rows.add(new String[] { "Speed test", "\u203a", "speedTest", m.looks ? "" : "No film looks on the card (LATENT/LUTS)." });
-            rows.add(new String[] { "Screen test", "\u203a", "screenTest", "" });
-            rows.add(new String[] { "With the camera", "", "", "" });
-            // the Develop test answered its questions by v0.44.0 and saves two test photos a run: off the menu
-            rows.add(new String[] { "Shooting test", "\u203a", "shootTest", camera });
-            rows.add(new String[] { "Restart test", "\u203a", "restartTest", camera });
-            rows.add(new String[] { "Live look test", "\u203a", "lookTest", camera });
-            return rows;
-        }
         rows.add(new String[] { m.roll ? "This roll" : "Latent", "", "", "" });
         if (m.roll && m.developNow) rows.add(new String[] { "Develop now", "\u203a", "develop", "" });
         if (m.roll && m.changeFilm) rows.add(new String[] { "Change film", "\u203a", "change", "" });
-        rows.add(new String[] { "Rolls", "\u203a", "rolls", m.rolls ? "" : "No rolls yet. Developed rolls appear here." });
-        rows.add(new String[] { "Shooting", "", "", "" });
-        rows.add(new String[] { "Latent's viewfinder", m.viewfinder ? "on" : "off", "viewfinder", "" });
-        rows.add(new String[] { "Focus first", m.focusFirst ? "on" : "off", "focusFirst", "" });
-        rows.add(new String[] { "Film look on live view", m.liveLook ? "on" : "off", "liveLook", "" });
-        rows.add(new String[] { "Developing", "", "", "" });
-        rows.add(new String[] { "Use three cores", m.threeCores ? "on" : "off", "cores", m.threeCoresOk ? "" : "Run the Speed test first (Camera checks): it checks the other cores." });
-        rows.add(new String[] { "Shoot neutral while a roll is loaded", m.neutral ? "on" : "off", "neutral", "" });
-        rows.add(new String[] { "Looks", "", "", "" });
-        rows.add(new String[] { "Try looks on a photo", "\u203a", "lab", "" });
-        rows.add(new String[] { "Camera", "", "", "" });
-        rows.add(new String[] { "Camera checks", "\u203a", "checks", "" });
+        rows.add(new String[] { "Photos", "\u203a", "photos", m.photos ? "" : "No photos yet. Developed photos appear here." });
         return rows;
     }
 
     /**
-     * The menu into s, as MainActivity and the previews both show it: this page's rows ({label, value, why not}),
-     * the chosen one (sel, an index of menuRows), and its footer.
+     * The menu into s, as MainActivity and the previews both show it: its rows ({label, value, why not}), the
+     * chosen one (sel, an index of menuRows), and its footer.
      */
-    static void menuState(UiState s, int page, Menu m, int sel) {
-        List<String[]> rows = menuRows(page, m);
+    static void menuState(UiState s, Menu m, int sel) {
+        List<String[]> rows = menuRows(m);
         sel = Math.max(0, Math.min(sel, rows.size() - 1));
         s.rows = new ArrayList<String[]>(rows.size());
         for (String[] r : rows) s.rows.add(new String[] { r[0], r[1], r[3] });
         s.rowSel = sel;
-        s.menuPage = page;
         s.footer = menuFooter(rows.get(sel), m);
     }
 
@@ -734,27 +677,16 @@ final class Ui {
         return f;
     }
 
-    /** What the chosen row does, in a line or two at the foot of the menu (or why it can't now). */
+    /**
+     * What the chosen row does, in a line or two at the foot of the menu (or why it can't now). Photos, the last
+     * row, ends with Latent's version: the menu's last row has always shown it.
+     */
     static String menuFooter(String[] row, Menu m) {
-        if (row.length > 3 && row[3].length() > 0) return row[3];
-        String a = row.length > 2 ? row[2] : "";
-        if (a.equals("cores")) return "Develops on cores 1 and 2 as well. Core 0 is left to the camera.";
-        if (a.equals("neutral")) return "Every look starts from the same picture. Your settings come back after.";
-        if (a.equals("viewfinder")) return m.viewfinder ? "Shoot stays in Latent. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
-        if (a.equals("liveLook")) return m.liveLook ? "Live view shows the film, with the level. Turn it off for the camera's own view."
-                : "The camera's own live view. Run the Live look test (Camera checks) to turn the film on.";
-        if (a.equals("focusFirst")) return m.focusFirst ? "A full press waits for focus to lock, as AF-S does." : "A full press takes the picture at once, in focus or not.";
-        if (a.equals("settingsCheck")) return "Reads your white balance and Creative Style. Changes nothing.";
-        if (a.equals("speedTest")) return "Times the film look on this camera's cores. Nothing on the card changes.";
-        if (a.equals("screenTest")) return "Times pictures onto the screen, as the viewfinder shows them. No camera.";
-        if (a.equals("shootTest")) return "Latent focuses and takes one photo itself. Changes no setting.";
-        if (a.equals("lookTest")) return "The film look on live frames while two photos are taken. If both are stored, the look comes on.";
-        if (a.equals("restartTest")) return "Latent gives the camera back and starts again by itself. Takes no photo.";
-        if (a.equals("checks")) return "Each check says what it does before it runs. Latent " + m.version;
+        String a = row.length > 2 ? row[2] : "", why = row.length > 3 ? row[3] : "";
+        if (a.equals("photos")) return (why.length() > 0 ? why : "Every developed photo, newest first, roll by roll.") + " Latent " + m.version;
+        if (why.length() > 0) return why;
         if (a.equals("develop")) return "Ends the roll here and develops the " + m.exposed + " shot so far.";
         if (a.equals("change")) return m.endless ? "This roll's photos keep developing." : "Keeps the frames shot so far for developing.";
-        if (a.equals("rolls")) return "Contact sheets of the rolls on the card.";
-        if (a.equals("lab")) return "One photo by hand: the film, its tone and grain. Saves a copy.";
         return "Latent " + m.version;
     }
 
@@ -805,22 +737,14 @@ final class Ui {
             boolean on = i == s.rowSel, can = r.length < 3 || r[2].length() == 0;
             if (on) {
                 g.roundRect(L - 16, ry, R - L + 32, ROW - 4, 10, SELECT);
-                g.rect(vx(s, L - 16), ry + 9, vw(s, 4), ROW - 22, can ? accent : INK3);   // the chosen row's bar (the Lab's too)
+                g.rect(vx(s, L - 16), ry + 9, vw(s, 4), ROW - 22, can ? accent : INK3);   // the chosen row's bar
             }
             g.text(r[0], L, ry + 27, Gfx.REGULAR, T_BODY, on ? (can ? INK : INK2) : can ? INK2 : INK3, Gfx.LEFT, 0);
-            if (r[1].equals("on") || r[1].equals("off")) {   // a switch
-                boolean v = r[1].equals("on");
-                g.roundRect(R - 44, ry + 8, 44, 24, 12, !can ? DIM : v ? GREEN : DIM);
-                g.circle(v ? R - 12 : R - 32, ry + 20, 9.5f, can ? INK : INK2);
-            } else if (r[1].equals("\u203a")) {
-                g.line(R - 8, ry + 14, R - 2, ry + 20, 2, on ? INK2 : INK3);
-                g.line(R - 2, ry + 20, R - 8, ry + 26, 2, on ? INK2 : INK3);
-            } else {
-                g.text(r[1], R, ry + 27, Gfx.REGULAR, T_BODY, INK2, Gfx.RIGHT, 0);
-            }
+            g.line(R - 8, ry + 14, R - 2, ry + 20, 2, on ? INK2 : INK3);   // it opens something
+            g.line(R - 2, ry + 20, R - 8, ry + 26, 2, on ? INK2 : INK3);
         }
         if (scroll > 0) g.rect(L - 16, top - 1, R - L + 32, 1, LINE);
-        g.text(s.menuPage == PAGE_CHECKS ? "Camera checks" : "Menu", L, TOP, Gfx.MEDIUM, T_BODY, INK, Gfx.LEFT, 0);
+        g.text("Menu", L, TOP, Gfx.MEDIUM, T_BODY, INK, Gfx.LEFT, 0);
         battery(g, s.battery, R, INK2, INK3);
         float rx = hintBar(g, s, INK2, null, new String[] { "menu", "Back" });
         if (s.footer.length() > 0) footer(g, s.footer, L, rx - 32 - L, INK2);
@@ -1118,169 +1042,12 @@ final class Ui {
         }
     }
 
-    // ------------------------------------------------------------------------------ lab
-
-    private static void lab(Gfx g, UiState s) {
-        float R = right(s);
-        g.text("Lab", L, TOP, Gfx.MEDIUM, T_BODY, INK, Gfx.LEFT, 0);
-        g.text(s.labCaption, R, TOP, Gfx.MEDIUM, T_SECOND, INK2, Gfx.RIGHT, 0);
-        float px = L, py = 76, pw = 420, ph = 280;
-        if (s.labImage != null) {
-            float iw = g.imageWidth(s.labImage), ih = g.imageHeight(s.labImage);
-            float sc = Math.min(pw / iw, ph / ih), dw = iw * sc, dh = ih * sc;
-            g.image(s.labImage, px + (pw - dw) / 2, py + (ph - dh) / 2, dw, dh, false);
-        }
-        float x = LAB_X;
-        for (int i = 0; i < s.labRows.length; i++) {
-            float y = LAB_Y + i * LAB_ROW;
-            boolean on = i == s.labRow, action = s.labValues[i].length() == 0;
-            if (on) {   // the menu's selection: a plate and a bar
-                g.roundRect(x - 16, y - 25, R - x + 32, 36, 10, SELECT);
-                g.rect(vx(s, x - 16), y - 17, vw(s, 4), 20, INK);
-            }
-            g.text(s.labRows[i], x, y, action ? Gfx.MEDIUM : Gfx.REGULAR, T_BODY, on || action ? INK : INK2, Gfx.LEFT, 0);
-            if (action) glyph(g, "centre", R - 18, y - 7, on ? INK : INK2);
-            else g.text(s.labValues[i], R, y, Gfx.MEDIUM, T_BODY, on ? INK : INK2, Gfx.RIGHT, 0);
-        }
-        if (s.labProgress >= 0) {
-            g.roundRect(L, 378, R - L, 4, 2, LINE);
-            g.roundRect(L, 378, (R - L) * s.labProgress / 100f, 4, 2, INK);
-        }
-        hintBar(g, s, INK2, new String[] { "updown", "Setting", "wheel", "Change" }, new String[] { "centre", "Save", "menu", "Back" });
-    }
-
-    // ------------------------------------------------------------------------------ camera roll test
-
-    static final String[] PROBE_PLAN = {
-            "Looks up the Sony functions a camera roll needs. Calls none of them.",
-            "Reads Sony's library file to see the native functions are there. Never runs them.",
-            "Reads the camera's photo catalogue without changing it.",
-            "Decodes your newest photo in hardware, as playback does, and times it.",
-            "Copies that photo to a test file, asks the camera to re-scan, checks it appears, then removes the copy with Sony's own delete.",
-    };
-    static final String PROBE_FOOTER = "Your photos are never changed. About a minute; results go to LATENT/PROBE.TXT.";
-
-    static final String[] HARDWARE_PLAN = {
-            "Decodes your newest photo in hardware. The original file is only ever read.",
-            "Checks Sony's private memory functions against its public ones on scratch buffers, at each transfer size it will use. Any mismatch stops the test.",
-            "Makes a separate output image with Sony's scaler, and refuses to continue if it shares memory with the original.",
-            "Develops your photo into it with the loaded film stock (Cuban Neg if none), moving pixels in large verified blocks.",
-            "Sony's encoder saves it as a new photo in the camera roll. Look at it in playback; delete it with the trash button if you like.",
-    };
-    static final String HARDWARE_FOOTER = "If the camera stops responding, turn it off or remove the battery. Log: LATENT/HWTEST.TXT.";
-
-    static final String[] LIVE_PLAN = {
-            "Opens the camera and shows its live view for a few seconds, as Recipe Lab does.",
-            "Asks the camera to hand Latent the live frames too: how many arrive, how big, and whether they hold a picture. That decides if film looks can be shown live.",
-            "Changes no setting and takes no picture. Then closes the camera again. Point it around while it runs.",
-    };
-    static final String[] SHOOT_PLAN = {
-            "Reads the focus options the camera offers (modes, areas, faces) and listens to its motion sensors for two seconds, to see if a level is possible. Only reads.",
-            "Opens the camera with live view, then focuses by itself. If it can't lock, as in a dark room, it tries again, up to four times, and notes how long the AF lamp is on.",
-            "Takes one photo with the film look applied as it is captured, using the camera's own memory map, as Sony's effect apps do. Kept off your rolls. If the camera hangs, pull the battery.",
-            "Changes no camera setting. Point the camera at something and hold still.",
-    };
-    static final String[] LOOK_PLAN = {
-            "Opens the camera and runs the film look on its live frames exactly as the viewfinder does, pausing while each photo is written.",
-            "Takes two photos, waits until the camera has saved them, gives it back, and restarts Latent. Kept off your rolls.",
-            "Then counts the new photos on the card itself. If both are there, Film look on live view comes on.",
-    };
-    static final String LOOK_FOOTER = "About 45 seconds. Log: LATENT/LIVELOOK.TXT.";
-
-    static final String[] RESTART_PLAN = {
-            "Copies Sony's own camera apps (Smart Remote among them) to LATENT/APPS, to be read on a computer. Only reads.",
-            "Opens the camera with live view for a moment, the way the viewfinder does, and gives it back. Takes no picture.",
-            "Then Latent ends and starts again by itself, a black screen in between, and checks when it can develop again (up to a minute and a half). Watch whether the camera's own screen shows up.",
-    };
-    static final String RESTART_FOOTER = "Up to two minutes. Log: LATENT/RESTART.TXT, the apps in LATENT/APPS.";
-    static final String SHOOT_FOOTER = "About twenty seconds. Hold it level at first. MENU stops it. Log: LATENT/SHOOTING.TXT";
-    static final String LIVE_FOOTER = "About ten seconds. MENU stops it. Results go to LATENT/LIVEVIEW.TXT.";
-
-    private static void liveOverlay(Gfx g, UiState s) {
-        String t = s.liveNote == null || s.liveNote.length() == 0 ? "Live view" : s.liveNote;
-        float w = g.textWidth(t, Gfx.MEDIUM, T_SECOND, 0) + 36;
-        g.roundRect(s.width / 2 - w / 2, 22, w, 36, 18, CARD);
-        g.text(t, s.width / 2, 46, Gfx.MEDIUM, T_SECOND, INK, Gfx.CENTER, 0);
-    }
-
-    static final String[] SCREEN_PLAN = {
-            "Puts a test picture the size of the viewfinder's on the screen 40 times, as fast as it goes, with the screen in its 16-bit mode as while shooting. No camera.",
-            "Five ways: today's (Latent's screen), asking for a 16-bit window, a 16-bit surface of its own, that surface drawn from a thread, and a quarter-size surface the screen stretches.",
-            "Notes the fastest; the viewfinder uses it from a later version. The screen flickers with the test picture while it runs.",
-    };
-    static final String SCREEN_FOOTER = "About fifteen seconds. MENU stops it. Results go to LATENT/SCREEN.TXT.";
-
-    static final String[] SPEED_PLAN = {
-            "Reads how many cores the camera has, which ones Latent may use, and how busy each is while idle. Read only.",
-            "Times the film look on your newest photo, decoded at half size into memory, four ways, each checked against a full-precision reference.",
-            "Lets one helper thread of Latent's ask to run on the other cores and times the look split across two. If that is faster and the picture identical, developing also uses cores 1 and 2 (switch: More > 3 cores).",
-    };
-    static final String SPEED_FOOTER = "About a minute. Nothing on the card changes; results go to LATENT/SPEED.TXT.";
-
-    static final String[] DEVTEST_PLAN = {
-            "Develops your newest photo as the darkroom does, then checks the camera has room to decode the next one beside it.",
-            "Saves it once on its own, then again while the next photo is decoded at the same time, and times both. Stops at the first thing the camera refuses.",
-            "Adds two photos to the camera roll, kept off your rolls; delete them in playback if you like. Changes nothing in the darkroom.",
-    };
-    static final String DEVTEST_FOOTER = "About a minute. If the camera stops responding, remove the battery. Log: LATENT/DEVTEST.TXT.";
-
-    static final String[] SETTINGS_PLAN = {
-            "Reads your white balance, its fine-tune grid, and your Creative Style, the settings the camera keeps between uses.",
-            "Shows them as the camera's menus do, so you can check them against MENU > White Balance and MENU > Creative Style.",
-            "Checks whether Latent would be allowed to change them later. Nothing is changed now: this check can only read.",
-    };
-    static final String SETTINGS_FOOTER = "Takes a few seconds. Every raw value goes to LATENT/SETTINGS.TXT.";
-
-    private static void probe(Gfx g, UiState s) {
-        float R = right(s);
-        g.text(s.probeTitle, L, TOP, Gfx.MEDIUM, T_BODY, INK, Gfx.LEFT, 0);
-        if (s.probeStage == 0) {
-            g.text("What this does", L - 2, 104, Gfx.DISPLAY, 40, INK, Gfx.LEFT, -10);
-            float y = 144;
-            for (int i = 0; i < s.probePlan.length; i++) {
-                g.text((i + 1) + "", L, y, Gfx.MONO, 15, INK2, Gfx.LEFT, 0);
-                y = wrap(g, s.probePlan[i], L + 24, y, R - L - 24, Gfx.REGULAR, 18, INK2, 23, 4) + 27;
-            }
-            float rx = hintBar(g, s, INK2, null, new String[] { "centre", "Run test", "menu", "Back" });
-            footer(g, s.probeFooter, L, rx - 32 - L, INK2);
-            return;
-        }
-        String[] names = s.probeSteps;
-        float nameW = 0;   // the details start after the widest step name
-        for (int i = 0; i < names.length && i < s.probeStatus.length; i++) nameW = Math.max(nameW, g.textWidth(names[i], Gfx.MEDIUM, 18, 0));
-        float dx = L + 30 + Math.min(nameW, 300) + 24, maxw = R - dx;
-        for (int i = 0; i < names.length && i < s.probeStatus.length; i++) {
-            float step = Math.min(46, (HINT_Y - 46 - 100) / Math.max(1, names.length - 1f)), y = 100 + i * step;   // many steps: closer together
-            int st = s.probeStatus[i];
-            int c = st == Probe.OK ? GREEN : st == Probe.FAIL ? RED : st == Probe.RUN ? INK : INK3;
-            if (st == Probe.OK) { g.line(L, y - 7, L + 6, y - 1, 2, c); g.line(L + 6, y - 1, L + 16, y - 13, 2, c); }
-            else if (st == Probe.FAIL) { g.line(L + 2, y - 13, L + 14, y - 1, 2, c); g.line(L + 14, y - 13, L + 2, y - 1, 2, c); }
-            else if (st == Probe.RUN) g.circle(L + 8, y - 7, 5, c);
-            else g.strokeCircle(L + 8, y - 7, 5, 1.5f, c);
-            g.text(names[i], L + 30, y, Gfx.MEDIUM, 18, st < 0 ? INK3 : INK, Gfx.LEFT, 0);
-            String d = s.probeDetail[i] == null ? "" : s.probeDetail[i];
-            if (g.textWidth(d, Gfx.REGULAR, 16, 0) > maxw) {   // too long: cut, with room for the ellipsis
-                float ew = g.textWidth("\u2026", Gfx.REGULAR, 16, 0);
-                while (d.length() > 4 && g.textWidth(d, Gfx.REGULAR, 16, 0) > maxw - ew) d = d.substring(0, d.length() - 1);
-                d = d.trim() + "\u2026";
-            }
-            g.text(d, dx, y, Gfx.REGULAR, 16, INK2, Gfx.LEFT, 0);
-        }
-        if (s.probeStage == 1) g.text("Running. Leave the camera on.", L, HINT_Y, Gfx.REGULAR, T_SECOND, INK2, Gfx.LEFT, 0);
-        else {
-            g.text("Finished. Full details are in the log on the card.", L, HINT_Y, Gfx.REGULAR, T_SECOND, INK2, Gfx.LEFT, 0);
-            hintBar(g, s, INK2, null, new String[] { "menu", "Back" });
-        }
-    }
-
     // ------------------------------------------------------------------------------ what a key changes
 
-    // the layout the partial redraws share with the drawing: Choose film's length control, the contact sheet's
-    // grid, the Lab's rows
+    // the layout the partial redraws share with the drawing: Choose film's length control, the contact sheet's grid
     static final float LEN_SEG = 54, LEN_Y = 352, LEN_H = 40;
     static final int SHEET_COLS = 5, SHEET_PER = 15;
     static final float SHEET_TOP = 70, SHEET_GAP = 16;
-    static final float LAB_X = L + 420 + 48, LAB_Y = 100, LAB_ROW = 38;
 
     /** A contact sheet thumbnail's width. */
     private static float sheetCell(UiState s) { return (right(s) - L - (SHEET_COLS - 1) * SHEET_GAP) / SHEET_COLS; }
@@ -1288,23 +1055,22 @@ final class Ui {
     /**
      * After a key: the part of the screen that 'b' draws differently from 'a' (the state last drawn), as {x, y, w, h}
      * in the layout, or null for all of it. Only for the small changes keys make: Choose film's length, the menu's
-     * chosen row or a switch, the contact sheet's frame within a page, the Lab's rows. Anything else differing (a
+     * chosen row, the contact sheet's frame within a page. Anything else differing (a
      * toast, the battery, the film, a picture arriving) means the whole screen. RenderScreens checks that every
      * pixel that changes lies inside.
      */
     /** The screens whose keys may redraw only part of the screen (dirty). */
     static boolean keyPartial(int mode) {
-        return mode == UiState.LOAD || mode == UiState.SETTINGS || mode == UiState.SHEET || mode == UiState.LAB;
+        return mode == UiState.LOAD || mode == UiState.SETTINGS || mode == UiState.SHEET;
     }
 
     static float[] dirty(UiState a, UiState b) {
         if (a == null || b == null || a.mode != b.mode || a.width != b.width || a.battery != b.battery || !String.valueOf(a.toast).equals(String.valueOf(b.toast))
-                || a.fatal != null || b.fatal != null || a.live || b.live) return null;
+                || a.fatal != null || b.fatal != null) return null;
         switch (b.mode) {
             case UiState.LOAD: return loadDirty(a, b);
             case UiState.SETTINGS: return menuDirty(a, b);
             case UiState.SHEET: return sheetDirty(a, b);
-            case UiState.LAB: return labDirty(a, b);
             default: return null;
         }
     }
@@ -1334,9 +1100,9 @@ final class Ui {
         return new float[] { x1 + 4 - w, LEN_Y - 34, w, LEN_H + 38 };
     }
 
-    /** The menu, a step or a switch: from the higher of the two chosen rows down, footer and all (the title stays). */
+    /** The menu, a step: from the higher of the two chosen rows down, footer and all (the title stays). */
     private static float[] menuDirty(UiState a, UiState b) {
-        if (a.menuPage != b.menuPage || a.rows.size() != b.rows.size() || (a.film == null ? INK : a.film.accent) != (b.film == null ? INK : b.film.accent)) return null;
+        if (a.rows.size() != b.rows.size() || (a.film == null ? INK : a.film.accent) != (b.film == null ? INK : b.film.accent)) return null;
         if (a.rowSel < 0 || b.rowSel < 0 || a.rowSel >= a.rows.size() || b.rowSel >= b.rows.size()) return null;
         for (int i = 0; i < b.rows.size(); i++) {
             if (i == a.rowSel || i == b.rowSel) continue;
@@ -1364,19 +1130,6 @@ final class Ui {
         float tw = sheetCell(s), th = tw * 2 / 3;
         float x = L + (k % SHEET_COLS) * (tw + SHEET_GAP), y = SHEET_TOP + (k / SHEET_COLS) * (th + 24);
         return new float[] { x - 7, y - 7, tw + 14, th + 7 + 26 };
-    }
-
-    /** The Lab, a row or a value: the rows that changed (the preview comes again by itself when it's made). */
-    private static float[] labDirty(UiState a, UiState b) {
-        if (a.labImage != b.labImage || !a.labCaption.equals(b.labCaption) || a.labProgress != b.labProgress
-                || !java.util.Arrays.equals(a.labRows, b.labRows) || a.labValues.length != b.labValues.length) return null;
-        float[] r = null;
-        for (int i = 0; i < b.labRows.length; i++) {
-            if (i != a.labRow && i != b.labRow && a.labValues[i].equals(b.labValues[i])) continue;
-            float[] row = { LAB_X - 20, LAB_Y + i * LAB_ROW - 28, right(b) - LAB_X + 40, 42 };
-            r = r == null ? row : union(r, row);
-        }
-        return r;
     }
 
     // ------------------------------------------------------------------------------ controls
