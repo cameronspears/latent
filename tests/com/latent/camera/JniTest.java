@@ -125,9 +125,18 @@ public class JniTest {
         short[] a = new short[ow * oh], b = new short[ow * oh];
         FilmCore.setOverlay(null, 0, 0);
         int rc = FilmCore.frame(c, jpeg, jpeg.length, lut, p, FilmCore.F_LEVEL | FilmCore.F_HIST, 1, a, null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info, tm);
-        int sum = 0;
-        for (int i = 0; i < 64; i++) sum += info[5 + i];
-        check(rc == 0 && info[0] == 320 && info[1] > 200 && sum == info[0] * info[1], "composed: " + info[0] + "x" + info[1] + " frame, histogram whole " + FilmCore.lastError());
+        int sum = 0, mean = 0;
+        for (int i = 0; i < 64; i++) { sum += info[5 + i]; mean += i * info[5 + i]; }
+        check(rc == 0 && info[0] == 320 && info[1] > 200 && sum == ((info[0] + 1) / 2) * ((info[1] + 1) / 2),
+                "composed: " + info[0] + "x" + info[1] + " frame, histogram of every other pixel of every other row " + FilmCore.lastError());
+        {   // the histogram is of the picture with the look: a film's highlight setting moves it
+            int[] hp = p.clone(), info3 = new int[FilmCore.FI_COUNT];
+            hp[FilmCore.HIGHLIGHT] = 4; hp[FilmCore.SHADOW] = -4;
+            FilmCore.frame(c, jpeg, jpeg.length, lut, hp, FilmCore.F_HIST, 1, new short[ow * oh], null, ow, oh, 1500, FilmCore.FMT_4444, sh, 320, 240, info3, tm);
+            int brighter = 0;
+            for (int i = 0; i < 64; i++) brighter += i * info3[5 + i];
+            check(brighter > mean, "the histogram shows the look: brighter highlights, brighter histogram (" + mean / sum + " -> " + brighter / sum + ")");
+        }
         check(info[2] != FilmCore.NO_READING && info[FilmCore.FI_OVERLAY] == 0, "level read, no overlay laid in");
         boolean opaque = true;
         for (short v : a) if ((v & 15) != 15) { opaque = false; break; }

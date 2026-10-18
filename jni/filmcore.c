@@ -2271,6 +2271,20 @@ static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, in
     return 0;
 }
 
+/* The brightness histogram (64 bins) of the picture as it will develop, with the look (the camera's own picture
+ * before it can be far from it: a film's lifted blacks or crushed highlights), from every other pixel of every
+ * other row: BT.601 luma of the looked values (the dither's units, 0..240). */
+static void look_histogram(const fl_frame_ctx *c, int *hist) {
+    int x, y;
+    for (y = 0; y < c->ph; y += 2) {
+        const unsigned int *p = c->px + (size_t)y * c->pw;
+        for (x = 0; x < c->pw; x += 2) {
+            unsigned int v = p[x], l = ((v >> 16) * 77 + (v >> 8 & 255) * 150 + (v & 255) * 29) >> 8;
+            hist[(l * 272) >> 10]++;   /* 0..240 into 64 bins */
+        }
+    }
+}
+
 /* ---- the still scene: a frame's signature, and the one F_STILL compares with */
 
 /* The decoded frame's mean brightness in FL_FI_SIG_W x FL_FI_SIG_H cells (row by row, 0..255), from every other
@@ -2361,7 +2375,7 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
              const int *shifts, int max_w, int max_h, int *info, int *tm, char *err, int errlen) {
     long t0 = now_ms(), t;
     fl_overlay *o;
-    int rc, i, ox = 0, oy = 0;
+    int rc, ox = 0, oy = 0;
     memset(info, 0, sizeof(int) * FL_FRAME_INFO);
     if (tm) memset(tm, 0, sizeof(int) * FL_FRAME_TIMES);
     if (!c) { set_err(err, errlen, "no frame context"); return -1; }
@@ -2389,11 +2403,6 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
         }
         if (flags & FL_F_LEVEL) fl_level(c->rgb, c->sw, c->sh, info + 2);
         else info[2] = info[3] = info[4] = FL_NO_READING;
-        if (flags & FL_F_HIST) {
-            const unsigned char *p = c->rgb;
-            if (c->ycc) for (i = 0; i < c->sw * c->sh; i++, p += 3) info[5 + (p[0] >> 2)]++;
-            else for (i = 0; i < c->sw * c->sh; i++, p += 3) info[5 + ((p[0] * 77 + p[1] * 150 + p[2] * 29) >> 10)]++;
-        }
         t = now_ms(); if (tm) tm[FL_TM_READ] = (int)(t - t0); t0 = t;
         if (c->cap_px < c->sw * c->sh) {
             free(c->px);
@@ -2404,6 +2413,7 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
         }
         look_frame(c->ycc ? &c->film.Y : &c->film.F, c->rgb, c->sw * c->sh, c->px);
         c->pw = c->sw; c->ph = c->sh;
+        if (flags & FL_F_HIST) look_histogram(c, info + 5);
         t = now_ms(); if (tm) tm[FL_TM_LOOK] = (int)(t - t0); t0 = t;
     } else {
         if (!c->px) { set_err(err, errlen, "no frame yet"); return -1; }
