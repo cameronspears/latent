@@ -146,13 +146,18 @@ int fl_develop_blocks(const char *lut_path, const int *params, int w, int h, fl_
                       fl_progress_fn progress, void *pctx, char *err, int errlen);
 /* .cube rows read by Latent's own exact decimal reader (1, the default) or sscanf (0). */
 void fl_set_fast_cube(int on);
-/* The cached LUT forgotten: the next look reads its file again. */
+/* Every cached film forgotten (and the block develop's table made from one, and the decoded previews): the next
+ * look reads its file again. A look still using a film keeps it until it is done. */
 void fl_forget_lut(void);
+/* A film file read into the shared film cache (8 films, the least recently used dropped) unless it is there
+ * already, so the next look on it, on any thread, needs no card read. 0, or -1 (err). Any thread. */
+int fl_cache_lut(const char *lut_path, char *err, int errlen);
 /* Reads path both ways: ms[0] ms with sscanf, ms[1] ms with the fast reader, ms[2] rows the fast reader took,
  * ms[3] rows it left to sscanf. 0 = identical tables and identical floats in every row it took, 1 = not, -1 = error. */
 int fl_cube_check(const char *path, int *ms, char *err, int errlen);
 /* The next develop's film made ready on a thread of its own (file read, grain tile, Y'CbCr table), while
- * the caller waits on something else (Sony's encoder). Returns at once; the next look waits for it. */
+ * the caller waits on something else (Sony's encoder). Returns at once (once an earlier one is done); the
+ * next block develop waits for it. */
 void fl_prewarm(const char *lut_path, const int *params);
 /* Block develops (per-pair loops) remember recent lookups in 2^bits entries per thread (bits 8..16), or don't
  * (0, the default). The picture is the same either way. */
