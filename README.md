@@ -126,7 +126,7 @@ Nothing in Photos develops or ends a roll, and it doesn't open from the viewfind
 **MENU** holds:
 - **This roll:** Develop now (on a roll of 12, 24 or 36 part-way through: it ends the roll there
   and develops what's shot), Change film.
-- **Photos.**
+- **All rolls:** Photos.
 
 The line at the foot says what the chosen row does, or why it can't right now. On Photos it ends
 with Latent's version.

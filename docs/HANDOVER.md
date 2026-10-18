@@ -120,8 +120,9 @@ line it misses.
   focus locks), the film look on live view (centre turns it off per visit), shooting neutral while a
   roll is loaded, three cores for the darkroom (`MainActivity.DEVELOP_THREADS`; helpers on cores 1
   and 2), the per-pair develop with its 1K lookup memory, the fast .cube reader, 2 MB transfers, the
-  picture on its own 16-bit surface. The menu is This roll (Develop now when it applies, Change film)
-  and Photos. The APK is ~2.48 MB, down from 2.59.
+  picture on its own 16-bit surface. The menu is This roll (Develop now when it applies, Change film;
+  shown only when the roll has one of them) and All rolls (Photos). A half-press still waiting for
+  the 6 s settle is dropped when the menu or Photos opens. The APK is ~2.48 MB, down from 2.59.
 - **Photos.** One screen for every developed frame (see README). Opened from the menu, DOWN on the
   camera back, the Playback button (if the camera passes it on), and after a roll of 12, 24 or 36
   develops. Never from the viewfinder or the darkroom. Nothing in it develops or ends a roll.
