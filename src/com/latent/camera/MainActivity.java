@@ -262,7 +262,8 @@ public class MainActivity extends Activity {
         if (liveRun != null) liveRun.close();    // never keep the camera when Latent isn't on screen
         if (screenRun != null) screenRun.stop();
         if (restartRun != null) restartRun.close(false);
-        final Runnable keysLog = new Runnable() { public void run() { logKeys(); } };
+        final String census = unmappedLine();   // the buttons pressed this visit that Latent doesn't use
+        final Runnable keysLog = new Runnable() { public void run() { logKeys(); if (census != null) devLog(census); } };
         worker.execute(keysLog);
         Display.fullColour(false);
         if (developing != null) paused = true;   // finish the frame in hand, then stop; resumable later
@@ -528,51 +529,32 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------------------ settings
 
     private int settingsSel = 1;       // a row of settingsRows(); headings are passed over
+    private int settingsPage;          // Ui.PAGE_MENU, or Ui.PAGE_CHECKS (the camera tests, one row on the first page)
     private boolean fromSettings;      // the test or Lab on screen was opened from Settings: MENU goes back there
 
-    /** Each row: {label, value, action}. Value "on"/"off" is a switch, "›" opens something, "" is a heading. */
-    private List<String[]> settingsRows() {
-        List<String[]> rows = new ArrayList<String[]>();
-        rows.add(new String[] { current != null ? "This roll" : "Latent", "", "" });
-        if (current != null && Roll.LOADED.equals(current.state) && !current.endless() && exposed > 0 && exposed < current.length)
-            rows.add(new String[] { "Develop now", "›", "develop" });
-        if (current != null && !Roll.DEVELOPING.equals(current.state)) rows.add(new String[] { "Change film", "›", "change" });
-        rows.add(new String[] { "Rolls", "›", "rolls" });
-        rows.add(new String[] { "Shooting", "", "" });
-        rows.add(new String[] { "Latent's viewfinder", viewfinderOn() ? "on" : "off", "viewfinder" });
-        rows.add(new String[] { "Focus first", focusFirst() ? "on" : "off", "focusFirst" });
-        rows.add(new String[] { "Film look on live view", liveLook() ? "on" : "off", "liveLook" });
-        rows.add(new String[] { "Developing", "", "" });
-        rows.add(new String[] { "Use three cores", developCores() > 1 ? "on" : "off", "cores" });
-        rows.add(new String[] { "Shoot neutral while a roll is loaded", neutralOn() ? "on" : "off", "neutral" });
-        rows.add(new String[] { "Looks", "", "" });
-        rows.add(new String[] { "Try looks on a photo", "›", "lab" });
-        rows.add(new String[] { "Camera", "", "" });
-        rows.add(new String[] { "Settings check", "›", "settingsCheck" });
-        rows.add(new String[] { "Speed test", "›", "speedTest" });
-        // the Develop test (devTest) answered its questions by v0.44.0 and saves two test photos a run: off the menu
-        rows.add(new String[] { "Screen test", "›", "screenTest" });   // in place of the Live view test (v0.27: answered long ago)
-        rows.add(new String[] { "Shooting test", "›", "shootTest" });
-        rows.add(new String[] { "Restart test", "›", "restartTest" });
-        rows.add(new String[] { "Live look test", "›", "lookTest" });
-        return rows;
-    }
+    /** The menu's rows on this page: {label, value, action, why not} (Ui.menuRows, which the Mac previews show too). */
+    private List<String[]> settingsRows() { return Ui.menuRows(settingsPage, menuFacts()); }
 
-    /** What the chosen row does, in a line at the foot of Settings. */
-    private String settingsFooter(String action) {
-        if (action.equals("cores")) return prefs.getBoolean("multicoreOk", false) ? "Develops on cores 1 and 2 as well. Core 0 is left to the camera." : "Run the Speed test first: it checks the other cores.";
-        if (action.equals("neutral")) return "Every look starts from the same picture. Your settings come back after.";
-        if (action.equals("viewfinder")) return viewfinderOn() ? "Shoot stays in Latent. Photos develop the next time Latent opens." : "Shoot hands over to the camera's own shooting mode.";
-        if (action.equals("liveLook")) return liveLook() ? "Live view shows the film, with the level. Turn it off for the camera's own view."
-                : "The camera's own live view. Run the Live look test (Camera, below) to turn the film on.";
-        if (action.equals("focusFirst")) return focusFirst() ? "A full press waits for focus to lock, as AF-S does." : "A full press takes the picture at once, in focus or not.";
-        if (action.equals("shootTest")) return "Latent focuses and takes one photo itself. Changes no setting.";
-        if (action.equals("devTest")) return "Times the darkroom's develop on your newest photo. Saves nothing new.";
-        if (action.equals("lookTest")) return "The film look on live frames while two photos are taken. If both are stored, the look comes on.";
-        if (action.equals("restartTest")) return "Latent gives the camera back and starts again by itself. Takes no photo.";
-        if (action.equals("develop")) return "Ends the roll here and develops the " + exposed + " shot so far.";
-        if (action.equals("change")) return current != null && current.endless() ? "This roll's photos keep developing." : "Keeps the frames shot so far for developing.";
-        return "Latent " + versionName();
+    /** What the menu's rows depend on, now. */
+    private Ui.Menu menuFacts() {
+        Ui.Menu m = new Ui.Menu();
+        m.roll = current != null;
+        m.developNow = current != null && Roll.LOADED.equals(current.state) && !current.endless() && exposed > 0 && exposed < current.length;
+        m.changeFilm = current != null && !Roll.DEVELOPING.equals(current.state);
+        m.endless = current != null && current.endless();
+        m.exposed = exposed;
+        m.rolls = !rolls.isEmpty();   // (from the last card read: asking each roll for its prints would read the card every redraw)
+        m.viewfinder = viewfinderOn();
+        m.focusFirst = focusFirst();
+        m.liveLook = liveLook();
+        m.threeCores = developCores() > 1;
+        m.threeCoresOk = prefs.getBoolean("multicoreOk", false);
+        m.neutral = neutralOn();
+        m.looks = !stocks.isEmpty();
+        m.cameraBusy = vf != null;   // the viewfinder holds the camera until Latent is left
+        m.developing = developing != null;
+        m.version = versionName();   // asked of the system once, then kept
+        return m;
     }
 
     private boolean neutralOn() { return prefs.getBoolean("neutral", true); }
@@ -591,9 +573,25 @@ public class MainActivity extends Activity {
     private void openSettings() {
         mode = SETTINGS;
         fromSettings = false;
+        settingsPage = Ui.PAGE_MENU;
         List<String[]> rows = settingsRows();
         settingsSel = Math.max(1, Math.min(settingsSel, rows.size() - 1));
         if (rows.get(settingsSel)[1].length() == 0) settingsSel++;
+    }
+
+    /** A page of the menu, on its first row (or on 'action' when it's there). */
+    private void settingsPage(int page, String action) {
+        settingsPage = page;
+        List<String[]> rows = settingsRows();
+        settingsSel = 1;
+        for (int i = 0; i < rows.size(); i++) if (rows.get(i)[2].equals(action)) settingsSel = i;
+        while (settingsSel < rows.size() - 1 && rows.get(settingsSel)[1].length() == 0) settingsSel++;
+    }
+
+    /** MENU in the menu: from Camera checks back to the first page, from there home. */
+    private void settingsBack() {
+        if (settingsPage != Ui.PAGE_MENU) settingsPage(Ui.PAGE_MENU, "checks");
+        else goHome();
     }
 
     private void settingsKey(int k) {
@@ -604,10 +602,12 @@ public class MainActivity extends Activity {
             while (i >= 0 && i < n && rows.get(i)[1].length() == 0) i += step;   // pass over headings
             if (i >= 0 && i < n) settingsSel = i;
         } else if (k == K_ENTER) {
-            String action = rows.get(Math.min(settingsSel, n - 1))[2];
-            if (action.equals("cores")) {   // develop on three cores, or on Latent's own only
-                if (!prefs.getBoolean("multicoreOk", false)) toast("Run the Speed test first: it checks the other cores");
-                else prefs.edit().putInt("cores", developCores() > 1 ? 1 : 3).apply();   // apply: written behind, not on this thread
+            String[] row = rows.get(Math.min(settingsSel, n - 1));
+            String action = row[2];
+            if (row[3].length() > 0) {   // grey: it can't act now, and the footer already says why
+                toast(row[3]);
+            } else if (action.equals("cores")) {   // develop on three cores, or on Latent's own only
+                prefs.edit().putInt("cores", developCores() > 1 ? 1 : 3).apply();   // apply: written behind, not on this thread
             } else if (action.equals("neutral")) {
                 setNeutral(!neutralOn());
             } else if (action.equals("viewfinder")) {
@@ -627,7 +627,9 @@ public class MainActivity extends Activity {
             } else if (action.equals("rolls")) {
                 Roll r = firstRollWithFrames();
                 if (r == null) toast("No rolls yet");
-                else openSheet(r);
+                else { openSheet(r); sheetFrom = SETTINGS; }
+            } else if (action.equals("checks")) {
+                settingsPage(Ui.PAGE_CHECKS, "");
             } else if (action.equals("settingsCheck") || action.equals("speedTest") || action.equals("devTest") || action.equals("liveTest") || action.equals("shootTest") || action.equals("restartTest") || action.equals("lookTest") || action.equals("screenTest")) {
                 mode = PROBE;
                 probeStage = 0;
@@ -643,7 +645,7 @@ public class MainActivity extends Activity {
                 fromSettings = true;
             }
         }
-        screen.invalidate();
+        redrawKey();
     }
 
     /**
@@ -892,6 +894,27 @@ public class MainActivity extends Activity {
     private boolean shootPending;
     private final Runnable shootWhenSettled = new Runnable() { public void run() { goShoot(); } };
 
+    /**
+     * While a shoot waits (shootPending), the camera back counts the wait down ("Shooting in 4 s"): a redraw as each
+     * second turns. Only reads the time since the last settings write; goShoot's own timing is untouched.
+     */
+    private final Runnable settleTick = new Runnable() {
+        public void run() {
+            if (!shootPending) return;
+            screen.invalidate();
+            long since = NeutralSettings.sinceLastWrite(), left = since < 0 ? 0 : SHOOT_SETTLE_MS - since;
+            ui.postDelayed(this, left > 0 ? left % 1000 + 20 : 300);
+        }
+    };
+
+    /** Seconds until a waiting shoot can go (0: a moment more, the camera or the card busy), or -1 when none waits. */
+    private int readyIn() {
+        if (!shootPending) return -1;
+        long since = NeutralSettings.sinceLastWrite();
+        if (loading || neutralBusy > 0 || refreshing > 0 || filing || since < 0 || since >= SHOOT_SETTLE_MS) return 0;
+        return (int) ((SHOOT_SETTLE_MS - since + 999) / 1000);
+    }
+
     private void goShoot() {
         if (developing != null && devQuiet) {   // the photo in hand finishes first (a frame half-written is wasted)
             paused = true;
@@ -900,14 +923,14 @@ public class MainActivity extends Activity {
             return;
         }
         if (neutralBusy > 0 || refreshing > 0 || filing) {   // never start shooting while settings are being written (or the card read, or an original filed): check again shortly
-            if (!shootPending) { shootPending = true; toast("Setting up the camera…"); }
+            if (!shootPending) { shootPending = true; ui.removeCallbacks(settleTick); ui.post(settleTick); }   // the camera back counts it down
             ui.removeCallbacks(shootWhenSettled);
             ui.postDelayed(shootWhenSettled, 300);
             return;
         }
         long since = NeutralSettings.sinceLastWrite();
         if (loading || (since >= 0 && since < SHOOT_SETTLE_MS)) {   // one press is enough: it goes as soon as it's safe
-            if (!shootPending) { shootPending = true; toast("Setting up the camera…"); }
+            if (!shootPending) { shootPending = true; ui.removeCallbacks(settleTick); ui.post(settleTick); }   // the camera back counts it down
             ui.removeCallbacks(shootWhenSettled);
             ui.postDelayed(shootWhenSettled, loading ? 300 : SHOOT_SETTLE_MS - since);
             return;
@@ -960,7 +983,7 @@ public class MainActivity extends Activity {
     private void openViewfinder() {
         if (current == null) return;
         if (vf != null) {   // opened earlier this visit and kept open: the camera is never reopened in one visit
-            if (!current.endless() && exposed >= current.length) { toast("Roll finished"); return; }
+            if (!current.endless() && exposed >= current.length) { toast("Roll finished. Press \u2299 to develop."); return; }
             mode = PHOTO;
             readBattery();
             vf.show();   // frames again at once; its surface back on the screen with the first of them
@@ -968,7 +991,7 @@ public class MainActivity extends Activity {
             screen.invalidate();
             return;
         }
-        if (!current.endless() && exposed >= current.length) { toast("Roll finished"); return; }
+        if (!current.endless() && exposed >= current.length) { toast("Roll finished. Press \u2299 to develop."); return; }
         Stock st = Stock.byId(stocks, current.stock);
         mode = PHOTO;
         vfBase = exposed;
@@ -1380,7 +1403,7 @@ public class MainActivity extends Activity {
         else if (k == K_DOWN) lengthSel = Math.max(0, lengthSel - 1);
         else if (k == K_ENTER) loadRoll();
         if (k == K_LEFT || k == K_RIGHT) { renderHero(); renderSamples(); }   // the next film either side gets its stand-in
-        screen.invalidate();
+        redrawKey();
     }
 
     /**
@@ -1606,6 +1629,18 @@ public class MainActivity extends Activity {
             }
         }
     };
+
+    private UiState drawnState;   // what the screen last drew (Screen.onDraw)
+
+    /**
+     * After a key on Choose film, the menu, the contact sheet or the Lab: only what it changed is redrawn when
+     * Ui.dirty can say what that is (RenderScreens checks every changed pixel lies inside), else everything.
+     */
+    private void redrawKey() {
+        float[] r = Ui.dirty(drawnState, state());
+        if (r == null) screen.invalidate();
+        else invalidateLogical(r[0], r[1], r[2], r[3]);
+    }
 
     /** Redraws only this part of the screen (in Ui's logical pixels). */
     private void invalidateLogical(float x, float y, float w, float h) {
@@ -2079,6 +2114,7 @@ public class MainActivity extends Activity {
     }
 
     private void openSheet(final Roll r) {
+        if (mode != SHEET && mode != VIEW) sheetFrom = -1;   // a new visit to the sheet: whoever opened it says where MENU goes
         mode = SHEET;
         sheetRoll = r;
         sheetSel = 0;
@@ -2145,7 +2181,7 @@ public class MainActivity extends Activity {
             if (!sheetFrames.isEmpty()) openView(sheetSel);
             else if (!Roll.DEVELOPED.equals(sheetRoll.state)) startDevelop(sheetRoll);
         }
-        screen.invalidate();
+        redrawKey();
     }
 
     private boolean viewCaption, viewFill;
@@ -2377,7 +2413,7 @@ public class MainActivity extends Activity {
         else if (k == K_ENTER) { if (labRow == 7) labProcess(); else if (labRow == 6) labChange(1); else labRow = 7; }
         else if (k == K_LEFT) labChange(-1);
         else if (k == K_RIGHT) labChange(1);
-        screen.invalidate();
+        redrawKey();
     }
 
     private void labChange(int dir) {
@@ -2709,7 +2745,7 @@ public class MainActivity extends Activity {
     }
 
     private static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
-    private static String signed(int v) { return v > 0 ? "+" + v : String.valueOf(v); }
+    private static String signed(int v) { return v > 0 ? "+" + v : v < 0 ? "\u2013" + -v : "0"; }   // the en dash: the fonts have no minus sign
     private static String secs(int ms) { return String.valueOf((ms + 500) / 1000); }
 
     /** Appends one line per developed frame to /LATENT/TIMING.TXT. Worker thread. */
@@ -2857,11 +2893,93 @@ public class MainActivity extends Activity {
         return !labBusy && !(mode == PROBE && probeStage == 1);   // in the darkroom it pauses after the frame, then shoots
     }
 
+    // ---- the camera's other buttons
+
+    /**
+     * Sony's own names for its buttons' scan codes (ScalarInput's ISV_KEY_* constants), read once by reflection:
+     * static fields only, nothing called on the camera. Empty where the class isn't (the Mac, another body).
+     */
+    private static Map<Integer, String> scanNames;
+    private static int playScan = -2;
+
+    private static synchronized Map<Integer, String> scanNames() {
+        if (scanNames != null) return scanNames;
+        Map<Integer, String> m = new HashMap<Integer, String>();
+        try {
+            for (java.lang.reflect.Field f : Class.forName("com.sony.scalar.sysutil.ScalarInput").getFields()) {
+                if (f.getType() != int.class || !java.lang.reflect.Modifier.isStatic(f.getModifiers()) || !f.getName().startsWith("ISV_KEY_")) continue;
+                int v = f.getInt(null);
+                if (!m.containsKey(v)) m.put(v, f.getName());
+            }
+        } catch (Throwable e) {
+            // not a Sony camera, or no such class: no names, and no Playback button
+        }
+        scanNames = m;
+        return m;
+    }
+
+    /** The Playback button's scan code (ISV_KEY_PLAY), or -1 when the camera doesn't say. */
+    private static synchronized int playScan() {
+        if (playScan != -2) return playScan;
+        playScan = -1;
+        for (Map.Entry<Integer, String> en : scanNames().entrySet()) if (en.getValue().equals("ISV_KEY_PLAY")) playScan = en.getKey();
+        return playScan;
+    }
+
+    private int sheetFrom = -1;        // the screen the contact sheet was opened from (MENU and Playback go back there); -1 home
+    private final Set<String> unmapped = new HashSet<String>();   // buttons pressed this visit that Latent doesn't use
+
+    /**
+     * Playback, as on the camera itself: the roll's contact sheet (the loaded roll's once it has frames, else the
+     * newest roll with any), and pressed again, back where it was. Only from the camera back, Choose film and the
+     * menu: never in the viewfinder or the darkroom (nor mid-test, nor in the Lab).
+     */
+    private void playback() {
+        if (!ready) return;
+        if (mode == SHEET || mode == VIEW) { leaveSheet(); screen.invalidate(); return; }
+        if (mode != BACK && mode != LOAD && mode != SETTINGS) return;
+        if (mode == LOAD && loading) return;
+        Roll r = current != null && exposed > 0 ? current : firstRollWithFrames();
+        if (r == null) { toast("No rolls yet"); return; }
+        int from = mode;
+        openSheet(r);
+        sheetFrom = from;
+    }
+
+    /** Off the contact sheet: back to the menu or Choose film when it was opened there, else home. */
+    private void leaveSheet() {
+        if (sheetFrom == SETTINGS) mode = SETTINGS;
+        else if (sheetFrom == LOAD && current == null) openLoad();
+        else goHome();
+        sheetFrom = -1;
+    }
+
+    /** A button Latent doesn't use: noted (scan code / key code, Sony's name), for one line a visit in DEVELOP.TXT. */
+    private void unmapped(int keyCode, int sc) {
+        if (sc == SC_MENU || sc == SC_SK1 || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_BACK) return;   // MENU acts on release
+        if (unmapped.size() >= 30) return;
+        String name = scanNames().get(sc);
+        unmapped.add(sc + "/" + keyCode + (name != null ? " " + name : ""));
+    }
+
+    /** The visit's census of unused buttons, as a log line (null when none was pressed); clears it. */
+    private String unmappedLine() {
+        if (unmapped.isEmpty()) return null;
+        String line = "keys: not used here " + unmapped + "; Playback is " + (playScan() >= 0 ? "scan code " + playScan() : "not named by the camera");
+        unmapped.clear();
+        return line;
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent e) {
         int sc = e.getScanCode();
         if (sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS) s1Held = true;
+        if (mode == PHOTO && coachUntil > 0) endCoach();   // the first key: the keys are learnt
         if (mode == PHOTO && vf != null) { vfKey(keyCode, e, true); return true; }
+        if (sc >= 0 && sc == playScan()) {   // the camera's Playback button: the roll's contact sheet, and back
+            if (e.getRepeatCount() == 0) playback();
+            return true;
+        }
         if (shutterKey(sc, keyCode) && e.getRepeatCount() == 0 && mode == BACK && ready && current != null && !wantsDeveloping(current)
                 && viewfinderOn() && shootAllowed() && !Roll.DEVELOPING.equals(current.state)) {
             goShoot();   // the viewfinder opens on the press itself (the camera's own mode had to wait for the release)
@@ -2874,6 +2992,7 @@ public class MainActivity extends Activity {
             return true;
         }
         int k = key(keyCode, sc);
+        if (k == 0 && e.getRepeatCount() == 0) unmapped(keyCode, sc);
         if (k == 0 || (k == K_ENTER && e.getRepeatCount() > 0)) return true;
         if (e.getRepeatCount() == 0) keyAt = SystemClock.uptimeMillis();
         lastPressAt = SystemClock.uptimeMillis();
@@ -2914,8 +3033,9 @@ public class MainActivity extends Activity {
         switch (mode) {
             case BACK: openSettings(); break;
             case LOAD: if (loading) break; if (current != null) mode = BACK; else openSettings(); break;   // MENU: back to the roll, or the menu
-            case SETTINGS: goHome(); break;
+            case SETTINGS: settingsBack(); break;
             case DARKROOM: if (!preparing) { paused = true; toast("Pausing after this frame"); } break;
+            case SHEET: leaveSheet(); break;
             case VIEW: mode = SHEET; dropViewer(); sheetThumbs(); break;   // its previews go; the sheet's page may have moved
             case LAB: if (!labBusy) { if (fromSettings) mode = SETTINGS; else goHome(); developWaiting(); } break;
             case PROBE:
@@ -2962,6 +3082,13 @@ public class MainActivity extends Activity {
                 s.developing = devQuiet && developing != null ? quietLeft : 0;
                 s.developLater = Viewfinder.opened;
                 s.waiting = vfWaiting;
+                s.readyIn = readyIn();
+                s.readyTotal = (int) (SHOOT_SETTLE_MS / 1000);
+                if (current != null && !current.endless()) {   // finished or paused: about how long the develop takes
+                    int shown = Math.min(exposed, current.length);
+                    if (s.developed >= 0) s.developMs = (shown - s.developed) * msPerFrame();
+                    else if (shown >= current.length) s.developMs = shown * msPerFrame();
+                }
                 break;
             case PHOTO: {
                 if (vf != null) vf.fill(s);
@@ -2972,14 +3099,10 @@ public class MainActivity extends Activity {
                 s.cardNote = current != null && current.endless() ? "From this frame on" : filmFresh() ? "" : "Loaded for the whole roll";
                 break;
             }
-            case SETTINGS: {
-                List<String[]> rows = settingsRows();
-                int sel = Math.min(settingsSel, rows.size() - 1);
-                for (String[] r : rows) s.rows.add(new String[] { r[0], r[1] });
-                s.rowSel = sel;
-                s.footer = settingsFooter(rows.get(sel)[2]);
+            case SETTINGS:
+                Ui.menuState(s, settingsPage, menuFacts(), settingsSel);   // the rows the Mac previews show too
+                s.film = cur == null ? null : film(cur);                     // its colour marks the chosen row
                 break;
-            }
             case LOAD:
                 for (Stock st : stocks) s.films.add(film(st));
                 s.filmSel = stockSel;
@@ -3084,6 +3207,7 @@ public class MainActivity extends Activity {
             default:
                 break;
         }
+        if (mode == PHOTO) s.coach = coach();
         return s;
     }
 
@@ -3101,21 +3225,44 @@ public class MainActivity extends Activity {
         return looksMade;
     }
 
+    /** How a stock is shown (Ui.film, as the previews show it), with its latest photo rendered in it. */
     private UiState.Film film(Stock st) {
-        if (st == null) return null;
-        UiState.Film f = new UiState.Film();
-        f.title = st.title;
-        f.iso = st.iso;
-        f.tagline = st.tagline;
-        f.body = st.body;
-        f.band = st.band;
-        f.accent = st.accent;
-        f.sample = samples.get(st.id);
+        UiState.Film f = Ui.film(st);
+        if (f != null) f.sample = samples.get(st.id);
         return f;
+    }
+
+    // ---- the viewfinder's keys, once ever (UiState.coach)
+
+    static final long COACH_MS = 5000;
+    private long coachUntil;           // 0 not asked yet this run, > 0 shown until then, -1 done (or shown on an earlier visit)
+    private final Runnable coachEnd = new Runnable() { public void run() { endCoach(); } };
+
+    /** The first viewfinder visit ever: its keys for a few seconds, or until the first key. */
+    private boolean coach() {
+        if (coachUntil == 0) {
+            if (prefs.getBoolean("coached", false)) coachUntil = -1;
+            else {
+                prefs.edit().putBoolean("coached", true).apply();
+                coachUntil = SystemClock.uptimeMillis() + COACH_MS;
+                ui.postDelayed(coachEnd, COACH_MS);
+            }
+        }
+        return coachUntil > 0 && SystemClock.uptimeMillis() < coachUntil;
+    }
+
+    private void endCoach() {
+        if (coachUntil <= 0) return;
+        coachUntil = -1;
+        ui.removeCallbacks(coachEnd);
+        if (mode != PHOTO) return;
+        screen.invalidate();
+        if (vf != null && vf.onSurface()) presentPicture(true);   // gone from the picture's surface too, frames or none
     }
 
     private final class Screen extends View {
         private final AndroidGfx gfx;
+        private final android.graphics.Rect clip = new android.graphics.Rect();
 
         Screen(Context c) {
             super(c);
@@ -3136,6 +3283,7 @@ public class MainActivity extends Activity {
             ScreenTest st = screenRun;
             if (screenHook && st != null) { st.draw(c); return; }   // the screen test draws its frames here
             long t = SystemClock.uptimeMillis();
+            boolean whole = c.getClipBounds(clip) && clip.left <= 0 && clip.top <= 0 && clip.right >= getWidth() && clip.bottom >= getHeight();   // not a partial redraw
             c.save();
             c.scale(getWidth() / logicalWidth, getHeight() / 480f);
             gfx.begin(c);
@@ -3149,6 +3297,9 @@ public class MainActivity extends Activity {
             windowDrawn = mode == PHOTO && s.vfPart == UiState.PART_WINDOW ? Ui.windowKey(s) : null;
             if (pictureOnScreen && mode != PHOTO) ui.post(dropSurface);   // it's on top: off the screen, away from the viewfinder
             Ui.draw(gfx, s);
+            // a key's partial redraw (Ui.dirty): if something else changed since the last drawing, all of it next
+            if (!whole && drawnState != null && Ui.keyPartial(s.mode) && Ui.dirty(drawnState, s) == null) screen.invalidate();
+            drawnState = s;
             c.restore();
             drawCount++;
             drawMs += SystemClock.uptimeMillis() - t;

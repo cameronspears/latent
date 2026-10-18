@@ -29,22 +29,36 @@ final class Stock {
     /**
      * The built-in stocks, in the order they're offered: a small, distinct set rather than a long list.
      * id, title, ISO, tagline, highlight, shadow, grain, grain size, canister body, band, accent.
-     * The looks themselves come from tools/make_luts.py.
+     * The looks themselves come from tools/make_luts.py. Taglines say the character, then the use, in a line
+     * (Fuji's film simulation notes); colours are on the screen's 4-bit grid (Ui's palette), so the canister
+     * and accent look the same on the 32-bit screen, its 16-bit plane and in the viewfinder.
      */
     private static final Object[][] BUILT_IN = {
-        { "NATURAL", "Natural", "100", "Faithful, rich colour and the smoothest highlights. The quiet one.",
-                0, 0, 1, 1, 0xFF8C9096, 0xFFE9E5DC, 0xFFD9D2C3 },
-        { "PORTRA4W", "Portra", "400", "Soft and airy, with creamy highlights and golden skin.",
-                -1, -1, 4, 1, 0xFFC79A3E, 0xFFF3E7C9, 0xFFE8B653 },
-        { "CLASSNEG", "Classic Neg", "400", "Hard, quiet colour with teal shadows and warm highlights.",
-                1, 1, 3, 1, 0xFF1F6E52, 0xFFE8E2D3, 0xFF6CC29E },
-        { "CUBANNEG", "Cuban Neg", "400", "Warm, punchy street colour with deep teal shadows.",
-                -2, 1, 5, 2, 0xFF17675F, 0xFFEC6A2C, 0xFFF0743A },
-        { "TRIX400", "Tri-X", "400", "Gritty black and white: inky blacks, bright whites, real grain.",
-                0, 1, 8, 2, 0xFF1D1C1A, 0xFFF2C230, 0xFFF4F1EA },
-        { "PARTY800", "Afterparty", "800", "For nights out with the flash on: punchy, warm skin, big grain.",
-                -1, 2, 7, 3, 0xFF4B2470, 0xFFE8458B, 0xFFF0629F },
+        { "NATURAL", "Natural", "100", "True colour, soft highlights. For anything.",
+                0, 0, 1, 1, 0xFF888899, 0xFFEEDDDD, 0xFFDDCCBB },
+        { "PORTRA4W", "Portra", "400", "Soft and warm, golden skin. For people.",
+                -1, -1, 4, 1, 0xFFCC9944, 0xFFEEEECC, 0xFFEEBB55 },
+        { "CLASSNEG", "Classic Neg", "400", "Hard, muted colour, teal shadows. For streets.",
+                1, 1, 3, 1, 0xFF226655, 0xFFEEDDCC, 0xFF66BB99 },
+        { "CUBANNEG", "Cuban Neg", "400", "Warm and punchy, deep teal. For sunny days.",
+                -2, 1, 5, 2, 0xFF116666, 0xFFEE6633, 0xFFEE7733 },
+        { "TRIX400", "Tri-X", "400", "Inky blacks, real grain. For people and night.",
+                0, 1, 8, 2, 0xFF222222, 0xFFEEBB33, 0xFFFFFFEE },
+        { "PARTY800", "Afterparty", "800", "Warm skin, big grain. For flash at night.",
+                -1, 2, 7, 3, 0xFF442277, 0xFFEE4488, 0xFFEE6699 },
     };
+
+    /** The built-in stocks without a card (no look files): how they're shown, for the Mac previews. */
+    static List<Stock> builtIn() {
+        List<Stock> out = new ArrayList<Stock>();
+        for (Object[] b : BUILT_IN) out.add(make(b, null));
+        return out;
+    }
+
+    private static Stock make(Object[] b, File lut) {
+        return new Stock((String) b[0], (String) b[1], (String) b[2], (String) b[3], lut, (Integer) b[4], (Integer) b[5],
+                (Integer) b[6], (Integer) b[7], (Integer) b[8], (Integer) b[9], (Integer) b[10]);
+    }
 
     /** Every stock the card has a look for: the built-ins in their order, then any of your own. */
     static List<Stock> all(File card) {
@@ -55,13 +69,12 @@ final class Stock {
             File f = find(luts, (String) b[0]);
             if (f == null) continue;
             used.add(f);
-            out.add(new Stock((String) b[0], (String) b[1], (String) b[2], (String) b[3], f, (Integer) b[4], (Integer) b[5],
-                    (Integer) b[6], (Integer) b[7], (Integer) b[8], (Integer) b[9], (Integer) b[10]));
+            out.add(make(b, f));
         }
         for (File f : luts) {
             if (used.contains(f)) continue;
             String id = Library.lutName(f);
-            out.add(new Stock(id, id, "", "Your own look, from LATENT/LUTS.", f, 0, 0, 4, 1, 0xFF555049, 0xFFD8D2C4, 0xFFF4F1EA));
+            out.add(new Stock(id, id, "", "Your own look, from LATENT/LUTS.", f, 0, 0, 4, 1, 0xFF555544, 0xFFDDCCCC, 0xFFFFFFEE));
         }
         return out;
     }

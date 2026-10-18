@@ -84,7 +84,7 @@ final class UiState implements Cloneable {
     boolean coach;                     // the first visit: the viewfinder's keys, once, for a few seconds
 
     // Settings
-    List<String[]> rows = new ArrayList<String[]>();   // {label, value}: value "on"/"off" draws a switch, "›" opens, "" is a heading
+    List<String[]> rows = new ArrayList<String[]>();   // {label, value, why not}: value "on"/"off" draws a switch, "›" opens, "" is a heading; why not "" when it can act now
     int rowSel;
     String footer = "";
 
@@ -126,4 +126,10 @@ final class UiState implements Cloneable {
     String[] labRows = new String[0], labValues = new String[0];
     int labRow, labProgress = -1;
     String labCaption = "";
+
+    // ---- the screens (v0.45.0, the UI stream)
+    int menuPage;                      // the menu's page: Ui.PAGE_MENU, or Ui.PAGE_CHECKS (the camera tests)
+    int readyIn = -1;                  // camera back: a shoot waits for the camera to settle, seconds to go (0: a moment); -1 none
+    int readyTotal;                    // ... of this many seconds in all
+    long developMs = -1;               // camera back: about how long the roll (or what's left of it) takes to develop; -1 unknown
 }
