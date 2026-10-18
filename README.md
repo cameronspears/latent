@@ -8,6 +8,16 @@ then develop it. Each frame gets a **3D LUT** (the colour look), a **highlight /
 and **film grain**, and lands in the camera's own playback. Latent shows your developed photos too,
 without a trip to the camera's Playback.
 
+| | |
+|---|---|
+| ![Choose film: your last photo in Classic Neg, the roll length beside it](docs/images/choose-film.jpg) | ![The viewfinder: live view in the film look, focus locked in green](docs/images/viewfinder.jpg) |
+| **Choose film** on your own photo | **The viewfinder**, the film look live |
+| ![The darkroom: frame 5 of 12 developing under a red safelight](docs/images/darkroom.jpg) | ![Photos: every developed frame, grouped by roll](docs/images/photos.jpg) |
+| **The darkroom**, developing the roll | **Photos**, every developed frame |
+
+*The screens as Latent draws them, rendered on a Mac from the same code the camera runs
+(`tools/readme-images.sh`). The photos in them are the test photos credited below.*
+
 Status: **v0.45.0**. v0.44.1 is the last version run on the A5100: rolls (12, 24, 36 or ∞), Latent's
 own viewfinder with the film look live, the darkroom into the camera roll on three cores, negatives
 and the six looks all work there. v0.45.0 is lighter (no Lab, no settings, no camera tests) and adds
@@ -46,6 +56,8 @@ roll's last three frames in the film's colour).
   set it to neutral, and shooting sooner restarts the A5100. The camera back counts it down
   ("Shooting in 4 s") and then opens the viewfinder.
 
+<img src="docs/images/camera-back.jpg" width="426" alt="The camera back: frame 09 of 24 in Classic Neg, the roll's ticks below">
+
 Every photo you take is an exposure on the roll. Rolls count by the camera's photo numbers
 (DSC04592, DSC04593, …), because file times can shift by hours between power-ons.
 
@@ -80,6 +92,11 @@ card (and the AF light, when it's on). The foot of each bar names the key beside
   only when Latent closes. With nothing shot, MENU keeps the camera open behind the camera back, so
   the viewfinder is back at once, on whichever roll is loaded by then: after Change film, the new
   one's film and count.
+
+| | |
+|---|---|
+| ![The film's card after a turn of the wheel: Tri-X, its tagline and the row of canisters](docs/images/viewfinder-film.jpg) | ![The exposure scale in the right bar, beside the wheel, at +1/3](docs/images/viewfinder-exposure.jpg) |
+| **The wheel** shows the film's card | **DOWN**: the exposure scale beside the wheel |
 
 The first time you open the viewfinder, a line at the foot shows these keys for a few seconds. If
 the camera falls behind, Latent gives it back its own live view ("Film look paused: the camera is
@@ -144,6 +161,8 @@ apps (press it again to go back).
   first. Centre goes back to the whole frame.
 - MENU goes back: from a frame to the sheet, and from the sheet to wherever you opened it.
 
+<img src="docs/images/photos-viewer.jpg" width="426" alt="A frame full screen, with its film, roll, frame, date and exposure">
+
 Nothing in Photos develops or ends a roll, and no develop starts while you're in it: a roll waiting
 to develop waits until you leave. You can't open Photos from the viewfinder or the darkroom.
 
@@ -155,6 +174,8 @@ to develop waits until you leave. You can't open Photos from the viewfinder or t
 
 The line at the foot says what the chosen row does, or why it can't right now. On Photos it ends
 with Latent's version.
+
+<img src="docs/images/menu.jpg" width="426" alt="The menu: This roll (Develop now, Change film) and All rolls (Photos)">
 
 **A screen left alone** (the camera back, Choose film, the menu, the contact sheet) dims to about
 30% after 30 seconds untouched, as a phone dims before it locks. The first press only wakes it; a
@@ -372,7 +393,8 @@ when it closes.
 Latent itself is MIT-licensed (`LICENSE`). The parts below keep their own licences.
 
 - Test photos (`testdata/`): Wikimedia Commons, CC BY-SA, by Michael Barera and Ted Eytan; see
-  `testdata/SOURCES.txt`. They're used only by the tests on a Mac.
+  `testdata/SOURCES.txt`. They're used by the tests on a Mac, and they're the photos in the
+  pictures of the screens (`docs/images/`), which are shared under CC BY-SA 4.0 as well.
 
 - JPEG coding: libjpeg-turbo 2.1.5.1, plain C build (`vendor/libjpeg-turbo-2.1.5.1`, IJG and BSD
   licences, see its LICENSE.md). This software is based in part on the work of the Independent JPEG
