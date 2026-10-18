@@ -1681,9 +1681,17 @@ struct fl_frame_ctx {
     unsigned int *xiw;                     /* per screen column: its left source pixel's byte offset << 9 | its weight */
     int cap_ow, col_w, col_h, col_ow, col_oh, col_aspect;   /* what xiw was worked out for */
     long us_blend, us_dither;               /* this compose, every eighth row: the rows, the overlay's own pixels */
+    /* the packing tables for the screen's format (pack_tables: 2 KB, off the look thread's stack), what they are
+     * for (format | shifts, -1: not made yet), and a screen row's thresholds */
+    unsigned int trb[256], tgg[256], tg1[16], T[96];
+    int pack_key;
 };
 
-fl_frame_ctx *fl_frame_new(void) { return (fl_frame_ctx *)calloc(1, sizeof(fl_frame_ctx)); }
+fl_frame_ctx *fl_frame_new(void) {
+    fl_frame_ctx *c = (fl_frame_ctx *)calloc(1, sizeof(fl_frame_ctx));
+    if (c) c->pack_key = -1;
+    return c;
+}
 
 void fl_frame_free(fl_frame_ctx *c) {
     if (!c) return;
@@ -2238,7 +2246,7 @@ static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, in
                          int aspect1000, int format, const int *shifts, int ox, int oy) {
     const int w = c->pw, h = c->ph, ow2 = (ow + 1) & ~1;   /* a row's columns, rounded up to whole pairs */
     int x, y, held[2], rs = 11, gs = 5, bs = 0, as = 0, use_ovl, f565 = format != FL_FMT_4444;
-    unsigned int *hr[2], alpha = 0, trb[256], tgg[256], tg1[16], T[96];
+    unsigned int *hr[2], alpha = 0, *trb = c->trb, *tgg = c->tgg, *tg1 = c->tg1, *T = c->T;
     unsigned short *row16;
     double sw, sh, sx0, sy0;
     if (!c->px || w < 2 || h < 2 || ow < 1 || oh < 1 || ow > 4096 || oh > 4096 || stride < ow) return -1;
@@ -2248,7 +2256,10 @@ static int frame_compose(fl_frame_ctx *c, fl_overlay *o, unsigned short *out, in
         if (rs < 0 || rs > 12 || gs < 0 || gs > 12 || bs < 0 || bs > 12 || as < 0 || as > 12) return -1;
         alpha = 15u << as;
     }
-    pack_tables(f565, rs, gs, bs, alpha, trb, tgg, tg1);
+    {
+        int key = f565 ? 0 : 1 | rs << 4 | gs << 8 | bs << 12 | as << 16;
+        if (key != c->pack_key) { pack_tables(f565, rs, gs, bs, alpha, trb, tgg, tg1); c->pack_key = key; }
+    }
     use_ovl = o && o->w == ow && o->h == oh;
     if (!c->px || c->cap_px < w * h) return -1;   /* the look made it */
     if (c->cap_ow < ow2) {
