@@ -60,6 +60,10 @@ final class UiState implements Cloneable {
     // the viewfinder (in-app shooting)
     int afState;                       // 0 ready, 1 searching, 2 locked, 3 can't lock
     float[][] afAreas;                 // focused areas as {x, y, w, h}, 0..1 of the picture; null = the centre
+    float[] afBox;                     // the camera's focus area {x, y, w, h}, 0..1 of the picture (Focus.areaBox); null = the usual bracket
+    boolean steadying;                 // a slow shot waits for the camera to hold still (Steady)
+    boolean shutterSlow;               // the shutter is slower than 1/30: shown in amber
+    boolean printSoft;                 // the print's photo came out soft where the camera focused (Focus.verdict)
     boolean afLamp;                    // the AF light is on
     int afTry;                         // which try (searching again in the dark)
     String afNote = "";                // why it can't lock

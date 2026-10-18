@@ -1,7 +1,8 @@
 # Latent: notes for the next session
 
-Written 2026-10-17 at **v0.45.0**, built and tested on the Mac but not yet installed. The camera has
-**v0.44.1** (the viewfinder shoots with the look at ~11 frames a second, and the next open develops).
+Written 2026-10-17 at **v0.45.0**; v0.46.0's focus work added 2026-10-18 (below). Both built and tested on
+the Mac, not yet installed: they go to the camera together. The camera has **v0.44.1** (the viewfinder
+shoots with the look at ~11 frames a second, and the next open develops).
 `README.md` is the user guide and explains the develop pipeline. This file is the working context.
 
 ## The project in one paragraph
@@ -47,8 +48,8 @@ on-camera tests.
 | Screen previews | `tools/preview.sh [-sun]`: every screen to `out/preview/`, and as the panel shows it in `out/preview/camera/` (640 dots, 4 bits a channel, the viewfinder in its parts with the composer's dither); `-sun` adds a daylight veil; with an earlier version's renders in `out/preview-base/`, `compare/` pairs them. Fails on any check: text 13 px or more (sentences 15), contrast 4.5:1 (3:1 from 18 px), no text over text, the palette on the 4-bit grid, the overlay inside its bands, `Ui.windowKey` complete, partial redraws inside their rects, the viewfinder's layers adding up |
 | README pictures | `tools/readme-images.sh`: the nine screens in `docs/images/` (JPEG, from `tools/preview.sh`). Run it after changing a screen the README shows. |
 | Roll model and the app's small rules | `tools/roll-test.sh` (RollTest: rolls on a fake card, every developed frame for Photos; LogicTest: Backlight, the save's settle, Slots, the thumbnail cache, Photos' sheet and caption) |
-| Viewfinder logic | `tools/viewfinder-test.sh` (ViewfinderTest: Release, FrameScheduler, Pacer, the store quiet, `/proc` readings, the overlay's bands, when a presented state runs out) |
-| JNI and the live composer | `tools/test-jni.sh testdata/STREET.JPG` (91 checks; also PEOPLE, HOUSE, CHART; the camera's build, then one dither threshold against v0.44.1's composer pixel for pixel) |
+| Viewfinder logic | `tools/viewfinder-test.sh` (ViewfinderTest: Release, FrameScheduler, Pacer, the store quiet, `/proc` readings, the overlay's bands, when a presented state runs out; v0.46.0: Focus's cells and areas, its verdicts on the card's own scores, TOCHECK.TXT and the camera back's words, Steady) |
+| JNI and the live composer | `tools/test-jni.sh testdata/STREET.JPG` (also PEOPLE, HOUSE, CHART; the camera's build, then one dither threshold against v0.44.1's composer pixel for pixel; v0.46.0: the focus check on a Sony-like JPEG it builds, sharp and with its focused cells blurred, and the motion measure on frames moved by known half pixels) |
 | The composer against v0.44.1's | `tools/frame-test.sh testdata/*.JPG` (`--bench` Mac ratios, `--render DIR` frames as PPMs to judge by eye; UBSan) |
 | Hot loops' instruction budget | `tools/asm-budget.sh` (the camera's own compiler and flags; each loop marked `hot:` in `jni/filmcore.c`; fails when one is over budget) |
 | Shared caches under load | `tools/cache-test.sh` (3 frame composers changing films, 2 threads previewing, reading ahead, prewarming and forgetting; UBSan, Guard Malloc) |
@@ -57,7 +58,7 @@ on-camera tests.
 | Sanitizer | `tools/sanitize-test.sh testdata/*.JPG` |
 | Neutral settings | `tools/settings-test.sh` (the write fence, apply and restore, against a stand-in service) |
 | The .cube reader | `tools/cube-test.sh` |
-| Image core on the Mac | `tools/build-host.sh`, then `out/host/fltool` |
+| Image core on the Mac | `tools/build-host.sh`, then `out/host/fltool` (`fltool focus PHOTO.JPG...`: the focus check's scores) |
 
 Build with your own `TMPDIR` when another session may build too: `build.sh` works in `$TMPDIR/latent-build`
 (and `asm-budget.sh` in `$TMPDIR/latent-asm`), and two builds there at once mix their objects.
@@ -98,6 +99,7 @@ line it misses.
 - `tools/preview/RenderScreens.java`, `CameraTrue.java`: the previews and their checks.
 - `docs/DEVELOP-SPEED.md`: every darkroom speed idea since v0.38, with the camera's numbers.
 - `docs/CALLBACK-FINDINGS.md`: why capture-time processing is closed.
+- `docs/AUTOFOCUS.md`: what the camera's focus does on this lens, and the plan to do better (not built).
 - `tools/make_luts.py`: the six looks (Natural, Portra, Classic Neg, Cuban Neg, Tri-X, Afterparty).
 
 ## What works on the camera today (v0.44.1)
@@ -153,7 +155,44 @@ line it misses.
   than the small share the rule above allows: it's the user's call (by eye, below;
   `FL_DITHER_GREEN` 0 is one threshold again).
 
+## What v0.46.0 changes (Mac-tested only): focus
+
+`docs/AUTOFOCUS.md` has the evidence and the plan; this is Phase 1, with no new camera call or setting.
+
+- **Where the camera focused** (`Focus`): the focus report's areas (1-25, a 5 x 5 grid) become green
+  boxes on a lock (`UiState.afAreas`, drawn by `Ui.afBrackets` since v0.3x but never set until now).
+  The bracket stands where the camera's own area is (`UiState.afBox`, from `focus-area-type`,
+  `focus-area-flexible-spot-size`, `focus-point-x/y`, read once with the rest): Center as the middle
+  3 x 3 cells, Flexible Spot at its point read as -1000..1000. The grid's place (`Focus.GRID`) and
+  the spot's mapping and sizes (`Focus.SPOT`) are inferred, to be confirmed on the camera.
+- **The steady shutter** (`Steady`): slower than 1/30 (the speed read at each lock, and again before
+  a shot pressed through focus in a dim scene), `shoot()` waits for a frame pair that moved less
+  than would blur the photo by `STEADY_PX` (or the least a 320 px frame can tell), at most `MAX_MS`
+  (600 ms; `BLIND_MS` 250 with no frame to judge). Frames asked with `F_MOTION` keep their centre
+  (128 x 96, brightness) under their number in the native core; `FilmCore.motion` pairs them on the
+  UI thread (a coarse search at half size, down the slope at full size, a parabola for the part of a
+  pixel). Release is unchanged: the wait is inside `shoot()`, so letting go doesn't cancel it.
+  Hidden or closing mid-wait drops the shot (`dropSteady`). Amber shutter speed in the foot
+  (`UiState.shutterSlow`, in `overlayKey`), "Hold still" under the bracket.
+- **The focus check** (`fl_focus_check`, `Focus.verdict`): a photo's MPF preview decoded at half size,
+  brightness only, 25 cells scored (gradient over local range at strong edges, 98th percentile), the
+  cells from Sony's makernote (`0x201F`) or else the lock's report, the exposure from EXIF.
+  `fltool focus PHOTO.JPG...` prints the same. The viewfinder tries each photo once on a look thread
+  after the store quiet; Linux can't see it then (below), so it goes to `LATENT/TOCHECK.TXT` at close,
+  and after the restart `MainActivity.checkFocusLater` checks it on the filer's thread (giving way to
+  the darkroom's look) and toasts "Frame 9: missed focus". ~13 ms a photo on the Mac: about a second
+  on the camera, estimated. A focused cell blurred past its last edge has no score and gets no
+  verdict (as a plain wall); the log shows it as `--`.
+- Nothing else moves: every other screen renders pixel for pixel as v0.45.0's, the composer's
+  pictures are unchanged with or without `F_MOTION`, and `mpf_preview` (Choose film) only had its
+  index reading split out (`mpf_locate`).
+
 ## Camera facts learned the hard way
+
+- **A photo Latent's viewfinder just took isn't visible to Linux until the card is read afresh**
+  (v0.22.1: catalogued 79 ms after the shutter, the file not seen in 30 s). Its name comes from the
+  catalogue; its bytes only after the camera is given back. v0.46.0's focus check plan assumed
+  otherwise; the check now runs after the restart.
 
 - **Settings writes:** shooting mode must not start within about 6 s of a settings write, or the
   camera restarts. `goShoot` waits for this, and the camera back counts it down. That guards only
@@ -400,6 +439,25 @@ Look first, before anything else:
   still screen drop after 30 s? If neither, Sony ignores it and the light saves nothing (it costs
   nothing either). A names-only listing of Sony's `DisplayManager` methods might then find its own
   backlight control (nothing invoked).
+
+Focus (v0.46.0), first:
+
+- **The boxes.** Point the bracket at something small right of the middle (on Center) and half-press:
+  the green box should sit on it. `VIEWFIND.TXT`'s `camera's focus: status 1, areas [...]` lines name
+  the cells. If the boxes are off, the grid isn't the whole picture: fix `Focus.GRID`.
+- `focus area center, spot midium at -752, 361: drawn at …`: the camera's own area as read. Switch the
+  camera to Flexible Spot, move it, open Latent: the bracket should follow (else `Focus.areaBox`'s
+  mapping and `Focus.SPOT` need the camera's numbers).
+- **A miss on purpose.** Half-press on something near, keep holding, turn to something far, shoot,
+  leave with MENU: the camera back should say "Frame N: missed focus". `DEVELOP.TXT`'s
+  `focus check DSC0….JPG: …` line gives the scores, the cells (`from the photo` or `from the lock`) and
+  `read + measure` ms (the estimate is about a second). `VIEWFIND.TXT` should say `focus check: …
+  not readable here` for each shot (if it says a verdict instead, Linux does see new photos: the
+  amber print then works in the viewfinder).
+- **A dim room**, slower than 1/30: `steady: … waiting`, `steady: frames a-b moved x, y px …` and
+  `steady: taken on a still frame / at the limit / with no frame to judge by, N ms after the press`.
+  Compare the soft ones with the card's (about half of its ten slow frames were soft).
+- **Shutter lag at 1/60 and faster:** `picture asked for N ms after the full press`, as v0.45.0's.
 
 `VIEWFIND.TXT`:
 

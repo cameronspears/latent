@@ -31,7 +31,7 @@ done
 [ -e "$O/samples/HOUSE-100.png" ] || sips -s format png -c 480 854 "$O/samples/HOUSE-DEV.JPG" --out "$O/samples/HOUSE-100.png" >/dev/null
 rm -f "$O"/*.png "$O"/camera/*.png "$O"/camera-sun/*.png "$O"/compare/*.png
 "$JH/bin/javac" -encoding UTF-8 -d "$O/classes" src/com/latent/camera/Gfx.java src/com/latent/camera/UiState.java \
-  src/com/latent/camera/Ui.java src/com/latent/camera/Photos.java src/com/latent/camera/Stock.java src/com/latent/camera/Library.java src/com/latent/camera/Roll.java \
+  src/com/latent/camera/Ui.java src/com/latent/camera/Focus.java src/com/latent/camera/FilmCore.java src/com/latent/camera/Photos.java src/com/latent/camera/Stock.java src/com/latent/camera/Library.java src/com/latent/camera/Roll.java \
   -cp "${LATENT_TOOLCHAIN:-$HOME/.latent-toolchain}/sdk/platforms/android-28/android.jar" \
   tools/preview/HostGfx.java tools/preview/CameraTrue.java tools/preview/RenderScreens.java
 BASE=""; [ -d out/preview-base/camera ] && BASE=out/preview-base

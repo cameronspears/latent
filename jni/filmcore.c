@@ -1341,16 +1341,14 @@ static unsigned int to_argb(const unsigned char *p) {
     return 0xFF000000U | ((unsigned int)p[0] << 16) | ((unsigned int)p[1] << 8) | p[2];
 }
 
-/* Sony JPEGs carry a second, ~1616x1080 JPEG after the main image (an MPF "large thumbnail").
- * Decoding it instead of all 24 MP makes a screen-size preview many times faster. Returns the
- * preview's bytes (malloc'd) or NULL when the file has none. */
-static unsigned char *mpf_preview(FILE *f, unsigned long *len) {
-    const long HEAD = 128 * 1024;
-    unsigned char *h = (unsigned char *)malloc(HEAD), *out = NULL;
-    long n, i = 2, abs_off = 0;
+/* How much of a camera JPEG holds its EXIF (with Sony's makernote) and its MPF index: the A5100's APP1 is ~46 KB. */
+#define JPEG_HEAD (128 * 1024)
+
+/* Where the MPF preview is, from a JPEG's first n bytes h: its offset from the file's start and its size. 0, or -1
+ * when the file has none. */
+static int mpf_locate(const unsigned char *h, long n, long *at, unsigned long *len) {
+    long i = 2, abs_off = 0;
     unsigned long size = 0;
-    if (!h) return NULL;
-    n = (long)fread(h, 1, HEAD, f);
     while (n >= 4 && i + 4 <= n && h[i] == 0xFF && h[i + 1] != 0xDA) {
         long ln = (h[i + 2] << 8) | h[i + 3];
         if (h[i + 1] == 0xE2 && i + 4 + ln <= n && ln > 16 && memcmp(h + i + 4, "MPF\0", 4) == 0) {
@@ -1374,8 +1372,23 @@ static unsigned char *mpf_preview(FILE *f, unsigned long *len) {
         }
         i += 2 + ln;
     }
+    if (!abs_off || size < 1024 || size > 8 * 1024 * 1024) return -1;
+    *at = abs_off;
+    *len = size;
+    return 0;
+}
+
+/* Sony JPEGs carry a second, ~1616x1080 JPEG after the main image (an MPF "large thumbnail").
+ * Decoding it instead of all 24 MP makes a screen-size preview many times faster. Returns the
+ * preview's bytes (malloc'd) or NULL when the file has none. */
+static unsigned char *mpf_preview(FILE *f, unsigned long *len) {
+    unsigned char *h = (unsigned char *)malloc(JPEG_HEAD), *out = NULL;
+    long n, abs_off = 0;
+    unsigned long size = 0;
+    if (!h) return NULL;
+    n = (long)fread(h, 1, JPEG_HEAD, f);
+    if (mpf_locate(h, n, &abs_off, &size) != 0) { free(h); return NULL; }
     free(h);
-    if (!abs_off || size < 1024 || size > 8 * 1024 * 1024) return NULL;
     out = (unsigned char *)malloc(size);
     if (!out) return NULL;
     if (fseek(f, abs_off, SEEK_SET) != 0 || fread(out, 1, size, f) != size || out[0] != 0xFF || out[1] != 0xD8) {
@@ -1654,6 +1667,217 @@ int fl_preview(const char *in_path, const char *lut_path, const int *params, int
     grain_free(&G);
     out_wh[0] = ow;
     out_wh[1] = oh;
+    return 0;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* the focus check (v0.46.0): how sharp a photo just taken is where the camera focused            */
+/*
+ * The camera's lock means the lens said it got there; a third-party lens can say so and land off (docs/AUTOFOCUS.md).
+ * So once a photo is on the card, its own MPF preview (1616 x 1080 on the A5100) is decoded at half size, brightness
+ * only, and each cell of a 5 x 5 grid over it gets a score: at its strong edges (a local range over FC_MIN_RANGE in
+ * 5 x 5), the step to the next pixel over that range, which is high for a crisp edge and low for a soft one whatever
+ * the contrast, and of those the 98th percentile. The makernote says which cells the camera focused on. The caller
+ * judges (Focus.verdict); this only measures.
+ */
+#define FC_GRID 5
+#define FC_CELLS (FC_GRID * FC_GRID)
+#define FC_MIN_RANGE 12     /* a 5 x 5 window's max - min under this is no edge */
+#define FC_MIN_EDGES 100    /* a cell with fewer edge pixels gets no score */
+#define FC_BINS 256
+
+/*
+ * From a camera JPEG's first n bytes h: the exposure time in microseconds (0: not found), and the AF cells Sony's
+ * makernote lists as used (tag 0x201F: 4 bytes, a mask over the 5 x 5 grid row by row, bit k for cell k; inferred
+ * from the A5100's photos, docs/AUTOFOCUS.md), or -1 when there is no such tag.
+ */
+static void exif_focus(const unsigned char *h, long n, long *exposure_us, long *af_mask) {
+    long i = 2;
+    *exposure_us = 0;
+    *af_mask = -1;
+    while (i + 4 <= n && h[i] == 0xFF && h[i + 1] != 0xDA) {
+        long ln = (h[i + 2] << 8) | h[i + 3];
+        if (h[i + 1] == 0xE1 && ln > 16 && i + 2 + ln <= n && memcmp(h + i + 4, "Exif\0\0", 6) == 0) {
+            const unsigned char *t = h + i + 10;   /* the TIFF header: every offset counts from here */
+            unsigned long tl = (unsigned long)(ln - 8);
+            unsigned int ifd0, exif = 0, k, cnt;
+            int le;
+            if (t[0] != t[1] || (t[0] != 'I' && t[0] != 'M')) return;
+            le = t[0] == 'I';
+            ifd0 = rd32(t + 4, le);
+            if (ifd0 + 2 > tl) return;
+            cnt = rd16(t + ifd0, le);
+            for (k = 0; k < cnt && ifd0 + 2 + k * 12 + 12 <= tl; k++)
+                if (rd16(t + ifd0 + 2 + k * 12, le) == 0x8769) exif = rd32(t + ifd0 + 2 + k * 12 + 8, le);
+            if (!exif || exif + 2 > tl) return;
+            cnt = rd16(t + exif, le);
+            for (k = 0; k < cnt && exif + 2 + k * 12 + 12 <= tl; k++) {
+                const unsigned char *e = t + exif + 2 + k * 12;
+                unsigned int tag = rd16(e, le), type = rd16(e + 2, le), count = rd32(e + 4, le), off = rd32(e + 8, le);
+                if (tag == 0x829A && type == 5 && count == 1 && off + 8 <= tl) {   /* ExposureTime, a rational */
+                    unsigned long num = rd32(t + off, le), den = rd32(t + off + 4, le);
+                    if (den) *exposure_us = (long)(((unsigned long long)num * 1000000u + den / 2) / den);
+                } else if (tag == 0x927C && (type == 7 || type == 1) && count > 14 && off + 14 <= tl && off + count <= tl
+                           && memcmp(t + off, "SONY DSC \0\0\0", 12) == 0) {
+                    const unsigned char *m = t + off + 12;   /* the makernote's entries, their offsets also from t */
+                    unsigned int mc = rd16(m, le), j;
+                    for (j = 0; j < mc && off + 14 + j * 12 + 12 <= tl; j++) {
+                        const unsigned char *me = m + 2 + j * 12;
+                        unsigned int mt = rd16(me + 2, le);
+                        if (rd16(me, le) == 0x201F && (mt == 7 || mt == 1) && rd32(me + 4, le) == 4) {
+                            long v = (long)me[8] | (long)me[9] << 8 | (long)me[10] << 16 | (long)me[11] << 24;
+                            if (!(v & ~0x1FFFFFFL)) *af_mask = v;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        i += 2 + ln;
+    }
+}
+
+/*
+ * The cells' scores (0..1000, -1: too few edges) of a w x h brightness picture. Over W = w - 1 by H = h - 1 pixels
+ * (each with a step right and a step down): the window's max and min separably, five rows of the across pass in a
+ * ring; no divide in the loop (a reciprocal table: this ARM core has no divide instruction).
+ */
+static int focus_cells(const unsigned char *Y, int w, int h, int *score) {
+    const int W = w - 1, H = h - 1;
+    unsigned int *hist = (unsigned int *)calloc(FC_CELLS * FC_BINS, sizeof(unsigned int));
+    unsigned char *mx = (unsigned char *)malloc((size_t)5 * W), *mn = (unsigned char *)malloc((size_t)5 * W);
+    unsigned char *colcell = (unsigned char *)malloc((size_t)W);
+    unsigned int recip[256];
+    int x, y, k, r, made = 0;
+    if (!hist || !mx || !mn || !colcell || W < 10 || H < 10) { free(hist); free(mx); free(mn); free(colcell); return -1; }
+    for (k = 1; k < 256; k++) recip[k] = (65536u + k / 2) / (unsigned int)k;
+    recip[0] = 0;
+    for (k = 0; k < FC_GRID; k++) for (x = k * W / FC_GRID; x < (k + 1) * W / FC_GRID; x++) colcell[x] = (unsigned char)k;
+    for (r = 0; r < FC_GRID; r++) {
+        for (y = r * H / FC_GRID; y < (r + 1) * H / FC_GRID; y++) {
+            const unsigned char *row = Y + (size_t)y * w, *down = row + w;
+            const unsigned char *m0, *m1, *m2, *m3, *m4, *n0, *n1, *n2, *n3, *n4;
+            unsigned int *hc = hist + r * FC_GRID * FC_BINS;
+            int d;
+            /* the across pass for the rows this one needs (y - 2 .. y + 2, held at the edges), each made once */
+            for (; made <= y + 2 && made < H; made++) {
+                const unsigned char *s = Y + (size_t)made * w;
+                unsigned char *a = mx + (made % 5) * W, *b = mn + (made % 5) * W;
+                for (x = 0; x < W; x++) {
+                    int lo = x - 2 < 0 ? 0 : x - 2, hi = x + 2 >= W ? W - 1 : x + 2, j, vmax = s[lo], vmin = s[lo];
+                    for (j = lo + 1; j <= hi; j++) { int v = s[j]; if (v > vmax) vmax = v; if (v < vmin) vmin = v; }
+                    a[x] = (unsigned char)vmax;
+                    b[x] = (unsigned char)vmin;
+                }
+            }
+#define FC_ROW(d) (((y + (d) < 0 ? 0 : y + (d) >= H ? H - 1 : y + (d)) % 5) * W)
+            d = FC_ROW(-2); m0 = mx + d; n0 = mn + d;
+            d = FC_ROW(-1); m1 = mx + d; n1 = mn + d;
+            d = FC_ROW(0);  m2 = mx + d; n2 = mn + d;
+            d = FC_ROW(1);  m3 = mx + d; n3 = mn + d;
+            d = FC_ROW(2);  m4 = mx + d; n4 = mn + d;
+#undef FC_ROW
+            for (x = 0; x < W; x++) {
+                int vmax = m0[x], vmin = n0[x], rng, gx, gy, g, bin;
+                vmax = m1[x] > vmax ? m1[x] : vmax;
+                vmax = m2[x] > vmax ? m2[x] : vmax;
+                vmax = m3[x] > vmax ? m3[x] : vmax;
+                vmax = m4[x] > vmax ? m4[x] : vmax;
+                vmin = n1[x] < vmin ? n1[x] : vmin;
+                vmin = n2[x] < vmin ? n2[x] : vmin;
+                vmin = n3[x] < vmin ? n3[x] : vmin;
+                vmin = n4[x] < vmin ? n4[x] : vmin;
+                rng = vmax - vmin;
+                if (rng <= FC_MIN_RANGE) continue;
+                gx = row[x + 1] - row[x]; if (gx < 0) gx = -gx;
+                gy = down[x] - row[x]; if (gy < 0) gy = -gy;
+                g = gx > gy ? gx : gy;
+                if (!g) continue;
+                bin = (int)(((unsigned int)g * recip[rng]) >> 8);   /* g / rng in 256ths */
+                if (bin >= FC_BINS) bin = FC_BINS - 1;
+                hc[colcell[x] * FC_BINS + bin]++;
+            }
+        }
+    }
+    for (k = 0; k < FC_CELLS; k++) {
+        const unsigned int *hc = hist + k * FC_BINS;
+        unsigned long n = 0, cum = 0, want;
+        int b;
+        for (b = 0; b < FC_BINS; b++) n += hc[b];
+        score[k] = -1;
+        if (n <= FC_MIN_EDGES) continue;
+        want = (n * 98 + 99) / 100;   /* the 98th percentile */
+        for (b = 0; b < FC_BINS; b++) {
+            cum += hc[b];
+            if (cum >= want) { score[k] = (b * 2 + 1) * 1000 / (FC_BINS * 2); break; }
+        }
+    }
+    free(hist); free(mx); free(mn); free(colcell);
+    return 0;
+}
+
+int fl_focus_check(const char *path, int *out, char *err, int errlen) {
+    struct jpeg_decompress_struct d;
+    struct fl_jerr je;
+    FILE *f;
+    unsigned char *h, *volatile mp = NULL, *volatile Y = NULL;
+    long n, at = 0, exposure = 0, mask = -1, t0 = now_ms(), t1;
+    unsigned long size = 0;
+    int k, w, ht;
+    for (k = 0; k < FL_FC_COUNT; k++) out[k] = 0;
+    for (k = 0; k < FL_FC_CELLS; k++) out[k] = -1;
+    out[FL_FC_MASK] = -1;
+    f = fopen(path, "rb");
+    if (!f) { set_err(err, errlen, "cannot open %s", path); return -1; }
+    h = (unsigned char *)malloc(JPEG_HEAD);
+    if (!h) { fclose(f); set_err(err, errlen, "out of memory"); return -1; }
+    n = (long)fread(h, 1, JPEG_HEAD, f);
+    exif_focus(h, n, &exposure, &mask);
+    out[FL_FC_EXPOSURE] = (int)exposure;
+    out[FL_FC_MASK] = (int)mask;
+    if (mpf_locate(h, n, &at, &size) != 0) { free(h); fclose(f); set_err(err, errlen, "no preview in the file"); return -1; }
+    free(h);
+    mp = (unsigned char *)malloc(size);
+    if (!mp || fseek(f, at, SEEK_SET) != 0 || fread(mp, 1, size, f) != size || mp[0] != 0xFF || mp[1] != 0xD8) {
+        free(mp); fclose(f);
+        set_err(err, errlen, "the preview didn't read (%lu bytes at %ld)", size, at);
+        return -1;
+    }
+    fclose(f);
+    t1 = now_ms();
+    out[FL_FC_READ] = (int)(t1 - t0);
+    fl_jerr_init(&je);
+    d.err = &je.pub;
+    if (setjmp(je.jump)) {
+        set_err(err, errlen, "%s", je.msg);
+        jpeg_destroy_decompress(&d); free(mp); free(Y);
+        return -1;
+    }
+    jpeg_create_decompress(&d);
+    jpeg_mem_src(&d, mp, size);
+    jpeg_read_header(&d, TRUE);
+    d.out_color_space = JCS_GRAYSCALE;   /* Y alone: the chroma isn't transformed */
+    d.dct_method = JDCT_IFAST;
+    d.scale_num = 1;
+    d.scale_denom = d.image_width >= 1200 ? 2 : 1;   /* 1616 x 1080 -> 808 x 540 */
+    jpeg_start_decompress(&d);
+    w = (int)d.output_width;
+    ht = (int)d.output_height;
+    Y = (unsigned char *)malloc((size_t)w * ht);
+    if (!Y) longjmp(je.jump, 1);
+    while (d.output_scanline < d.output_height) {
+        JSAMPROW r = Y + (size_t)d.output_scanline * w;
+        jpeg_read_scanlines(&d, &r, 1);
+    }
+    jpeg_finish_decompress(&d);
+    jpeg_destroy_decompress(&d);
+    free(mp);
+    k = focus_cells(Y, w, ht, out);
+    free(Y);
+    if (k != 0) { set_err(err, errlen, "no memory to measure"); return -1; }
+    out[FL_FC_MEASURE] = (int)(now_ms() - t1);
+    out[FL_FC_W] = w;
+    out[FL_FC_H] = ht;
     return 0;
 }
 
@@ -2420,6 +2644,125 @@ static int still_matches(const int *sig) {
     return still;
 }
 
+/* ---- motion (v0.46.0): how far the picture moved between two frames, for the steady shutter. The look threads
+ * make frames side by side, so each keeps its frame's centre here under its number, and the UI thread pairs them
+ * (fl_motion). Only frames asked with FL_F_MOTION: about 12 KB copied, while the shutter may wait. */
+typedef struct { int seq, w, h, used; unsigned int age; unsigned char px[FL_MO_W * FL_MO_H]; } mo_slot;
+static mo_slot g_mo[FL_MO_SLOTS];
+static unsigned int g_mo_age;
+static pthread_mutex_t g_mo_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* The decoded frame's centre, brightness only, kept under seq (in the oldest slot, or seq's own). */
+static void motion_keep(const fl_frame_ctx *c, int seq) {
+    int w = c->sw < FL_MO_W ? c->sw : FL_MO_W, h = c->sh < FL_MO_H ? c->sh : FL_MO_H;
+    int x0 = (c->sw - w) / 2, y0 = (c->sh - h) / 2, x, y, k, pick = 0;
+    mo_slot *s;
+    if (w < 32 || h < 32) return;
+    pthread_mutex_lock(&g_mo_mu);
+    for (k = 0; k < FL_MO_SLOTS; k++) {
+        if (g_mo[k].used && g_mo[k].seq == seq) { pick = k; break; }
+        if (!g_mo[k].used || g_mo[k].age < g_mo[pick].age) pick = k;
+        if (!g_mo[pick].used) break;
+    }
+    s = &g_mo[pick];
+    s->seq = seq; s->w = w; s->h = h; s->used = 1; s->age = ++g_mo_age;
+    for (y = 0; y < h; y++) {
+        const unsigned char *row = c->rgb + ((size_t)(y0 + y) * c->sw + x0) * 3;
+        unsigned char *o = s->px + y * w;
+        for (x = 0; x < w; x++, row += 3)
+            o[x] = c->ycc ? row[0] : (unsigned char)((row[0] * 77 + row[1] * 150 + row[2] * 29) >> 8);
+    }
+    pthread_mutex_unlock(&g_mo_mu);
+}
+
+/* Sum of differences between a (at x, y) and b (at x + dx, y + dy) over the inner box, both w wide. */
+static unsigned long mo_sad(const unsigned char *a, const unsigned char *b, int w, int x0, int y0, int x1, int y1, int dx, int dy) {
+    unsigned long s = 0;
+    int x, y;
+    for (y = y0; y < y1; y++) {
+        const unsigned char *p = a + y * w, *q = b + (y + dy) * w + dx;
+        for (x = x0; x < x1; x++) { int d = p[x] - q[x]; s += (unsigned long)(d < 0 ? -d : d); }
+    }
+    return s;
+}
+
+/* Where (in sixteenths of a pixel) a fits sub-pixel between three sums: the parabola's lowest point, -8 .. 8. */
+static int mo_sub(unsigned long l, unsigned long m, unsigned long r) {
+    long den = (long)l + (long)r - 2 * (long)m, v;
+    if (den <= 0) return 0;
+    v = (16 * ((long)l - (long)r)) / (2 * den);
+    return v < -8 ? -8 : v > 8 ? 8 : (int)v;
+}
+
+#define MO_R 4      /* the coarse search, at half size: +-4 there, +-8 frame pixels (well beyond a hand's tremor a frame) */
+#define MO_FINE 12  /* the fine search's reach in frame pixels (its sums kept in a table over -MO_FINE .. MO_FINE) */
+
+/* The shift from a to b (w x h each): a coarse search at half size, then down the slope at full size from there, and
+ * a parabola through the best and its neighbours for the part of a pixel. */
+static void mo_shift(const unsigned char *a, const unsigned char *b, int w, int h, int *out) {
+    static unsigned char a2[(FL_MO_W / 2) * (FL_MO_H / 2)], b2[(FL_MO_W / 2) * (FL_MO_H / 2)];   /* under g_mo_mu */
+    static unsigned long fine[2 * MO_FINE + 1][2 * MO_FINE + 1];
+    const int w2 = w / 2, h2 = h / 2, M = 2 * MO_FINE / 2 + 2;   /* the fine sums' margin: the reach and a little */
+    int x, y, dx, dy, bx = 0, by = 0, step;
+    unsigned long best = (unsigned long)-1, detail = 0;
+    long n;
+    for (y = 0; y < h2; y++)
+        for (x = 0; x < w2; x++) {
+            const unsigned char *p = a + 2 * y * w + 2 * x, *q = b + 2 * y * w + 2 * x;
+            a2[y * w2 + x] = (unsigned char)((p[0] + p[1] + p[w] + p[w + 1] + 2) >> 2);
+            b2[y * w2 + x] = (unsigned char)((q[0] + q[1] + q[w] + q[w + 1] + 2) >> 2);
+        }
+    for (dy = -MO_R; dy <= MO_R; dy++)
+        for (dx = -MO_R; dx <= MO_R; dx++) {
+            unsigned long s = mo_sad(a2, b2, w2, MO_R, MO_R, w2 - MO_R, h2 - MO_R, dx, dy);
+            if (s < best) { best = s; bx = dx; by = dy; }
+        }
+    for (y = 0; y <= 2 * MO_FINE; y++) for (x = 0; x <= 2 * MO_FINE; x++) fine[y][x] = (unsigned long)-1;
+    bx *= 2; by *= 2;
+#define MO_AT(dx, dy) (fine[(dy) + MO_FINE][(dx) + MO_FINE] != (unsigned long)-1 ? fine[(dy) + MO_FINE][(dx) + MO_FINE] \
+        : (fine[(dy) + MO_FINE][(dx) + MO_FINE] = mo_sad(a, b, w, M, M, w - M, h - M, (dx), (dy))))
+    for (step = 0; step < 8; step++) {   /* down the slope, one pixel at a time, until the middle is lowest */
+        int nx = bx, ny = by;
+        unsigned long m = MO_AT(bx, by);
+        for (dy = -1; dy <= 1; dy++)
+            for (dx = -1; dx <= 1; dx++) {
+                int tx = bx + dx, ty = by + dy;
+                if (tx <= -MO_FINE || tx >= MO_FINE || ty <= -MO_FINE || ty >= MO_FINE) continue;
+                if (MO_AT(tx, ty) < m) { m = MO_AT(tx, ty); nx = tx; ny = ty; }
+            }
+        if (nx == bx && ny == by) break;
+        bx = nx; by = ny;
+    }
+    n = (long)(w - 2 * M) * (h - 2 * M);
+    out[FL_MO_DX] = bx * 16 + (bx > -MO_FINE && bx < MO_FINE ? mo_sub(MO_AT(bx - 1, by), MO_AT(bx, by), MO_AT(bx + 1, by)) : 0);
+    out[FL_MO_DY] = by * 16 + (by > -MO_FINE && by < MO_FINE ? mo_sub(MO_AT(bx, by - 1), MO_AT(bx, by), MO_AT(bx, by + 1)) : 0);
+    out[FL_MO_MISS] = n > 0 ? (int)(MO_AT(bx, by) * 16 / (unsigned long)n) : 0;
+#undef MO_AT
+    for (y = M; y < h - M; y++)
+        for (x = M; x < w - M; x++) {
+            int p = a[y * w + x], ex = p - a[y * w + x + 1], ey = p - a[(y + 1) * w + x];
+            detail += (unsigned long)(ex < 0 ? -ex : ex) + (unsigned long)(ey < 0 ? -ey : ey);
+        }
+    out[FL_MO_DETAIL] = n > 0 ? (int)(detail * 16 / (unsigned long)n) : 0;
+}
+
+int fl_motion(int seq_a, int seq_b, int *out) {
+    int k, ia = -1, ib = -1, rc = -1;
+    pthread_mutex_lock(&g_mo_mu);
+    for (k = 0; k < FL_MO_SLOTS; k++) {
+        if (!g_mo[k].used) continue;
+        if (g_mo[k].seq == seq_a) ia = k;
+        if (g_mo[k].seq == seq_b) ib = k;
+    }
+    if (ia >= 0 && ib >= 0 && g_mo[ia].w == g_mo[ib].w && g_mo[ia].h == g_mo[ib].h && g_mo[ia].w >= 2 * (MO_FINE + 2) + 8
+            && g_mo[ia].h >= 2 * (MO_FINE + 2) + 8) {
+        mo_shift(g_mo[ia].px, g_mo[ib].px, g_mo[ia].w, g_mo[ia].h, out);
+        rc = 0;
+    }
+    pthread_mutex_unlock(&g_mo_mu);
+    return rc;
+}
+
 /* ns a load, following a chain of pointers one cache line (32 bytes) apart in random order through 'kb' KB of
  * mem: each load waits for the last, so it shows how far the data is (level-1 cache, level 2, memory). */
 static unsigned char *volatile g_chase_end;
@@ -2523,6 +2866,7 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
         c->ycc = !(flags & FL_F_RGB) && c->film.Y.n;
         if (frame_decode(c, jpeg, len, max_w, max_h, !c->ycc, err, errlen) != 0) return -1;
         t = now_ms(); if (tm) tm[FL_TM_DECODE] = (int)(t - t0); t0 = t;
+        if (flags & FL_F_MOTION) motion_keep(c, seq);   /* before the still check: a still frame is a steady one too */
         frame_signature(c, info + FL_FI_SIG);
         if ((flags & FL_F_STILL) && still_matches(info + FL_FI_SIG)) {   /* the scene hasn't moved: nothing to compose */
             info[0] = c->sw;

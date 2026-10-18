@@ -10,7 +10,8 @@ import java.util.List;
  * doesn't show yet (Library.withShots), the exposure readout, and
  * (v0.45.0) when frames are asked for (FrameScheduler), the pace (Pacer), the store quiet, the /proc
  * readings, the catalogue's new pictures, the overlay's bands, and the presenter's state going out of date
- * (the film card and a note gone on time, frames or none).
+ * (the film card and a note gone on time, frames or none); (v0.46.0) where focus is drawn (Focus), the focus check's
+ * verdicts on the card's own scores, what the camera back says after it, and the steady shutter (Steady).
  *
  *   ViewfinderTest <empty dir>
  */
@@ -32,6 +33,10 @@ public class ViewfinderTest {
         presenterClears();
         tickClears();
         stages();
+        focusAreas();
+        focusVerdicts();
+        focusLater(new File(a[0]));
+        steady();
         System.out.println("ViewfinderTest: all passed");
     }
 
@@ -534,6 +539,125 @@ public class ViewfinderTest {
         check(Ui.evText(0).equals("0") && Ui.evText(1).equals("+1/3") && Ui.evText(-5).equals("\u20131 2/3") && Ui.evText(6).equals("+2"),
                 "exposure in words: " + Ui.evText(0) + " " + Ui.evText(1) + " " + Ui.evText(-5) + " " + Ui.evText(6));
         System.out.println("  ok  exposure compensation");
+    }
+
+    /** AF-01: the camera's AF cells and its focus area, as the viewfinder draws them. */
+    static void focusAreas() {
+        check(Focus.mask(new int[] { 8, 9, 13 }) == (1 << 7 | 1 << 8 | 1 << 12) && Focus.mask(new int[] { 0, 26, -1 }) == 0 && Focus.mask(null) == 0,
+                "the report's areas 1-25 are the mask's bits 0-24 (others left out)");
+        check(Focus.cells(1 << 7 | 1 << 8 | 1 << 12).equals("7 8 12") && Focus.cells(0).equals("none"), "cells in words: " + Focus.cells(1 << 7 | 1 << 8 | 1 << 12));
+        float[][] b = Focus.boxes(1 << 12 | 1 << 24);
+        check(b.length == 2 && Math.abs(b[0][0] - 0.44f) < 1e-4 && Math.abs(b[0][1] - 0.44f) < 1e-4 && Math.abs(b[0][2] - 0.12f) < 1e-4
+                && Math.abs(b[1][0] - 0.84f) < 1e-4 && Math.abs(b[1][1] - 0.84f) < 1e-4, "a cell's box: 60% of the cell, about its middle (the centre cell at 0.44)");
+        check(Focus.boxes(0) == null, "no cells, no boxes");
+        float[] z = Focus.areaBox("center", "midium", "-752", "361");
+        check(z != null && Math.abs(z[0] - 0.2f) < 1e-4 && Math.abs(z[1] - 0.2f) < 1e-4 && Math.abs(z[2] - 0.6f) < 1e-4 && Math.abs(z[3] - 0.6f) < 1e-4,
+                "Center: the middle 3 x 3 cells, 60% of the picture each way");
+        float[] m = Focus.areaBox("flex-spot", "midium", "0", "0");
+        check(m != null && Math.abs(m[0] - 0.4f) < 1e-4 && Math.abs(m[1] - 0.4f) < 1e-4 && Math.abs(m[2] - 0.2f) < 1e-4, "Flexible Spot M at 0, 0: one cell's size in the middle");
+        float[] f = Focus.areaBox("flex-spot", "small", "-752", "361");
+        check(f != null && Math.abs(f[0] + f[2] / 2 - 0.124f) < 0.01 && Math.abs(f[1] + f[3] / 2 - 0.68f) < 0.01 && f[2] < m[2],
+                "this camera's spot (-752, 361): left of and below the middle, smaller when small");
+        float[] e = Focus.areaBox("flex-spot", "large", "-1000", "1000");
+        check(e != null && e[0] == 0 && Math.abs(e[1] + e[3] - 1) < 1e-4, "a spot at the corner stays inside the picture");
+        check(Focus.areaBox("wide", "midium", "0", "0") == null && Focus.areaBox("flex-spot", "midium", "x", "0") == null && Focus.areaBox(null, null, null, null) == null,
+                "Wide, a point that isn't a number, nothing read: the usual bracket");
+    }
+
+    /** AF-02: the check's verdicts, on scores the camera's own photos gave (fltool focus, card of 2026-10-16). */
+    static void focusVerdicts() {
+        int[] p04627 = { 451, 408, 404, 408, 681, 603, 623, 658, 728, 662, 333, 314, 337, 326, 369, 306, 294, 306, 302, 349, 287, 306, 333, 314, 384 };
+        int[] p04702 = { 833, 775, 857, 833, 705, 755, 798, 841, 923, 650, 728, 794, 806, 849, 689, 705, 740, 732, 791, 369, 666, 572, 474, 357, 314 };
+        int[] p04608 = { 345, 333, 365, 376, 349, 333, 314, 376, 369, 353, 357, 408, 400, 365, 412, 400, 400, 400, 384, 419, 400, 419, 333, 412, 400 };
+        int[] p04626 = { 333, 392, 333, 353, 349, 376, 439, 396, 548, 638, 654, 662, 736, 556, 615, 564, -1, -1, 509, 517, -1, -1, 306, 365, 384 };
+        int[] p04664 = { 501, 443, 369, 400, 326, 646, 591, 392, 591, 533, 708, 544, 474, 724, 646, 705, 615, 666, 689, 712, 599, 615, 666, 599, 650 };
+        double s60 = 1 / 60.0;
+        check(Focus.verdict(p04627, 0x3000, s60) == Focus.MISSED, "04627, soft where it focused (cells 12, 13), sharp elsewhere: missed focus");
+        check(Focus.verdict(p04664, 0x80, s60) == Focus.MISSED, "04664: missed focus");
+        check(Focus.verdict(p04702, 0x23180, s60) == Focus.SHARP, "04702, sharp where it focused: sharp");
+        check(Focus.verdict(p04626, 0x20100, s60) == Focus.SHARP, "04626 (0.55, 0.74 of its best: the nearest pass on the card): sharp, the cell with no score left out");
+        check(Focus.verdict(p04608, 0x80, s60) == Focus.SOFT, "04608, soft everywhere at 1/60: not sharp");
+        check(Focus.verdict(p04608, 0x80, 1 / 8.0) == Focus.MOVED, "the same at 1/8: blurred, the camera moved");
+        check(Focus.verdict(p04608, 0, s60) == Focus.UNKNOWN && Focus.verdict(p04626, 1 << 16, s60) == Focus.UNKNOWN, "no cells, or only cells with no score: can't tell");
+        int[] out = new int[FilmCore.FC_COUNT];
+        System.arraycopy(p04627, 0, out, 0, 25);
+        out[FilmCore.FC_MASK] = 0x3000;
+        out[FilmCore.FC_EXPOSURE] = 125000;
+        check(Focus.verdictOf(out, 1 << 7, s60) == Focus.MISSED, "the photo's own cells before the lock's");
+        check(Focus.exposureOf(out, s60) == 0.125 && Focus.cellsOf(out, 1 << 7) == 0x3000, "the photo's own exposure before the lock's");
+        out[FilmCore.FC_MASK] = 0;
+        out[FilmCore.FC_EXPOSURE] = 0;
+        check(Focus.cellsOf(out, 1 << 7) == 1 << 7 && Focus.exposureOf(out, s60) == s60, "a photo with no cells and no exposure: the lock's");
+        String line = Focus.line("DSC04627.JPG", out, 0x3000, s60, Focus.MISSED);
+        check(line.contains("missed focus") && line.contains("cells 12 13 from the lock") && line.contains("there 0.34, best 0.73") && line.contains("1/60 s"),
+                "the log line: " + line);
+        check(Focus.words(Focus.MISSED).equals("Missed focus") && Focus.words(Focus.SHARP).equals("") && Focus.words(Focus.UNKNOWN).equals(""),
+                "the viewfinder says only soft ones");
+    }
+
+    /** AF-03: photos the viewfinder couldn't read are checked after the restart: TOCHECK.TXT, and what the camera back says. */
+    static void focusLater(File card) throws Exception {
+        List<String> lines = new ArrayList<String>();
+        lines.add(Focus.pendingLine("/mnt/sdcard/DCIM/100MSDCF/DSC04709.JPG", 0x3000, 1 / 60.0));
+        lines.add(Focus.pendingLine("/mnt/sdcard/DCIM/100MSDCF/DSC04710.JPG", 0, 0.125));
+        Focus.addPending(card, lines);
+        Focus.addPending(card, java.util.Collections.singletonList("a line that isn't one"));
+        List<Focus.Waiting> w = Focus.takePending(card);
+        check(w.size() == 2 && w.get(0).path.endsWith("DSC04709.JPG") && w.get(0).reportMask == 0x3000 && Math.abs(w.get(0).exposure - 1 / 60.0) < 1e-6
+                && w.get(1).reportMask == 0 && w.get(1).exposure == 0.125, "TOCHECK.TXT: each photo, its lock's cells and speed, back as written (a bad line skipped)");
+        check(!Focus.pendingFile(card).exists() && Focus.takePending(card).isEmpty(), "taken once: the file gone, nothing the second time");
+        List<int[]> soft = new ArrayList<int[]>();
+        soft.add(new int[] { 9, Focus.MISSED });
+        check(Focus.summary(soft).equals("Frame 9: missed focus"), "one: " + Focus.summary(soft));
+        soft.add(0, new int[] { 7, Focus.MISSED });
+        check(Focus.summary(soft).equals("Frames 7 and 9: missed focus"), "two, one reason: " + Focus.summary(soft));
+        soft.add(0, new int[] { 4, Focus.MOVED });
+        check(Focus.summary(soft).equals("Frames 4, 7 and 9 came out soft"), "three, two reasons: " + Focus.summary(soft));
+        List<int[]> moved = new ArrayList<int[]>();
+        moved.add(new int[] { 12, Focus.MOVED });
+        check(Focus.summary(moved).equals("Frame 12: blurred, the camera moved"), "moved: " + Focus.summary(moved));
+        List<int[]> unknown = new ArrayList<int[]>();
+        unknown.add(new int[] { 0, Focus.SOFT });
+        check(Focus.summary(unknown).equals("A photo just taken: not sharp") && Focus.summary(new ArrayList<int[]>()).equals(""),
+                "not one of the roll's frames: " + Focus.summary(unknown));
+    }
+
+    /** AF-04: the steady shutter: slower than 1/30 a press waits for a still frame, at most Steady.MAX_MS. */
+    static void steady() {
+        check(!Steady.wanted(1 / 60.0) && !Steady.wanted(1 / 30.0) && Steady.wanted(1 / 25.0) && Steady.wanted(0.5) && !Steady.wanted(0),
+                "it waits only slower than 1/30 (and not when the speed isn't known)");
+        double scale = Viewfinder.PHOTO_W / 320.0;
+        Steady s = new Steady();
+        s.begin(1000, 1 / 25.0, scale);
+        check(Math.abs(s.aim() - Steady.STEADY_PX) < 1e-9, "at 1/25 it aims under " + Steady.STEADY_PX + " px of blur");
+        check(!s.frame(2, 1, 70, 200) && s.waiting && s.lastBlur > 20, "the press's jolt (2 px a frame): " + Math.round(s.lastBlur) + " px of blur, it waits");
+        check(s.frame(0.2, 0.1, 70, 200) && !s.waiting, "a frame moving 0.2 px: " + String.format(java.util.Locale.US, "%.1f", s.lastBlur) + " px, taken");
+        check(!s.frame(0, 0, 70, 200) && !s.due(5000), "once taken, nothing more");
+        Steady d = new Steady();
+        d.begin(1000, 1 / 8.0, scale);
+        check(d.aim() > Steady.STEADY_PX, "at 1/8 it aims at what a frame can tell (" + String.format(java.util.Locale.US, "%.1f", d.aim()) + " px)");
+        check(!d.frame(0, 0, 70, Steady.DETAIL_MIN - 1) && d.judged == 0 && d.waiting, "a frame too plain to match isn't judged");
+        check(!d.due(1000 + Steady.BLIND_MS - 1) && d.due(1000 + Steady.BLIND_MS) && !d.waiting, "nothing judged: taken after " + Steady.BLIND_MS + " ms, the jolt given time");
+        Steady c = new Steady();
+        c.begin(1000, 1 / 8.0, scale);
+        c.frame(1, 0, 70, 200);
+        check(c.judged == 1 && !c.due(1000 + Steady.BLIND_MS) && !c.due(1000 + Steady.MAX_MS - 1) && c.due(1000 + Steady.MAX_MS),
+                "a camera never still: taken at " + Steady.MAX_MS + " ms anyway");
+        check(!c.frame(0, 0, 0, 200) && !c.frame(0, 0, -5, 200), "no time between two frames: nothing judged");
+        c.begin(0, 1 / 8.0, scale);
+        c.cancel();
+        check(!c.waiting && !c.due(10000), "dropped (hidden or closing): it never takes it");
+        // the button: let go while a slow shot waits, and the picture is still taken (Release keeps shooting)
+        Cam cam = new Cam();
+        Release r = new Release(cam, true);
+        r.halfDown();
+        r.focused(true);
+        r.fullDown();
+        check(r.shooting && cam.take().endsWith("S"), "a full press on a lock: the picture asked for (the steady wait is inside it)");
+        r.halfUp();
+        check(r.shooting && cam.take().equals(""), "let go while it waits: still shooting, nothing cancelled");
+        r.shot(true);
+        check(!r.shooting && r.state == Release.READY, "taken: ready again");
     }
 
     static void check(boolean ok, String what) {

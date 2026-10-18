@@ -105,6 +105,10 @@ public class RenderScreens {
         render(s, "2-home-fresh-toast");
         s.toast = ""; s.readyIn = 4; s.readyTotal = 6;
         render(s, "2b-home-settling");
+        // v0.46.0: back from the viewfinder, the photos it couldn't read checked, a soft one named
+        UiState soft = state();
+        soft.film = portra; soft.rollNumber = 5; soft.exposed = 9; soft.length = 24; soft.toast = "Frame 9: missed focus";
+        render(soft, "2d-home-frame-missed-focus");
         s.readyIn = 0;
         render(s, "2c-home-getting-ready");
         s = state();
@@ -174,8 +178,29 @@ public class RenderScreens {
         s.afState = 1; s.afLamp = true; s.shutter = "1/60"; s.aperture = "F3.5"; s.iso = "3200"; s.isoAuto = true;
         render(s, "8b-vf-focusing");
         s.afState = 2; s.afLamp = false;
-        s.afAreas = new float[][] { { 0.44f, 0.40f, 0.05f, 0.075f }, { 0.50f, 0.40f, 0.05f, 0.075f }, { 0.44f, 0.48f, 0.05f, 0.075f }, { 0.56f, 0.52f, 0.05f, 0.075f } };
+        s.afAreas = Focus.boxes(1 << 12 | 1 << 13);   // the cells the camera named (v0.46.0): the storefronts
         render(s, "8c-vf-locked");
+        // v0.46.0: the bracket where the camera's focus area is: its Center zone, its Flexible Spot; a slow shot waiting
+        s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
+        s.afBox = Focus.areaBox("center", "midium", "0", "0");
+        render(s, "8ca-vf-center-zone");
+        s.afState = 1; s.afLamp = true;
+        render(s, "8cb-vf-center-zone-focusing");
+        s.afState = 2; s.afLamp = false; s.afAreas = Focus.boxes(1 << 7 | 1 << 8);
+        render(s, "8cc-vf-center-zone-locked");
+        s = vf(six, 2, img(samples, "HOUSE-CLASSNEG.png"));
+        s.afBox = Focus.areaBox("flex-spot", "midium", "-500", "-300");
+        render(s, "8cd-vf-flexible-spot");
+        s.afBox = Focus.areaBox("flex-spot", "small", "-752", "361"); s.afState = 3; s.afNote = "Can't focus";
+        render(s, "8ce-vf-flexible-spot-low");
+        s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
+        s.afBox = Focus.areaBox("center", "midium", "0", "0"); s.afState = 2; s.afAreas = Focus.boxes(1 << 12);
+        s.steadying = true; s.shutterSlow = true; s.shutter = "1/8"; s.aperture = "F3.8"; s.iso = "6400"; s.isoAuto = true;
+        render(s, "8cf-vf-hold-still");
+        s = vf(six, 2, img(samples, "STREET-CLASSNEG.png"));
+        s.exposed = 10; s.printImage = img(samples, "HOUSE-CLASSNEG.png"); s.printProgress = 0.8f; s.developing = 1;
+        s.printSoft = true; s.vfNote = "Missed focus";
+        render(s, "8cg-vf-print-missed-focus");
         s = vf(six, 2, img(samples, "PEOPLE-CLASSNEG.png"));
         s.afState = 3; s.afNote = "Too dark to focus"; s.shutter = "1/30"; s.aperture = "F3.5"; s.iso = "6400"; s.isoAuto = true; s.ev = -2; s.afLamp = true;
         render(s, "8d-vf-cant-focus");

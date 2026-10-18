@@ -303,3 +303,30 @@ JNIEXPORT jstring JNICALL Java_com_latent_camera_FilmCore_helperNote(JNIEnv *env
     fl_last_threads(note, sizeof note);
     return (*env)->NewStringUTF(env, note);
 }
+
+/* The focus check (v0.46.0): out[FL_FC_COUNT]. A look thread asks, once a photo is on the card. 0, or -1 (lastError). */
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_focusCheck(JNIEnv *env, jclass cls, jstring jpath, jintArray jout) {
+    char err[ERR_LEN];
+    int out[FL_FC_COUNT], rc;
+    const char *path;
+    (void)cls;
+    if (!jpath || !jout || (*env)->GetArrayLength(env, jout) < FL_FC_COUNT) { set_error("bad focus check buffers"); return -1; }
+    path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    if (!path) return -1;
+    err[0] = 0;
+    rc = fl_focus_check(path, out, err, sizeof err);
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    (*env)->SetIntArrayRegion(env, jout, 0, FL_FC_COUNT, (const jint *)out);   /* the mask and exposure even on failure */
+    if (rc != 0) set_error(err);
+    return rc;
+}
+
+/* How far the picture moved from frame a to frame b (both made with F_MOTION): out[FL_MO_COUNT]. 0, or -1. */
+JNIEXPORT jint JNICALL Java_com_latent_camera_FilmCore_motion(JNIEnv *env, jclass cls, jint a, jint b, jintArray jout) {
+    int out[FL_MO_COUNT], rc;
+    (void)cls;
+    if (!jout || (*env)->GetArrayLength(env, jout) < FL_MO_COUNT) return -1;
+    rc = fl_motion(a, b, out);
+    if (rc == 0) (*env)->SetIntArrayRegion(env, jout, 0, FL_MO_COUNT, (const jint *)out);
+    return rc;
+}

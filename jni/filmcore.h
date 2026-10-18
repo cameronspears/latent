@@ -73,6 +73,7 @@ typedef struct fl_frame_ctx fl_frame_ctx;
 #define FL_F_HIST 2
 #define FL_F_TEMPORAL 4
 #define FL_F_STILL 8   /* after decoding, stop (return 1) when the signature is within the still scene's (fl_set_still_ref) */
+/* FL_F_MOTION 16: keep the frame's centre for fl_motion (below) */
 #define FL_F_REFERENCE (1 << 30)   /* host test builds only (FL_FRAME_REFERENCE): v0.44.1's composer, to compare with */
 #define FL_FMT_565 0
 #define FL_FMT_4444 1
@@ -97,6 +98,38 @@ int fl_frame(fl_frame_ctx *c, const unsigned char *jpeg, unsigned long len, cons
 /* The still scene FL_F_STILL compares with: sig (FL_FI_SIG_N cells, as fl_frame writes them), and how far a cell may
  * move (0..255) and still count as still; sig NULL forgets it. Any thread (locked). */
 void fl_set_still_ref(const int *sig, int threshold);
+
+/* FL_F_MOTION (v0.46.0): fl_frame keeps the centre of the decoded frame's brightness (up to FL_MO_W x FL_MO_H, the
+ * last FL_MO_SLOTS frames) under seq, and fl_motion measures how far the picture moved from frame seq_a to seq_b:
+ * out[FL_MO_DX], out[FL_MO_DY] in sixteenths of a frame pixel (the scene's own movement: + is right and down),
+ * out[FL_MO_MISS] the mean difference left at the best match and out[FL_MO_DETAIL] the mean step between neighbours
+ * (both x 16: a match is only as good as the detail it has to go on). 0, or -1 when either frame isn't kept or
+ * they differ in size. Any thread (locked). */
+#define FL_F_MOTION 16
+#define FL_MO_W 128
+#define FL_MO_H 96
+#define FL_MO_SLOTS 8
+#define FL_MO_DX 0
+#define FL_MO_DY 1
+#define FL_MO_MISS 2
+#define FL_MO_DETAIL 3
+#define FL_MO_COUNT 4
+int fl_motion(int seq_a, int seq_b, int *out);
+
+/* The focus check (v0.46.0): a camera JPEG's MPF preview decoded at half size, brightness only, and each cell of a
+ * 5 x 5 grid over it scored for sharpness: out[0..24] row by row, 0..1000 (-1: too few edges to tell), out[FL_FC_MASK]
+ * the AF cells Sony's makernote lists (bit k for cell k; -1: no such tag), out[FL_FC_EXPOSURE] the exposure time in
+ * microseconds from EXIF (0: none), the ms reading the file and measuring, the size measured. 0, or -1 (no preview,
+ * a file cut short). */
+#define FL_FC_CELLS 25
+#define FL_FC_MASK 25
+#define FL_FC_EXPOSURE 26
+#define FL_FC_READ 27
+#define FL_FC_MEASURE 28
+#define FL_FC_W 29
+#define FL_FC_H 30
+#define FL_FC_COUNT 31
+int fl_focus_check(const char *path, int *out, char *err, int errlen);
 /* This core's and its memory's speed, as a line of text for the log (ending with a load chased through 8..256 KB:
  * the caches); px: a screen bitmap's pixels to fill too, or NULL. */
 int fl_probe(unsigned char *px, int bytes, char *out, int len);

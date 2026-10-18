@@ -18,12 +18,14 @@ without a trip to the camera's Playback.
 *The screens as Latent draws them, rendered on a Mac from the same code the camera runs
 (`tools/readme-images.sh`). The photos in them are the test photos credited below.*
 
-Status: **v0.45.0**. v0.44.1 is the last version run on the A5100: rolls (12, 24, 36 or ∞), Latent's
+Status: **v0.46.0**. v0.44.1 is the last version run on the A5100: rolls (12, 24, 36 or ∞), Latent's
 own viewfinder with the film look live, the darkroom into the camera roll on three cores, negatives
 and the six looks all work there. v0.45.0 is lighter (no Lab, no settings, no camera tests) and adds
-Photos, a faster viewfinder and a screen that saves the battery. It's tested on a Mac, not yet on
-the camera, so its speed and battery figures below are estimates until the camera's logs confirm
-them. See `docs/HANDOVER.md` for where things stand.
+Photos, a faster viewfinder and a screen that saves the battery. v0.46.0 adds smarter focus: the
+viewfinder shows where the camera really focuses, a slow shot waits for the camera to hold still,
+and every photo is checked for focus once it's on the card (`docs/AUTOFOCUS.md`). Both are tested on
+a Mac, not yet on the camera, so their speed and battery figures below are estimates until the
+camera's logs confirm them. See `docs/HANDOVER.md` for where things stand.
 
 ## Install (about 2 minutes)
 
@@ -68,10 +70,15 @@ exposure scale when it isn't at 0. The picture is 3:2, so the 16:9 panel leaves 
 side. The left bar shows the focus mode and area, the right one how many photos are left on the
 card (and the AF light, when it's on). The foot of each bar names the key beside it.
 
-- **Half-press** focuses. The bracket tightens while it searches, snaps green on a lock (with a
-  green dot by the exposure), and turns amber when it can't lock.
+- **Half-press** focuses. The bracket stands where the camera's focus area is: on Center, the middle
+  of the picture the camera chooses from (about 60% of it each way); on Flexible Spot, the spot where
+  you put it in the camera's menu; on Wide or Zone, a bracket in the middle. It tightens while it
+  searches, and on a lock the areas the camera actually focused on turn green (with a green dot by the
+  exposure). It turns amber when it can't lock.
 - **Full press** takes the picture once focus has locked, as AF-S does. The print develops in the
-  corner.
+  corner. Slower than 1/30 the shutter speed in the foot is amber, and a full press waits for the
+  camera to hold still ("Hold still", at most 0.6 s): the live view shows when the jolt of the press
+  has settled, and the picture is taken then. Letting go doesn't cancel it.
 - **The wheel** (or LEFT / RIGHT) changes the film. On an ∞ roll it's from this frame on, and each
   frame keeps the film it was shot in. A roll of 12, 24 or 36 is one film: it can change only until
   the first frame, and after that the wheel shows the film's card.
@@ -108,6 +115,16 @@ estimated half to three quarters of the work, so expect more, up to the 19 a sec
 sends; `LATENT/VIEWFIND.TXT` will say. When the camera is set down and nothing moves (9 seconds
 untouched, 2 seconds still), the viewfinder only checks the scene about four times a second and
 redraws it once a second. Any key, or anything moving, and it's back to full rate at once.
+
+**Focus check.** The camera's "in focus" means the lens said it got there, and a lens can say so and
+land off. So each photo is checked once it's on the card: the camera's own preview inside the JPEG,
+the areas the camera focused on against the rest of the frame. The camera doesn't let Latent read a
+photo it has just taken while the viewfinder has it, so the check runs when you leave the viewfinder
+(Latent's restart), and the camera back names a soft one: "Frame 9: missed focus" (sharp somewhere
+else), "Frame 9: blurred, the camera moved" (soft everywhere, slower than 1/30), or "Frame 9: not
+sharp". A sharp photo says nothing. Nothing is thrown away: the frame stays on the roll, as on film.
+Every check goes into `LATENT/DEVELOP.TXT`. (If the camera ever does let Latent read a photo in the
+viewfinder, the print in the corner turns amber with "Missed focus" at once.)
 
 **Develop.**
 - A finished roll develops by itself as soon as you open Latent again.
@@ -366,6 +383,13 @@ when it closes.
 
 ## Known limits, and what the camera hasn't confirmed yet
 
+- **Focus (v0.46.0):** where the camera's 25 AF areas lie on the picture is worked out from its own
+  photos (a 5 x 5 grid over the whole picture), and Flexible Spot's place and sizes are a reading of
+  numbers the camera hasn't explained; the first roll shows whether the boxes land on what it focused
+  on (`VIEWFIND.TXT` logs the camera's numbers). The focus check's limits come from one lens (the
+  TTArtisan 24mm f/3.8) and 61 photos, and each check should take about a second on the camera
+  (estimated). The steady shutter's measure is good to a tenth of a pixel on the Mac; how still a
+  hand reads at 320 px on the camera is to be seen.
 - **Darkroom speed:** a frame develops into the camera roll in about 6–7 s (v0.44, measured), down
   from about 19 s in v0.11. v0.45.0 prefetches the look's rows and overlaps Sony's 300 ms settle
   after each save with finding the new photo: an estimated 0.2–0.5 s less a frame, to be measured.
