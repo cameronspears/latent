@@ -1025,8 +1025,8 @@ final class Ui {
      * originals are still being filed (until then, leaving or switching to USB leaves an original for next time).
      */
     private static String photosCount(UiState s) {
-        if (s.filingLeft > 0) return "Filing " + s.filingLeft + (s.filingLeft == 1 ? " negative…" : " negatives…");
-        return (s.photoDate.length() > 0 ? s.photoDate + "  ·  " : "") + s.frameNumber + " of " + s.frameOf;
+        if (s.filingLeft > 0) return "Filing " + s.filingLeft + (s.filingLeft == 1 ? " negative\u2026" : " negatives\u2026");
+        return (s.photoDate.length() > 0 ? s.photoDate + "  \u00b7  " : "") + s.frameNumber + " of " + s.frameOf;
     }
 
     /**
@@ -1057,10 +1057,10 @@ final class Ui {
                 : s.viewMoves ? new String[] { "arrows", "Move", "centre", "Fit", "menu", "Photos" } : new String[] { "centre", "Fit", "menu", "Photos" });
         UiState.Film f = s.film;
         if (s.viewZoom || f == null) return;   // at 100%: the keys alone, over the picture
-        String when = s.photoDate + (s.photoDate.length() > 0 && s.photoExposure.length() > 0 ? "  ·  " : "") + s.photoExposure;
+        String when = s.photoDate + (s.photoDate.length() > 0 && s.photoExposure.length() > 0 ? "  \u00b7  " : "") + s.photoExposure;
         float y = when.length() > 0 ? HINT_Y - 26 : HINT_Y;
         canister(g, f, L, y - 15, 0.8f, true);
-        String what = f.title + (f.iso.length() > 0 ? " " + f.iso : "") + "  ·  Roll " + s.rollNumber + "  ·  Frame " + s.frameNumber;
+        String what = f.title + (f.iso.length() > 0 ? " " + f.iso : "") + "  \u00b7  Roll " + s.rollNumber + "  \u00b7  Frame " + s.frameNumber;
         g.text(what, L + 22, y, Gfx.MEDIUM, T_SECOND, INK, Gfx.LEFT, 0);
         if (when.length() > 0) g.text(when, L, HINT_Y, Gfx.REGULAR, T_SECOND, INK2, Gfx.LEFT, 0);
     }

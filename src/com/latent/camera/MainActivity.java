@@ -2321,7 +2321,7 @@ public class MainActivity extends Activity {
         Bitmap img = crop ? zoomBitmap : viewImage();
         s.viewImage = img;
         s.viewCrop = crop;
-        s.viewNote = img != null ? "" : viewFailed.contains(photoSel) ? "This photo can't be shown" : "Developing preview…";
+        s.viewNote = img != null ? "" : viewFailed.contains(photoSel) ? "This photo can't be shown" : "Developing preview\u2026";
         s.viewCaption = viewCaption;
         s.viewZoom = zoom;
         s.viewMoves = zoom && !zoomFixed;
