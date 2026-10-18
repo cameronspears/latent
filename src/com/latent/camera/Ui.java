@@ -1020,7 +1020,10 @@ final class Ui {
         hintBar(g, s, INK2, new String[] { "wheel", "Frame", "updown", "Row" }, new String[] { "centre", "View", "menu", "Back" });
     }
 
-    /** The sheet's top right: when the chosen frame was taken and which of its roll's frames it is, or its roll's filing. */
+    /**
+     * The sheet's top right: when the chosen frame was taken and which of its roll's frames it is; or that its roll's
+     * originals are still being filed (until then, leaving or switching to USB leaves an original for next time).
+     */
     private static String photosCount(UiState s) {
         if (s.filingLeft > 0) return "Filing " + s.filingLeft + (s.filingLeft == 1 ? " negative…" : " negatives…");
         return (s.photoDate.length() > 0 ? s.photoDate + "  ·  " : "") + s.frameNumber + " of " + s.frameOf;

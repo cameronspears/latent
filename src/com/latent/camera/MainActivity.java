@@ -2212,8 +2212,10 @@ public class MainActivity extends Activity {
                 Bitmap b;
                 try {
                     b = crop(f, dx, dy, w, ZOOM_H, size);
+                    if (b == null) devLog("Photos: " + f.getName() + " at 100%: " + (dx == 0 && dy == 0 ? FilmCore.lastError() : "no picture"));
                 } catch (Throwable e) {   // no memory, no region decoder on this camera, a photo it can't read: stays as it is
                     b = null;
+                    devLog("Photos: " + f.getName() + " at 100%: " + Probe.why(e));
                 }
                 final Bitmap made = b;
                 ui.post(new Runnable() { public void run() { zoomLanded(gen, made, dx, dy, size[0], size[1]); } });
@@ -2239,7 +2241,10 @@ public class MainActivity extends Activity {
         }
         if (loupe == null || !loupe.file.equals(f)) {
             closeLoupe();
+            long t0 = SystemClock.uptimeMillis();
             loupe = new Loupe(f);
+            // what the first move at 100% costs on the camera (the region decoder reads the whole photo through once)
+            devLog("Photos: " + f.getName() + " opened for 100% in " + (SystemClock.uptimeMillis() - t0) + " ms");
         }
         int pw = loupe.width(), ph = loupe.height(), cw = Math.min(w, pw), ch = Math.min(h, ph);
         size[0] = pw;
