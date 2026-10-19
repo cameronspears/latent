@@ -139,4 +139,9 @@ final class UiState implements Cloneable {
 
     // ---- the viewfinder's MENU (v0.45.0, the review's fixes)
     boolean menuDevelops;              // MENU restarts Latent and the pictures develop (an endless roll, or a roll they finished): "Develop", else "Back"
+
+    // ---- Exit Latent (v0.48.0): your camera settings back, then the camera's own shooting
+    int leavingIn = -1;                // seconds until the camera's own mode (0: your settings going back now); -1 not leaving
+    int leavingTotal;                  // ... of this many seconds in all
+    String leavingNote = "";           // what came back ("A2 \u00b7 M2, contrast +1, ..."), or "" when nothing needed to
 }

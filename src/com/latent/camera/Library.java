@@ -57,6 +57,56 @@ final class Library {
         return out;
     }
 
+    /**
+     * Exit Latent (v0.48.0): the highest photo number on the card as you leave, in LATENT/AWAY.TXT. Photos taken in the
+     * camera's own mode after it are yours, not a roll's (settleAway).
+     */
+    static void markAway(File card, int highest) throws IOException {
+        FileOutputStream o = new FileOutputStream(new File(home(card), "AWAY.TXT"));
+        try { o.write((highest + "\r\n").getBytes("UTF-8")); } finally { o.close(); }
+    }
+
+    /** Exit Latent called off (MENU: staying in Latent): what's shot from now on is Latent's again. */
+    static void clearAway(File card) {
+        new File(home(card), "AWAY.TXT").delete();
+    }
+
+    /**
+     * Back in Latent after Exit Latent: every photo numbered above AWAY.TXT's (shot in the camera's own mode, with your
+     * settings) goes into IGNORE.TXT, so no roll takes it, then AWAY.TXT goes. Card read, before the rolls collect their
+     * photos. Returns a line for DEVELOP.TXT, or null when there was nothing to do.
+     */
+    static String settleAway(File card, List<File> listed) {
+        File away = new File(home(card), "AWAY.TXT");
+        if (!away.exists()) return null;
+        int mark;
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(away));
+            try { mark = Integer.parseInt(r.readLine().trim()); } finally { r.close(); }
+        } catch (Exception e) {
+            away.delete();   // unreadable: nothing kept off (they join the roll, as before v0.48.0)
+            return "exit: AWAY.TXT unreadable (" + e.getMessage() + "); removed";
+        }
+        java.util.Set<String> skip = ignored(card);
+        StringBuilder add = new StringBuilder();
+        int n = 0;
+        for (File p : listed) {
+            if (Roll.number(p) <= mark || skip.contains(key(p))) continue;
+            add.append(key(p)).append("\r\n");
+            n++;
+        }
+        try {
+            if (n > 0) {
+                FileOutputStream o = new FileOutputStream(new File(home(card), "IGNORE.TXT"), true);
+                try { o.write(add.toString().getBytes("UTF-8")); } finally { o.close(); }
+            }
+        } catch (IOException e) {
+            return "exit: photos shot since Exit not kept off the rolls (" + e.getMessage() + "); AWAY.TXT kept";
+        }
+        away.delete();
+        return "exit: " + n + " photo(s) shot in the camera's own mode since Exit Latent, kept off the rolls";
+    }
+
     static String key(File photo) {
         return (photo.getParentFile().getName() + "/" + photo.getName()).toUpperCase(Locale.US);
     }

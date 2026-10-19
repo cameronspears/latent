@@ -35,6 +35,7 @@ public final class Relaunch extends Activity {
         // as the screen before and after it, so the restart doesn't show
         final Intent in = getIntent();
         final boolean develop = "develop".equals(in.getStringExtra(EXTRA_WHY));
+        final boolean exit = "exit".equals(in.getStringExtra(EXTRA_WHY));   // Exit Latent: its screen, as before and after
         if (develop) {   // the darkroom's light, as before and after
             light.work(true, SystemClock.uptimeMillis());
             applyLight();
@@ -50,6 +51,7 @@ public final class Relaunch extends Activity {
                 s.width = logical;
                 s.mode = develop ? UiState.DARKROOM : UiState.BACK;
                 s.battery = in.getIntExtra(EXTRA_BATTERY, -1);
+                if (exit) s.leavingIn = 0;   // "Putting your camera settings back…"
                 if (develop) {
                     s.devPreparing = true;
                     s.devTotal = Math.max(1, in.getIntExtra(EXTRA_TOTAL, 1));
@@ -66,7 +68,7 @@ public final class Relaunch extends Activity {
                 c.save();
                 c.scale(getWidth() / logical, getHeight() / 480f);
                 gfx.begin(c);
-                if (develop) Ui.draw(gfx, s); else c.drawColor(0xFF000000);
+                if (develop || exit) Ui.draw(gfx, s); else c.drawColor(0xFF000000);
                 c.restore();
             }
         };

@@ -4,6 +4,9 @@ import java.io.File;
 
 /** Mac test of the neutral switch: the real native bridge against tools/fakeosal.c's stand-in settings service. */
 public class SettingsTest {
+    static volatile boolean front = true;   // Latent in front, the camera not opened here: the gate MainActivity passes
+    static final NeutralSettings.Gate GATE = new NeutralSettings.Gate() { public boolean mayWrite() { return front; } };
+
     public static void main(String[] a) throws Exception {
         File card = new File(a[0]);
         new File(card, "LATENT").mkdirs();
@@ -22,100 +25,160 @@ public class SettingsTest {
                     && CameraSettings.write(NeutralSettings.IDS[i], NeutralSettings.HI[i] + 1) == -2000;
         check(ranges, "NeutralSettings.LO / HI are the native fence's ranges");
 
+        // on the way to shooting with no note yet: yours kept, then neutral (as apply)
         StringBuilder log = new StringBuilder();
         NeutralSettings ns = new NeutralSettings(card, log);
-        check(ns.apply() == null && ns.active(), "neutral applied, note kept: " + log.toString().replace("\r\n", " | "));
-        check(ns.yoursSummary().equals("A2 · M2, contrast +1, saturation +1, DRO Auto"), "summary in the menus' words: " + ns.yoursSummary());
-        int[] ids = NeutralSettings.IDS;
-        boolean neutral = true;
-        for (int i = 0; i < ids.length; i++) neutral &= v(ids[i]) == NeutralSettings.NEUTRAL[i];
-        check(neutral, "every switched setting reads neutral");
-        int before = log.length();
-        check(ns.apply() == null && log.length() == before, "applying again changes nothing");
-
-        // check (v0.46.1): read back once a visit, reads only
         File note = new File(card, "LATENT/NEUTRAL.TXT"), fakeLog = new File(System.getenv("FAKE_LOG"));
-        String noted = read(note);
+        check(ns.neutralize(GATE) == null && ns.active(), "neutral set, your settings kept: " + log.toString().replace("\r\n", " | "));
+        check(ns.yoursSummary().equals("A2 · M2, contrast +1, saturation +1, DRO Auto"), "summary in the menus' words: " + ns.yoursSummary());
+        check(allNeutral(), "every switched setting reads neutral");
+
+        // nothing changed since: all 11 read back, nothing written, no wait before shooting
         long writes = lines(fakeLog);
-        before = log.length();
-        ns.check();
-        String said = log.substring(before);
-        check(said.contains("neutral: read back in ") && said.contains("0x01070178=0") && said.contains("neutral: as Latent set them")
-                && lines(fakeLog) == writes, "no change since: all 11 read and noted, nothing written: " + said.replace("\r\n", " | "));
-        control("set 0x01070178 -1\nset 0x01070187 1\nset 0x0107018a -1\nset 0x01070017 2\nset 0x01070016 2\nset 0x01070104 9\n");
-        before = log.length();
-        ns.check();
-        said = log.substring(before);
-        check(said.contains("changed since Latent set them") && said.contains("0x01070178 0->-1") && said.contains("0x0107018a 0->-1")
-                && said.contains("0x01070017 0->2") && said.contains("0x01070104 0->9 (outside what Latent may write)")
-                && said.contains("read only, nothing written"), "a drift (Roll 005's, and DRO out of range) noted: " + said.replace("\r\n", " | "));
-        check(lines(fakeLog) == writes && v(CameraSettings.CONTRAST) == -1 && read(note).equals(noted), "a drift: nothing written, the note unchanged");
-        control("set 0x01070178 0\nset 0x01070187 0\nset 0x0107018a 0\nset 0x01070017 0\nset 0x01070016 0\nset 0x01070104 0\n");
-        check(v(CameraSettings.CONTRAST) == 0, "(the camera neutral again)");
+        int before = log.length();
+        check(ns.neutralize(GATE) == null && lines(fakeLog) == writes && log.substring(before).contains("neutral: as Latent set them")
+                && log.substring(before).contains("0x01070178=0"), "unchanged: read back, nothing written: " + log.substring(before).replace("\r\n", " | "));
+
+        // Roll 005: A2 / M2 set in the camera's menu (and contrast -1): yours from now on, then neutral again for Latent
+        control("set 0x01070017 2\nset 0x01070016 2\nset 0x0107067f 2\nset 0x0107067e 2\nset 0x01070178 -1\n");
         control("");
-        write(note, noted.replace("ours.0x01070178=0", "ours.0x01070178=x"));
         before = log.length();
-        ns.check();
-        said = log.substring(before);
-        check(said.contains("neutral: not checked (NEUTRAL.TXT") && read(note).contains("=x"), "a damaged note: noted, not checked, left as it is (no crash)");
-        write(note, noted);
-        // you change something yourself while the roll is loaded
-        check(CameraSettings.write(CameraSettings.CONTRAST, 2) == 0, "(you set contrast +2 mid-roll)");
-        check(ns.restore() == null && !ns.active(), "restored, note removed: " + log.substring(before).replace("\r\n", " | "));
+        String w = ns.neutralize(GATE);
+        String said = log.substring(before);
+        check(w == null && allNeutral() && said.contains("changed since Latent set them: 0x01070017 0->2") && said.contains("0x01070178 0->-1")
+                && said.contains("set again for shooting"), "a menu change: neutral again: " + said.replace("\r\n", " | "));
+        check(ns.yoursSummary().equals("A2 · M2, contrast -1, saturation +1, DRO Auto"), "... and it's yours now (comes back on Exit): " + ns.yoursSummary());
+        check(NeutralSettings.sinceLastWrite() >= 0 && NeutralSettings.sinceLastWrite() < 2000, "... and shooting waits the settle after it");
+
+        // a value Latent may not write (DRO 9): said and left; the rest neutral again
+        control("set 0x01070104 9\nset 0x0107018a 2\n");
+        control("");
+        w = ns.neutralize(GATE);
+        check(w != null && w.contains("0x01070104 0->9") && v(CameraSettings.SHARPNESS) == 0 && v(CameraSettings.DRO) == 9,
+                "DRO outside what Latent may write: said (" + w + "), the rest neutral");
+        control("set 0x01070104 0\n");
+        control("");
+
+        // Latent left meanwhile (the gate): nothing written, the camera as it was
+        control("set 0x01070178 2\n");
+        control("");
+        front = false;
+        writes = lines(fakeLog);
+        w = ns.neutralize(GATE);
+        check(w != null && w.contains("Latent was left") && lines(fakeLog) == writes && v(CameraSettings.CONTRAST) == 2,
+                "with Latent away nothing is written: " + w);
+        front = true;
+        check(ns.neutralize(GATE) == null && v(CameraSettings.CONTRAST) == 0, "back in front: neutral again");
+
+        // a refused write: this batch's changes put back, and shooting still waits (the refused one may have landed)
+        control("set 0x01070178 1\nset 0x01070187 -1\n");
+        control("refuse 0x01070187\n");
+        Thread.sleep(1100);
+        w = ns.neutralize(GATE);
+        check(w != null && w.startsWith("left as it was") && v(CameraSettings.CONTRAST) == 1 && v(CameraSettings.SATURATION) == -1,
+                "a refused write: contrast put back too, 'left as it was': " + w);
+        check(NeutralSettings.sinceLastWrite() >= 0 && NeutralSettings.sinceLastWrite() < 1000, "... and the settle starts all the same");
+        control("");
+        check(ns.neutralize(GATE) == null && allNeutral(), "(neutral)");
+        control("set 0x01070187 -1\n");   // one change, its one write refused: only the request itself can start the settle
+        control("refuse 0x01070187\n");
+        Thread.sleep(1100);
+        w = ns.neutralize(GATE);
+        check(w != null && NeutralSettings.sinceLastWrite() >= 0 && NeutralSettings.sinceLastWrite() < 1000,
+                "a refused write alone starts the settle (asked for is enough): " + w);
+        control("");
+
+        // the note between its two renames (a crash mid-replace): found again
+        File old = new File(card, "LATENT/NEUTRAL.OLD");
+        check(note.renameTo(old) && ns.active() && note.exists() && !old.exists(), "a note cut off mid-replace is found again (NEUTRAL.OLD)");
+        check(ns.neutralize(GATE) == null && allNeutral(), "(neutral)");
+
+        // Exit Latent: yours back, except what you changed yourself since
+        check(CameraSettings.write(CameraSettings.SHARPNESS, 3) == 0, "(you set sharpness +3 in the menu, Latent's note kept)");
+        front = false;
+        writes = lines(fakeLog);
+        w = ns.restore(GATE);
+        check(w != null && ns.active() && lines(fakeLog) == writes, "with Latent away: nothing put back, the note kept: " + w);
+        front = true;
+        before = log.length();
+        check(ns.restore(GATE) == null && !ns.active() && !old.exists(), "restored, note removed: " + log.substring(before).replace("\r\n", " | "));
         check(v(CameraSettings.WB_AB) == 2 && v(CameraSettings.WB_GM) == 2 && v(CameraSettings.WB_AB_AUTO) == 2 && v(CameraSettings.WB_GM_AUTO) == 2,
                 "fine-tune A2 / M2 back, Auto copies too");
-        check(v(CameraSettings.SATURATION) == 1 && v(CameraSettings.DRO) == 1 && v(CameraSettings.STYLE) == 1 && v(CameraSettings.DRO_LEVEL) == 1,
-                "saturation +1, DRO Auto, Standard back");
-        check(v(CameraSettings.CONTRAST) == 2, "your mid-roll contrast +2 is left alone");
-        check(ns.restore() == null, "restoring with nothing to restore is a no-op");
+        check(v(CameraSettings.CONTRAST) == 1 && v(CameraSettings.SATURATION) == -1 && v(CameraSettings.DRO) == 1 && v(CameraSettings.STYLE) == 1
+                && v(CameraSettings.DRO_LEVEL) == 1, "your contrast +1, saturation -1 (as last changed), DRO Auto, Standard back");
+        check(v(CameraSettings.SHARPNESS) == 3, "your sharpness +3 is left alone");
+        check("A2 · M2, contrast +1, saturation -1, sharpness +3, DRO Auto".equals(ns.restored), "... and the screen says what the camera has now: " + ns.restored);
+        check(ns.restore(GATE) == null, "restoring with nothing kept is a no-op");
 
-        // a read that never answers: one short wait, then no check again this run, and none for 30 min after (NOANSWER.TXT)
-        check(ns.apply() == null && ns.active(), "(neutral again for the hang test)");
+        // a value outside what Latent may write (DRO 9, as HDR leaves it) is left as it is, and Exit still completes
+        control("set 0x01070104 9\n");
+        control("");
+        w = ns.neutralize(GATE);
+        check(w != null && w.contains("outside") && v(CameraSettings.DRO) == 9 && v(CameraSettings.CONTRAST) == 0 && ns.active(),
+                "no note yet, DRO 9: left as it is, the rest neutral: " + w);
+        control("set 0x01070104 1\n");   // HDR off in the menu: DRO Auto, back in range
+        control("");
+        w = ns.neutralize(GATE);
+        check(w == null && allNeutral(), "... back in range later (HDR off): yours, and set neutral like the rest: " + w);
+        control("set 0x01070104 9\n");
+        control("");
+        check(ns.neutralize(GATE) != null && v(CameraSettings.DRO) == 9, "(DRO 9 again: left)");
+        check(ns.restore(GATE) == null && !ns.active() && v(CameraSettings.DRO) == 9 && v(CameraSettings.CONTRAST) == 1, "... and Exit puts the rest back: " + ns.restored);
+        control("set 0x01070104 1\n");
+        control("");
+
+        // a WB mode changed in the menu: its own fine-tune comes with it (not the old mode's A2 / M2 on Exit)
+        check(ns.neutralize(GATE) == null && ns.active() && ns.yoursSummary().startsWith("A2 · M2"), "(neutral, yours A2 / M2)");
+        control("set 0x01070019 14\nset 0x01070017 0\nset 0x01070016 0\n");   // colour temperature, its grid at 0
+        control("");
+        check(ns.neutralize(GATE) == null && allNeutral() && ns.yoursSummary().startsWith("white balance Colour temperature")
+                && !ns.yoursSummary().contains("A2"), "the new mode adopted with its own grid: " + ns.yoursSummary());
+        check(ns.restore(GATE) == null && v(CameraSettings.WB_MODE) == 14 && v(CameraSettings.WB_AB) == 0 && v(CameraSettings.WB_GM) == 0,
+                "Exit: colour temperature back, with its own 0 / 0");
+        control("set 0x01070019 1\nset 0x01070017 2\nset 0x01070016 2\n");   // as the user had it, for the tests after
+        control("");
+
+        // a read that never answers: one short wait, the service then left alone (and Sony's delete, a develop, the camera)
+        check(ns.neutralize(GATE) == null && ns.active(), "(neutral again for the hang test)");
         control("hangread 0x01070187\n");
-        before = log.length();
         long t0 = System.currentTimeMillis();
-        ns.check();
-        long waited = System.currentTimeMillis() - t0;
-        said = log.substring(before);
-        File hungNote = new File(card, "LATENT/NOANSWER.TXT");
-        check(waited < 3000 && said.contains("not asked again for 30 min") && hungNote.exists(),
-                "a hung read: " + waited + " ms, noted on the card: " + said.replace("\r\n", " | "));
         before = log.length();
-        t0 = System.currentTimeMillis();
-        ns.check();
-        check(System.currentTimeMillis() - t0 < 100 && log.substring(before).contains("paused") && NeutralSettings.unanswered(),
-                "then no check at all while the read is still with the camera (nor Sony's delete, a develop or the camera open)");
+        w = ns.neutralize(GATE);
+        long waited = System.currentTimeMillis() - t0;
+        File hungNote = new File(card, "LATENT/NOANSWER.TXT");
+        check(w != null && waited < 3000 && log.substring(before).contains("not asked again for 30 min") && hungNote.exists(),
+                "a hung read: " + waited + " ms, noted on the card: " + w);
+        check(NeutralSettings.unanswered(), "... and nothing of Sony's runs beside it while it waits");
         java.lang.reflect.Field pending = NeutralSettings.class.getDeclaredField("pending");
         pending.setAccessible(true);
         pending.set(null, null);   // as a new run (the next open), the old request gone
-        java.lang.reflect.Field noted2 = NeutralSettings.class.getDeclaredField("pauseNoted");
-        noted2.setAccessible(true);
-        noted2.set(null, false);
         control("");
         before = log.length();
-        ns.check();
-        check(!NeutralSettings.unanswered() && log.substring(before).contains("paused") && !log.substring(before).contains("read back") && hungNote.exists(),
-                "nor in the next run within 30 min (said once)");
+        w = ns.neutralize(GATE);
+        check(w != null && w.contains("a little earlier") && !log.substring(before).contains("read back"), "nor asked in the next run within 30 min: " + w);
         write(hungNote, (System.nanoTime() / 1000000 - 31 * 60 * 1000L) + "\r\n");
         before = log.length();
-        ns.check();
-        check(log.substring(before).contains("neutral: read back in ") && !hungNote.exists(), "after 30 min it reads again");
+        check(ns.neutralize(GATE) == null && log.substring(before).contains("neutral: read back in ") && !hungNote.exists(), "after 30 min it reads again");
 
-        // apply()'s failures (v0.46.1): refused cleanly, all undone and the note gone; unanswered, the note kept
-        check(ns.restore() == null && !ns.active(), "(your settings back for the apply tests)");
-        int ab = v(CameraSettings.WB_AB), con = v(CameraSettings.CONTRAST);
-        control("refuse 0x01070178\n");
-        before = log.length();
-        String w = ns.apply();
-        check(w != null && w.startsWith("left as it was") && !ns.active() && v(CameraSettings.WB_AB) == ab && ab != 0 && v(CameraSettings.CONTRAST) == con,
-                "a refused write: undone, note removed, 'left as it was': " + w);
+        // a write that never answers: the note kept for later, and the service fenced for the rest of the run
+        check(ns.restore(GATE) == null && !ns.active(), "(your settings back for the hang test)");
         control("hang 0x01070016\n");
         t0 = System.currentTimeMillis();
-        w = ns.apply();
+        w = ns.neutralize(GATE);
         check(w != null && w.startsWith("not fully set to neutral") && ns.active() && System.currentTimeMillis() - t0 < 12000,
-                "a write that never answers: the note kept for restore, 'not fully set to neutral': " + w);
+                "a write that never answers: the note kept, 'not fully set to neutral': " + w);
+        check(NeutralSettings.unanswered() && NeutralSettings.sinceLastWrite() >= 0, "... shooting, develops and Sony's delete fenced; the settle armed");
+        t0 = System.currentTimeMillis();
+        w = ns.neutralize(GATE);
+        check(w != null && w.contains("didn't answer earlier") && System.currentTimeMillis() - t0 < 100, "... and not asked again this run: " + w);
         System.out.println("SETTINGS OK");
-        System.exit(0);   // the hung read's thread never ends
+        System.exit(0);   // the hung calls' threads never end
+    }
+
+    static boolean allNeutral() {
+        boolean ok = true;
+        for (int i = 0; i < NeutralSettings.IDS.length; i++) ok &= v(NeutralSettings.IDS[i]) == NeutralSettings.NEUTRAL[i];
+        return ok;
     }
 
     static void control(String lines) throws Exception {

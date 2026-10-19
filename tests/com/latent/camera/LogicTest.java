@@ -13,7 +13,65 @@ public class LogicTest {
         slots();
         sheet();
         caption();
+        pictureCheck();
         System.out.println("LOGIC OK");
+    }
+
+    /** v0.48.0: what each developed frame was shot with, from its EXIF (Sony's makernote, else EXIF's levels). */
+    static void pictureCheck() throws Exception {
+        PictureCheck.Result r = PictureCheck.read(new java.io.File("testdata/STREET.JPG"));
+        check(r != null && r.makernote && "Standard".equals(r.style) && r.contrast == 0 && r.saturation == 0 && r.sharpness == 0 && r.shiftAB == 0 && r.shiftGM == 0
+                && r.dro == 3 && !r.neutral(), "STREET.JPG (an A5100 photo): Standard 0/0/0, no shift, DRO Auto, so not neutral: " + r);
+        r = PictureCheck.parse(exif(0, 0, 0, true, 0, 0, 0, 0, 0, 0, "Standard"), 400);
+        check(r != null && r.neutral() && r.toString().equals("Standard 0/0/0, WB shift 0 \u00b7 0, DRO off: neutral"), "neutral: " + r);
+        r = PictureCheck.parse(exif(1, 2, 1, true, -1, 1, -1, 2, 2, 0, "Standard"), 400);
+        check(r != null && !r.neutral() && r.toString().equals("Standard -1/+1/-1, WB shift A2 \u00b7 M2, DRO off: NOT neutral"), "Latent's shots before v0.48.0: " + r);
+        r = PictureCheck.parse(exif(0, 0, 0, true, 0, 0, 0, 0, 0, 0, "Vivid"), 400);
+        check(r != null && !r.neutral(), "another Creative Style isn't neutral: " + r);
+        r = PictureCheck.parse(exif(1, 0, 0, false, 0, 0, 0, 0, 0, 0, null), 400);
+        check(r != null && !r.makernote && r.contrast == -1 && !r.neutral() && r.toString().endsWith("(EXIF only): NOT neutral"), "no makernote: EXIF's low contrast: " + r);
+        byte[] cut = exif(0, 0, 0, true, 0, 0, 0, 0, 0, 0, "Standard");
+        boolean safe = true;
+        for (int n = 0; n < 400; n += 7) {
+            try { PictureCheck.parse(cut, n); } catch (RuntimeException e) { safe = false; }
+        }
+        java.util.Random rnd = new java.util.Random(7);
+        for (int k = 0; k < 200; k++) {
+            byte[] bad = cut.clone();
+            for (int j = 0; j < 6; j++) bad[4 + rnd.nextInt(bad.length - 4)] = (byte) rnd.nextInt(256);
+            try { PictureCheck.parse(bad, bad.length); } catch (RuntimeException e) { /* read() catches it: the develop goes on */ }
+        }
+        check(safe && PictureCheck.parse(new byte[] { 1, 2, 3, 4 }, 4) == null, "a cut-off or foreign file: no settings, no crash");
+    }
+
+    /** A JPEG's head with EXIF (little-endian): EXIF's levels, and optionally Sony's makernote with exact values. */
+    static byte[] exif(int con, int sat, int sharp, boolean mn, int mc, int ms, int mh, int ab, int gm, int dro, String style) {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(400).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        b.put(new byte[] { (byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE1, 0x01, (byte) 0x80, 'E', 'x', 'i', 'f', 0, 0 });
+        int t = b.position();
+        b.put(new byte[] { 'I', 'I', 42, 0 }).putInt(8);
+        b.putShort((short) 1); entry(b, 0x8769, 4, 1, 26); b.putInt(0);   // IFD0 at 8, the Exif IFD at 26
+        int n = mn ? 4 : 3, mnAt = 26 + 2 + 12 * n + 4;
+        b.putShort((short) n);
+        entry(b, 0xA408, 3, 1, con); entry(b, 0xA409, 3, 1, sat); entry(b, 0xA40A, 3, 1, sharp);
+        if (mn) entry(b, 0x927C, 7, 120, mnAt);
+        b.putInt(0);
+        if (mn) {
+            b.put("SONY DSC ".getBytes()).put(new byte[3]);
+            int ifd = mnAt + 12, data = ifd + 2 + 12 * 6 + 4;
+            b.putShort((short) 6);
+            entry(b, 0x2004, 9, 1, mc); entry(b, 0x2005, 9, 1, ms); entry(b, 0x2006, 9, 1, mh);
+            entry(b, 0x2014, 9, 2, data); entry(b, 0xB025, 4, 1, dro);
+            entry(b, 0xB020, 2, style.length() + 1, data + 8);
+            b.putInt(0);
+            b.putInt(ab).putInt(gm).put(style.getBytes()).put((byte) 0);
+        }
+        return b.array();
+    }
+
+    static void entry(java.nio.ByteBuffer b, int tag, int type, int count, int value) {
+        b.putShort((short) tag).putShort((short) type).putInt(count);
+        if (type == 3) b.putShort((short) value).putShort((short) 0); else b.putInt(value);
     }
 
     /** Photos' contact sheet: rolls on rows of their own, the keys across rolls and rows, the pages, the 100% view's edges. */

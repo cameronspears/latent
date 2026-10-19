@@ -451,6 +451,8 @@ final class HardwareDevelop {
             SONY.lock();
             try {
                 if (hung || NeutralSettings.unanswered()) return "a call to the camera hasn't answered; original kept";
+                long since = NeutralSettings.sinceLastWrite();   // a setting changed just now (stamped under this lock): never Sony's delete in its settle
+                if (since >= 0 && since < NeutralSettings.SETTLE_MS) return "a camera setting just changed; original kept for the next pass";
                 String kept = deleteOriginal(original, print, answer);
                 if (kept != null) return kept;
             } catch (Stuck e) {

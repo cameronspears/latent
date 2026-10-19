@@ -81,6 +81,11 @@ final class Ui {
             fatal(g, s);
             return;
         }
+        if (s.leavingIn >= 0) {   // Exit Latent: your settings going back, then the camera
+            g.rect(0, 0, s.width, H, BG);
+            leaving(g, s);
+            return;
+        }
         if (vf && s.vfPart == UiState.PART_PICTURE) { photo(g, s); toast(g, s); return; }   // over the picture, on its surface
         if (vf && (s.liveThrough || s.liveImage != null || s.vfPart == UiState.PART_WINDOW)) {   // the picture fills its area: black bars only
             float iw = H * 1.5f, ix = (s.width - iw) / 2;
@@ -135,6 +140,32 @@ final class Ui {
         float y = 196 + 40;
         if (rest.length() > 0) y = wrap(g, rest, x, y, w, Gfx.REGULAR, T_BODY, INK2, 27, 3) + 27;
         g.text("Your other photos are safe.", x, y, Gfx.REGULAR, T_BODY, INK2, Gfx.LEFT, 0);
+    }
+
+    // ------------------------------------------------------------------------------ Exit Latent
+
+    /**
+     * Leaving from the menu (v0.48.0): your camera settings go back, then the camera's own shooting takes over once
+     * it's safe (the A5100 restarts if it shoots within seconds of a settings change). One calm screen: what's
+     * happening large, what came back under it, and the wait counted down. MENU stays in Latent.
+     */
+    private static void leaving(Gfx g, UiState s) {
+        float x = (s.width - H * 1.5f) / 2 + 2 * INSET, w = H * 1.5f - 4 * INSET;
+        boolean back = s.leavingIn > 0;
+        g.text(back ? "Your camera settings are back" : "Putting your camera settings back\u2026", x, 196, Gfx.MEDIUM, T_TITLE, INK, Gfx.LEFT, 0);
+        float y = 196 + 40;
+        if (back && s.leavingNote.length() > 0) y = wrap(g, s.leavingNote, x, y, w, Gfx.REGULAR, T_BODY, INK2, 27, 2) + 27;
+        if (back) {
+            String t = "Leaving in " + s.leavingIn + " s";
+            float tw = g.textWidth(t, Gfx.MEDIUM, T_SECOND, 0);
+            g.text(t, x, y + 8, Gfx.MEDIUM, T_SECOND, INK, Gfx.LEFT, 0);
+            if (s.leavingTotal > 0) {
+                float k = Math.max(0, Math.min(1, (s.leavingTotal - s.leavingIn) / (float) s.leavingTotal));
+                g.rect(x, y + 17, tw, 2, LINE);
+                g.rect(x, y + 17, tw * k, 2, INK2);
+            }
+            hintBar(g, s, INK2, null, new String[] { "menu", "Stay in Latent" });
+        }
     }
 
     // ------------------------------------------------------------------------------ camera back
@@ -370,6 +401,7 @@ final class Ui {
         UiState.Film f = look(s);
         StringBuilder k = new StringBuilder(64);
         k.append(s.mode).append('|').append(s.width).append('|').append(s.fatal).append('|').append(s.clean).append('|');
+        if (s.leavingIn >= 0) k.append("leaving ").append(s.leavingIn).append('/').append(s.leavingTotal).append(' ').append(s.leavingNote).append('|');
         if (!s.clean) k.append(s.afMode).append('|').append(s.afArea).append('|');
         if (s.evEdit) {   // the right bar is the exposure scale: its value, in the film's colour off 0
             k.append("ev ").append(s.ev).append('|').append(s.ev != 0 && f != null ? f.accent : INK);
@@ -692,6 +724,7 @@ final class Ui {
         int exposed;
         boolean photos;                  // the card has developed photos to look at
         String version = "";
+        String yours = "";               // your camera settings Latent keeps while it shoots neutral (Exit puts them back); "" none kept
     }
 
     /**
@@ -700,6 +733,7 @@ final class Ui {
      * and the footer says why (Hasselblad). The roll's two actions when they apply, then the photos: nothing to
      * set (v0.45.0: what the settings and the camera checks settled is how Latent works now). "This roll" heads
      * the roll's rows only when it has some (a roll developing has none); Photos, which is every roll, has its own.
+     * Exit Latent (v0.48.0) last: your camera settings back, then the camera's own shooting.
      */
     static List<String[]> menuRows(Menu m) {
         List<String[]> rows = new ArrayList<String[]>();
@@ -710,6 +744,8 @@ final class Ui {
         }
         rows.add(new String[] { "All rolls", "", "", "" });
         rows.add(new String[] { "Photos", "\u203a", "photos", m.photos ? "" : "No photos yet. Developed photos appear here." });
+        rows.add(new String[] { "Latent", "", "", "" });
+        rows.add(new String[] { "Exit Latent", "\u203a", "exit", "" });
         return rows;
     }
 
@@ -740,12 +776,14 @@ final class Ui {
     }
 
     /**
-     * What the chosen row does, in a line or two at the foot of the menu (or why it can't now). Photos, the last
+     * What the chosen row does, in a line or two at the foot of the menu (or why it can't now). Exit Latent, the last
      * row, ends with Latent's version: the menu's last row has always shown it.
      */
     static String menuFooter(String[] row, Menu m) {
         String a = row.length > 2 ? row[2] : "", why = row.length > 3 ? row[3] : "";
-        if (a.equals("photos")) return (why.length() > 0 ? why : "Every developed photo, newest first, roll by roll.") + " Latent " + m.version;
+        if (a.equals("photos")) return why.length() > 0 ? why : "Every developed photo, newest first, roll by roll.";
+        if (a.equals("exit")) return (m.yours.length() > 0 ? "Your camera settings back (" + m.yours + "), then the camera's own shooting."
+                : "The camera's own shooting.") + " Latent " + m.version;
         if (why.length() > 0) return why;
         if (a.equals("develop")) return "Ends the roll here and develops the " + m.exposed + " shot so far.";
         if (a.equals("change")) return m.endless ? "This roll's photos keep developing." : "Keeps the frames shot so far for developing.";

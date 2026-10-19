@@ -176,6 +176,10 @@ public class MainActivity extends Activity {
         card = Environment.getExternalStorageDirectory();
         if (getIntent().getLongExtra(Relaunch.EXTRA_AT, 0) > 0) {
             developNow = "develop".equals(getIntent().getStringExtra(Relaunch.EXTRA_WHY));
+            if ("exit".equals(getIntent().getStringExtra(Relaunch.EXTRA_WHY))) {   // Exit Latent, asked before the restart
+                exitAfterStart = true;
+                exiting = true;   // "Putting your camera settings back…" until it's done
+            }
             if (developNow) {   // the same red darkroom Relaunch showed, until the develop starts
                 preparing = true;
                 prepared = getIntent();
@@ -196,7 +200,6 @@ public class MainActivity extends Activity {
         Display.fullColour(!(vf != null && Viewfinder.SHOOT_16BIT));   // the camera's own 16-bit plane while it's Latent's
         light.shown(SystemClock.uptimeMillis());   // back on screen: lit (the darkroom keeps its own light)
         applyLight();
-        neutralCheckDue = true;   // once a visit: the camera's settings read back (Latent may have been away, or its viewfinder open)
         if (card != null && developing == null) refresh(null);
     }
 
@@ -209,6 +212,8 @@ public class MainActivity extends Activity {
         shootAfterFrame = false;   // nor shoot, or load and shoot, once the frame in hand is done
         loadAfter = false;
         shootAfterLoad = false;
+        neutralForShoot = false;   // away: the camera's menu may change something; the next shoot checks again
+        if (exiting && !exitAfterStart) { exiting = false; leaveAt = 0; ui.removeCallbacks(leaveTick); }   // left before the countdown ended
         final String census = unmappedLine();   // the buttons pressed this visit that Latent doesn't use
         final Runnable keysLog = new Runnable() { public void run() { logKeys(); if (census != null) devLog(census); } };
         worker.execute(keysLog);
@@ -279,6 +284,8 @@ public class MainActivity extends Activity {
                 Roll.upgrade(ro);
                 long r2 = SystemClock.uptimeMillis();
                 List<File> listed = Library.photos(card);
+                String away = Library.settleAway(card, listed);   // after Exit Latent: what the camera's own mode shot is yours
+                if (away != null) devLog(away);
                 final int highest = Roll.highest(listed);
                 final Set<String> listedPaths = new HashSet<String>(listed.size() * 2);   // Photos finds the prints in it
                 for (File f : listed) listedPaths.add(f.getPath());
@@ -329,6 +336,9 @@ public class MainActivity extends Activity {
                     devLog("neutral: " + Probe.why(e));
                 }
                 final String neutralMsg = nm;
+                String kept = null;
+                try { kept = new NeutralSettings(card, new StringBuilder()).yoursSummary(); } catch (Exception ignored) { }
+                final String yoursKept = kept == null || kept.equals("already neutral") ? "" : kept;
                 if (cardReadNote == null) cardReadNote = "card read: first touch " + (r0 - r00) + " ms" + (cardThere ? "" : " (no LATENT)") + ", looks " + (r1 - r0) + " ms, rolls " + (r2 - r1) + " ms, photos "
                         + (r3 - r2) + " ms (" + all.size() + "), the rest " + (SystemClock.uptimeMillis() - r3) + " ms";
                 final String msg = problem;
@@ -353,7 +363,17 @@ public class MainActivity extends Activity {
                         readBattery();
                         if (!ready) readyAt = SystemClock.uptimeMillis();
                         ready = true;
+                        yoursNote = yoursKept;
                         saveSnapshot();
+                        if (exitAfterStart) {   // restarted for Exit Latent: that now, nothing else (no develop, no film chooser)
+                            exitAfterStart = false;
+                            exiting = false;
+                            backFromCamera = false;
+                            if (then != null) then.run();
+                            exitLatent();
+                            screen.invalidate();
+                            return;
+                        }
                         if (mode == BACK && current == null) openLoad(false);   // nothing in the camera: choosing film is home
                         final long filingFrom = SystemClock.uptimeMillis();
                         if (Viewfinder.FOCUS_CHECK) checkFocusLater();   // the last visit's photos first, then the filing
@@ -516,6 +536,7 @@ public class MainActivity extends Activity {
         m.exposed = exposed;
         m.photos = !rolls.isEmpty();   // (from the last card read: asking each roll for its prints would read the card every redraw)
         m.version = versionName();   // asked of the system once, then kept
+        m.yours = yoursNote;
         return m;
     }
 
@@ -545,6 +566,8 @@ public class MainActivity extends Activity {
                 openLoad();
             } else if (action.equals("photos")) {   // every developed photo; MENU comes back here
                 openPhotos(null, SETTINGS);
+            } else if (action.equals("exit")) {   // your camera settings back, then the camera's own shooting
+                exitLatent();
             }
         }
         redrawKey();
@@ -589,7 +612,7 @@ public class MainActivity extends Activity {
 
     /** Straight to the camera's shooting mode (not back through the menus). */
     /** Going to shoot this soon after Latent changed a camera setting restarts the A5100: wait at least this long. */
-    static final long SHOOT_SETTLE_MS = 6000;
+    static final long SHOOT_SETTLE_MS = NeutralSettings.SETTLE_MS;
     private boolean shootPending;
     private final Runnable shootWhenSettled = new Runnable() { public void run() { goShoot(); } };
 
@@ -646,6 +669,14 @@ public class MainActivity extends Activity {
             ui.postDelayed(shootWhenSettled, 300);
             return;
         }
+        // neutral before Latent shoots (v0.48.0): what was changed in the camera's menu while Latent was away is yours from
+        // now on, and set neutral again. Once a visit, with the camera closed; the settle below then waits for any write
+        if (!loading && current != null && Roll.LOADED.equals(current.state) && !wantsDeveloping(current) && vf == null && !Viewfinder.opened && !neutralForShoot) {
+            if (!shootPending) { shootPending = true; ui.removeCallbacks(settleTick); ui.post(settleTick); }   // "Getting ready…"
+            ui.removeCallbacks(shootWhenSettled);
+            if (!neutralizing) neutralForShoot();
+            return;
+        }
         long since = NeutralSettings.sinceLastWrite();
         if (loading || (since >= 0 && since < SHOOT_SETTLE_MS)) {   // one press is enough: it goes as soon as it's safe
             if (!shootPending) { shootPending = true; ui.removeCallbacks(settleTick); ui.post(settleTick); }   // the camera back counts it down
@@ -672,9 +703,14 @@ public class MainActivity extends Activity {
         }
         // No roll loaded (or one part-way through developing, its film fixed): the camera's own shooting mode, as a
         // half-press always went there then. Latent's viewfinder needs a roll to put the pictures on.
-        // A breadcrumb: if the camera restarts on the way to shooting, the next start shows it came right after this
-        devLog("shoot: handing over to the camera" + (current != null ? " (" + current.label() + ", " + exposed + " exposed)" : " (no roll)")
-                + (since >= 0 ? ", settings last changed " + since / 1000 + " s before" : ""));
+        handOver(current != null ? current.label() + ", " + exposed + " exposed" : "no roll");
+    }
+
+    /** The camera's own shooting mode: Latent hands over and leaves (goShoot with no roll, and Exit Latent). */
+    private void handOver(String what) {
+        // a breadcrumb: if the camera restarts on the way to shooting, the next start shows it came right after this
+        long since = NeutralSettings.sinceLastWrite();
+        devLog("shoot: handing over to the camera (" + what + ")" + (since >= 0 ? ", settings last changed " + since / 1000 + " s before" : ""));
         try {
             startActivity(new android.content.Intent(android.content.Intent.ACTION_MAIN)
                     .addCategory(android.content.Intent.CATEGORY_HOME)
@@ -683,6 +719,55 @@ public class MainActivity extends Activity {
             // no home activity: just leave
         }
         finish();
+    }
+
+    /**
+     * Latent may write a camera setting now (NeutralSettings.Gate, asked before each write): in front, and the camera
+     * never opened in this process (no settings write has been tried with Sony's image memory taken).
+     */
+    private final NeutralSettings.Gate inFront = new NeutralSettings.Gate() {
+        public boolean mayWrite() { return resumed && !Viewfinder.opened; }
+    };
+    private boolean neutralForShoot;   // this visit set the camera neutral for shooting (or said why it couldn't)
+    private boolean neutralizing;      // ... doing it now, on the worker
+
+    /**
+     * NeutralSettings.neutralize on the worker, under Sony's lock (never beside its delete), then goShoot again, which
+     * waits for the camera to settle after any write.
+     */
+    private void neutralForShoot() {
+        neutralizing = true;
+        worker.execute(new Runnable() {
+            public void run() {
+                StringBuilder nl = new StringBuilder();
+                String why = null;
+                boolean got = false;
+                try { got = HardwareDevelop.SONY.tryLock(3000, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
+                if (!got) why = "the camera was busy filing a negative";
+                else {
+                    try {
+                        if (HardwareDevelop.hung()) why = "a call to the camera hadn't answered";
+                        else if (inFront.mayWrite()) why = new NeutralSettings(card, nl).neutralize(inFront);
+                    } catch (Exception e) {
+                        why = Probe.why(e);
+                    } finally {
+                        HardwareDevelop.SONY.unlock();
+                    }
+                }
+                if (why != null) nl.append("neutral: for shooting: ").append(why).append("\r\n");
+                devLogAll(nl);
+                final String w = why;
+                ui.post(new Runnable() {
+                    public void run() {
+                        neutralizing = false;
+                        if (!resumed) return;   // left meanwhile: the next visit sets it
+                        neutralForShoot = true;   // once a visit, whatever came of it: a failure is said, not tried on every press
+                        if (w != null) toast("Not neutral: " + w);
+                        if (shootPending) goShoot();
+                    }
+                });
+            }
+        });
     }
 
     // ------------------------------------------------------------------------------ the viewfinder
@@ -746,11 +831,16 @@ public class MainActivity extends Activity {
             public void live() { if (s1Held && vf != null) vf.halfDown(); }   // still half-pressed from the camera back: focus now
             public void shot(File photo, String film) { vfShot(photo, film); }
             public void hud(boolean on) { screen.setVisibility(on ? View.VISIBLE : View.INVISIBLE); }
+            public boolean inFront() { return resumed; }
             public void stuck(String what) {
                 screen.setVisibility(View.VISIBLE);
                 devLog("viewfinder: " + what);
                 restarting = false;
                 relaunchWhenClosed = false;
+                exiting = false;   // an Exit waiting for this close: the fatal screen instead
+                exitAfterStart = false;
+                leaveAt = 0;
+                ui.removeCallbacks(leaveTick);
                 unprepare();
                 // nothing else can happen until the camera is switched off: the viewfinder says so, full screen
                 // (UiState.fatal; it was a toast that never cleared), and MENU no longer leaves it
@@ -960,6 +1050,7 @@ public class MainActivity extends Activity {
     private final Runnable closeWhenFinished = new Runnable() { public void run() { hideViewfinder(); } };
 
     private boolean restarting, relaunchWhenClosed;
+    private String relaunchWhy = "develop";   // what the restarted Latent does first: "develop", or "exit" (Exit Latent)
     /**
      * The darkroom getting ready: from MENU in the viewfinder, across the restart (Relaunch draws the same),
      * until the develop starts in the new process. One red screen throughout, as a darkroom door closing.
@@ -979,6 +1070,7 @@ public class MainActivity extends Activity {
     private void restartToDevelop(String why, Roll r, int frames) {
         if (restarting) return;
         restarting = true;
+        relaunchWhy = "develop";
         devLog("restarting to develop: " + why);
         prepared = new Intent();
         Stock st = r == null ? null : Stock.byId(films, r.stock);
@@ -1011,7 +1103,7 @@ public class MainActivity extends Activity {
             Intent i = new Intent(this, Relaunch.class);
             i.putExtra(Relaunch.EXTRA_PID, android.os.Process.myPid());
             i.putExtra(Relaunch.EXTRA_AT, SystemClock.uptimeMillis());
-            i.putExtra(Relaunch.EXTRA_WHY, "develop");
+            i.putExtra(Relaunch.EXTRA_WHY, relaunchWhy);
             if (prepared != null) i.putExtras(prepared);
             startActivity(i);
             overridePendingTransition(0, 0);
@@ -1020,6 +1112,7 @@ public class MainActivity extends Activity {
             relaunchWhenClosed = false;
             unprepare();
             devLog("restart: " + Probe.why(e));
+            if (exiting) { exiting = false; toast("Latent couldn't restart to put your settings back. Try Exit again"); screen.invalidate(); }
         }
     }
 
@@ -1201,23 +1294,22 @@ public class MainActivity extends Activity {
                     if (!prefs.edit().putString("roll", made.dir.getName()).commit())
                         devLog("load film: Latent's note of " + made.label() + " couldn't be saved (the card still says it's loaded)");
                     t2 = System.currentTimeMillis();
-                    // the camera shoots neutral while a roll is loaded; yours come back after developing. Only with Latent
-                    // in front (left since the press, the camera's own mode may be): else the next card read in front
-                    // sets it (reconcileNeutral, as for a roll loaded before Latent did this), before any shooting
-                    if (resumed) {
+                    // the camera is neutral for Latent's shooting; yours come back with Exit Latent, or after developing. Only
+                    // with Latent in front and the camera closed in this process (the gate); else going to shoot sets it
+                    String why = null;
+                    if (inFront.mayWrite()) {
                         StringBuilder nl = new StringBuilder();
-                        NeutralSettings ns = new NeutralSettings(card, nl);
-                        boolean noted = ns.active();   // put away for an earlier roll: apply() leaves them, the card read checks them
-                        String why = ns.apply();
-                        neutralTried = true;
-                        if (noted) neutralCheckDue = true;
+                        boolean got = false;
+                        try { got = HardwareDevelop.SONY.tryLock(3000, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
+                        if (got) {
+                            try { why = HardwareDevelop.hung() ? null : new NeutralSettings(card, nl).neutralize(inFront); }
+                            finally { HardwareDevelop.SONY.unlock(); }
+                        }
                         devLogAll(nl);
-                        msg = stock.name + " loaded" + (why != null ? ". Camera " + why : noted ? "" : "  ·  camera set to neutral");
                     } else {
-                        neutralTried = false;   // so the next card read in front applies it for this roll
-                        devLog("load film: " + made.label() + " loaded with Latent away; the camera is set neutral on the next open");
-                        msg = stock.name + " loaded";
+                        devLog("load film: " + made.label() + " loaded with the camera open or Latent away; neutral is set on the way to shooting");
                     }
+                    msg = stock.name + " loaded" + (why != null ? ". Not neutral: " + why : "");
                 } catch (Exception e) {
                     msg = "Could not load film: " + e.getMessage();
                 }
@@ -1240,44 +1332,174 @@ public class MainActivity extends Activity {
         });
     }
 
-    private volatile boolean neutralTried;   // set neutral at most once per run for a roll loaded before v0.13
-    private volatile boolean neutralCheckDue;   // the camera's settings not yet read back this visit (NeutralSettings.check)
 
     /**
-     * The camera shoots neutral exactly while a roll is loaded, so every look starts from a plain picture: once
-     * none is (developed, or the app finds none), your settings go back. Worker thread. Returns a message for the screen, or null.
+     * Your settings go back once no roll is loaded (developed, or the card has none): with no roll a half-press is the
+     * camera's own shooting. Neutral itself is set on the way to shooting with Latent (goShoot), and Exit Latent puts
+     * yours back any time. Worker thread, Latent in front; never with the camera opened in this process, nor beside
+     * Sony's delete. Returns a message for the screen, or null.
      */
     private String reconcileNeutral(boolean loaded) {
+        if (loaded || Viewfinder.opened || exiting) return null;   // the camera opened here: the next process does it
         StringBuilder nl = new StringBuilder();
         NeutralSettings ns = new NeutralSettings(card, nl);
+        if (!ns.active()) return null;
         String msg = null;
-        if (!loaded && ns.active()) {
-            String yours = ns.yoursSummary(), why = ns.restore();
-            msg = why == null ? "Your camera settings are back" + (yours != null && !yours.equals("already neutral") ? ": " + yours : "") : why;
-        } else if (loaded && !ns.active() && !neutralTried) {   // a roll loaded before Latent did this
-            neutralTried = true;
-            String why = ns.apply();
-            msg = why == null ? "Camera set to neutral for this roll" : "Camera " + why;
-        } else if (loaded && ns.active() && neutralCheckDue && (Viewfinder.opened || HardwareDevelop.hung())) {
-            neutralCheckDue = false;   // the next process checks
-            nl.append(Viewfinder.opened ? "neutral: not checked (the camera is open)\r\n" : "neutral: not checked (a call to the camera hadn't answered)\r\n");
-        } else if (loaded && ns.active() && neutralCheckDue) {
-            // once a visit, with the camera closed: read back what Latent set (reads only). Not beside Sony's delete of an
-            // original, which may run during a card read and has never had a settings call alongside it: then next time
-            boolean got = false;
-            try { got = HardwareDevelop.SONY.tryLock(1500, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
-            if (got) {
-                try {
-                    neutralCheckDue = false;
-                    if (HardwareDevelop.hung()) nl.append("neutral: not checked (a call to the camera hadn't answered)\r\n");   // a delete that hung while we waited
-                    else ns.check();
-                } finally {
-                    HardwareDevelop.SONY.unlock();
+        boolean got = false;
+        try { got = HardwareDevelop.SONY.tryLock(1500, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
+        if (!got) nl.append("neutral: not put back this time (the camera was busy filing a negative)\r\n");
+        else {
+            try {
+                if (HardwareDevelop.hung() || NeutralSettings.unanswered()) nl.append("neutral: not put back (a call to the camera hadn't answered)\r\n");
+                else {
+                    String why = ns.restore(inFront), yours = ns.restored;
+                    msg = why == null ? "Your camera settings are back" + (yours != null && !yours.equals("already neutral") ? ": " + yours : "") : why;
                 }
-            } else nl.append("neutral: not checked this time (the camera was busy filing a negative)\r\n");
+            } finally {
+                HardwareDevelop.SONY.unlock();
+            }
         }
         devLogAll(nl);
         return msg;
+    }
+
+    // ------------------------------------------------------------------------------ Exit Latent (v0.48.0)
+
+    private String yoursNote = "";       // your settings kept while Latent shoots neutral, as the menu says them ("" none)
+    private boolean exiting;             // Exit Latent: your settings going back, then the camera's own shooting (UI thread)
+    private boolean exitAfterStart;      // ... asked just before a restart: this process does it once the card is read
+    private String exitNote = "";        // what came back, for the screen
+    private long leaveAt;                // when the camera's own mode takes over (uptime ms); 0 while your settings go back
+    private int leaveTotal;              // ... the countdown's length, in seconds
+
+    /**
+     * Exit Latent, from the menu: your camera settings back (only those still as Latent set them), then the camera's own
+     * shooting once it's safe to shoot (SHOOT_SETTLE_MS after the last write; the A5100 restarts sooner). Photos taken
+     * in the camera's own mode from then on are yours, not the roll's (markAway). With the camera opened in this process
+     * Latent first restarts, as it does to develop, and the new process does it: no setting has ever been written with
+     * Sony's image memory taken.
+     */
+    private void exitLatent() {
+        if (exiting || restarting) return;
+        cancelShoot();
+        if (developing != null) { toast("Developing. Exit once it's done, or pause it first"); return; }
+        if (vf != null || Viewfinder.opened) { restartToExit(); return; }
+        exiting = true;
+        neutralForShoot = false;   // whatever comes of it, the next shoot sets neutral again (queued behind this on the worker)
+        leaveAt = 0;
+        exitNote = "";
+        screen.invalidate();
+        worker.execute(new Runnable() {
+            public void run() {
+                StringBuilder nl = new StringBuilder();
+                String why = null, yours = null;
+                boolean got = false;
+                try { got = HardwareDevelop.SONY.tryLock(5000, java.util.concurrent.TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) { }
+                if (!got) why = "the camera is busy filing a negative; try again in a moment";
+                else {
+                    try {
+                        NeutralSettings ns = new NeutralSettings(card, nl);
+                        if (HardwareDevelop.hung() || NeutralSettings.unanswered()) why = "the camera's settings didn't answer earlier; turn the camera off and on";
+                        else if (ns.active()) { why = ns.restore(inFront); yours = ns.restored; }
+                    } catch (Exception e) {
+                        why = Probe.why(e);
+                    } finally {
+                        HardwareDevelop.SONY.unlock();
+                    }
+                }
+                if (why == null) markAway();
+                nl.append("exit: ").append(why == null ? "your settings back" + (yours != null ? " (" + yours + ")" : " (none kept)") : "not done (" + why + ")").append("\r\n");
+                devLogAll(nl);
+                final String w = why, y = yours;
+                ui.post(new Runnable() {
+                    public void run() {
+                        neutralForShoot = false;   // after any neutral step still in flight: the next shoot checks again
+                        if (!exiting) return;   // MENU: staying in Latent
+                        if (w != null) {
+                            exiting = false;
+                            toast("Your settings: " + w);
+                            screen.invalidate();
+                            return;
+                        }
+                        exitNote = y == null || y.equals("already neutral") ? "" : y;
+                        yoursNote = "";
+                        if (holdAfter) releaseHold();   // the power-save timer back now, in front (onPause would write it as the camera's mode starts)
+                        leaveAt = SystemClock.uptimeMillis() + LEAVE_SHOWN_MS;
+                        leaveTotal = (int) Math.max(1, (leaveLeft() + 999) / 1000);
+                        leaveTick.run();
+                    }
+                });
+            }
+        });
+    }
+
+    /** "Your camera settings are back" stays at least this long, even with nothing written (then the settle's wait, if longer). */
+    static final long LEAVE_SHOWN_MS = 1500;
+
+    /** Ms until the camera's own mode may take over: the screen's time, and never within the settle after a write. */
+    private long leaveLeft() {
+        long left = leaveAt - SystemClock.uptimeMillis(), since = NeutralSettings.sinceLastWrite(), power = PowerSave.sinceLastWrite();
+        if (since >= 0 && since < SHOOT_SETTLE_MS) left = Math.max(left, SHOOT_SETTLE_MS - since);
+        if (power >= 0 && power < POWER_SETTLE_MS) left = Math.max(left, POWER_SETTLE_MS - power);   // as goShoot's hand-over waits
+        return Math.max(0, left);
+    }
+
+    private final Runnable leaveTick = new Runnable() {
+        public void run() {
+            if (!exiting || leaveAt == 0) return;
+            long left = leaveLeft();
+            if (left > 0) {
+                screen.invalidate();
+                ui.postDelayed(this, (left - 1) % 1000 + 1);   // as each second turns
+                return;
+            }
+            if (s1Held || filing || refreshing > 0) { ui.postDelayed(this, 100); return; }   // on the shutter's release, never mid-delete or card read
+            if (!resumed) { exiting = false; return; }
+            exiting = false;
+            handOver("Exit Latent");
+        }
+    };
+
+    /** MENU while leaving: Latent stays. Your settings are back by now (or going back); the next shoot sets neutral again. */
+    private void stayInLatent() {
+        exiting = false;
+        neutralForShoot = false;   // your settings are back: the next shoot sets neutral again
+        leaveAt = 0;
+        ui.removeCallbacks(leaveTick);
+        // the mark goes (after the exit's own work on the worker): Latent's next shots are the roll's, not the camera's own
+        worker.execute(new Runnable() { public void run() { Library.clearAway(card); } });
+        if (mode == SETTINGS || mode == DARKROOM || mode == PHOTO) mode = current != null ? BACK : LOAD;
+        toast("Staying in Latent");
+        screen.invalidate();
+    }
+
+    /** Exit with the camera opened in this process: Latent restarts (as to develop) and the new process puts yours back. */
+    private void restartToExit() {
+        if (restarting) return;
+        restarting = true;
+        relaunchWhy = "exit";
+        devLog("restarting to exit: the camera was opened in this process");
+        prepared = null;
+        exiting = true;   // "Putting your camera settings back…" from now on, across the restart
+        leaveAt = 0;
+        exitNote = "";
+        toast("");
+        screen.invalidate();
+        if (vf != null) { relaunchWhenClosed = true; vf.close(null); }
+        else relaunch();
+    }
+
+    /**
+     * Photos taken in the camera's own mode after Exit Latent are yours, not a roll's: the highest photo number now goes
+     * to LATENT/AWAY.TXT, and the next card read keeps any photo above it off the rolls (Library.settleAway). Worker thread.
+     */
+    private void markAway() {
+        try {
+            int highest = Math.max(highestOnCard, Roll.highest(Library.photos(card)));
+            Library.markAway(card, highest);
+        } catch (Exception e) {
+            devLog("exit: AWAY.TXT not written (" + Probe.why(e) + "); photos shot from now on may join the roll");
+        }
     }
 
     private void devLogAll(StringBuilder lines) {
@@ -1295,7 +1517,7 @@ public class MainActivity extends Activity {
     private void startDevelop(Roll r, boolean quiet) {
         // never begun with Latent away (a card read's answer landing after you left): its power-save hold is a write
         // to the camera, and the frames would develop behind the camera's own mode. The next open starts it, in front.
-        if (r == null || !resumed) return;
+        if (r == null || !resumed || exiting) return;   // nor while Exit Latent puts your settings back
         if (Viewfinder.opened) {   // the camera has the image memory until this process ends: Latent restarts to develop
             if (quiet) return;
             boolean shotHere = vfWaiting > 0 || (vf != null && vf.shots > 0);
@@ -1358,6 +1580,7 @@ public class MainActivity extends Activity {
         developNow = false;   // the restart's 'at once' is spent: a waiting roll after this waits its 4 s untouched
         paused = false;
         devFailed = 0;
+        devNotNeutral = 0;
         failed.clear();
         devDoneAtStart = r.developedCount();
         devStarted = System.currentTimeMillis();
@@ -1369,6 +1592,7 @@ public class MainActivity extends Activity {
         final String held = holdPower();   // logged once per develop: does Sony's power-save API work here, and to what
         preparing = false;
         if (!quiet) {
+            cancelShoot();   // the darkroom drops a shoot still waiting for the camera to settle
             mode = DARKROOM;
             toast("");
             work(true);
@@ -1379,6 +1603,10 @@ public class MainActivity extends Activity {
                 // developing into the camera roll needs the catalogue and a verified memory path
                 StringBuilder hl = new StringBuilder();
                 HardwareDevelop h = new HardwareDevelop(MainActivity.this, card, hl);
+                long settle = NeutralSettings.sinceLastWrite();   // Sony's pipeline set up never within the settle after a settings write
+                if (settle >= 0 && settle < SHOOT_SETTLE_MS) {
+                    try { Thread.sleep(SHOOT_SETTLE_MS - settle); } catch (InterruptedException ignored) { }
+                }
                 try {
                     h.prepare();
                     hw = h;
@@ -1603,6 +1831,7 @@ public class MainActivity extends Activity {
                 if (behind) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
                 long t0 = System.currentTimeMillis();
                 boolean exists = src.exists();
+                if (exists) pictureLine(src);   // what it was shot with: neutral, or how not (DEVELOP.TXT)
                 // the print in the tray: the camera's own small thumbnail of this frame. No redraw for it: the
                 // tray shows the print only from its first step up (devRedraw redraws the tray then)
                 if (exists) loadThumb(src);
@@ -1611,6 +1840,10 @@ public class MainActivity extends Activity {
                 final int[] t = new int[FilmCore.T_COUNT];
                 // into the camera roll, while the original is still there and the hardware keeps working
                 final HardwareDevelop h = hw;
+                long settle = NeutralSettings.sinceLastWrite();   // Sony's pipeline never within the settle after a settings write
+                if (exists && h != null && settle >= 0 && settle < SHOOT_SETTLE_MS) {
+                    try { Thread.sleep(SHOOT_SETTLE_MS - settle); } catch (InterruptedException ignored) { }
+                }
                 if (exists && h != null && !HardwareDevelop.hung() && !NeutralSettings.unanswered() && src.getPath().equals(r.frames.get(frame))) {
                     // the negative is copied alongside, so it has settled on the card by the time the original goes
                     final File neg = r.negative(frame);
@@ -1696,6 +1929,16 @@ public class MainActivity extends Activity {
         });
     }
 
+    private volatile int devNotNeutral;   // this develop's frames not shot on a neutral base (PictureCheck)
+
+    /** What a frame was shot with, from its EXIF: DEVELOP.TXT, and counted when it wasn't neutral. Worker thread. */
+    private void pictureLine(File src) {
+        PictureCheck.Result r = PictureCheck.read(src);
+        if (r == null) { devLog("picture " + src.getName() + ": not read"); return; }
+        devLog("picture " + src.getName() + ": " + r);
+        if (!r.neutral()) devNotNeutral++;
+    }
+
     // ------------------------------------------------------------------------------ negatives (filer thread)
 
     /** Copies an original into its roll's NEG folder and checks it; remembers when. Filer thread. */
@@ -1729,6 +1972,7 @@ public class MainActivity extends Activity {
      */
     private int fileSettled(Roll r, boolean wait) {
         if (HardwareDevelop.hung() || Viewfinder.opened || NeutralSettings.unanswered()) return 0;   // never alongside the camera, nor a settings request
+        if (!wait && (settingsJustChanged() || exiting)) return 0;   // nor just after a settings write (never tried): the next pass
         List<Integer> todo = unfiled(r);
         if (todo.isEmpty()) return 0;
         HardwareDevelop sony = new HardwareDevelop(this, card, new StringBuilder());
@@ -1758,7 +2002,7 @@ public class MainActivity extends Activity {
             long left = negAt.get(key) + SETTLE_MS - SystemClock.elapsedRealtime();
             if (left > 0 && !wait) continue;
             try {
-                while (left > 0 || !resumed || mode == PHOTO || shootPending) {
+                while (left > 0 || !resumed || mode == PHOTO || shootPending || settingsJustChanged() || exiting) {
                     if (Viewfinder.opened) return filed;
                     Thread.sleep(left > 0 ? Math.min(left, 500) : 500);
                     left = negAt.get(key) + SETTLE_MS - SystemClock.elapsedRealtime();
@@ -1789,6 +2033,12 @@ public class MainActivity extends Activity {
         return filed;
     }
 
+    /** A camera setting changed within SHOOT_SETTLE_MS: Sony's delete and a hardware develop wait it out (never tried beside one). */
+    private static boolean settingsJustChanged() {
+        long since = NeutralSettings.sinceLastWrite();
+        return since >= 0 && since < SHOOT_SETTLE_MS;
+    }
+
     /** Roll r has n originals still to file (Photos says so on its frames). Filer thread. */
     private void showFiling(Roll r, int n) {
         filingDir = r.dir;
@@ -1808,6 +2058,9 @@ public class MainActivity extends Activity {
 
     private void finishDevelop() {
         final Roll r = developing;
+        // frames not shot on a neutral base (shot before v0.48.0, or Latent couldn't set it): said, DEVELOP.TXT says how
+        final String nn = devNotNeutral > 0 ? "  \u00b7  " + devNotNeutral + " not shot neutral" : "";
+        devNotNeutral = 0;
         if (devFailed == 0 && !(r.endless() && r.isOpen())) {   // an endless roll in the camera is never finished
             r.state = Roll.DEVELOPED;
             if (r.dir.getName().equals(prefs.getString("roll", ""))) prefs.edit().remove("roll").commit();
@@ -1823,7 +2076,7 @@ public class MainActivity extends Activity {
         long secs = (System.currentTimeMillis() - devStarted) / 1000;
         if (r.endless()) {   // the photos just shot are in the camera roll: back to the camera back, ready to shoot
             final int n = r.developedCount() - devDoneAtStart;
-            final String m = devFailed == 0 ? n + (n == 1 ? " photo" : " photos") + " developed" : devFailed + " photo(s) could not be developed";
+            final String m = (devFailed == 0 ? n + (n == 1 ? " photo" : " photos") + " developed" : devFailed + " photo(s) could not be developed") + nn;
             endDarkroom(true);
             refresh(new Runnable() {
                 public void run() {
@@ -1834,8 +2087,8 @@ public class MainActivity extends Activity {
             });
             return;
         }
-        final String msg = devFailed == 0 ? r.label() + " developed in " + secs / 60 + " min " + secs % 60 + " s"
-                : devFailed + " frame(s) could not be developed";
+        final String msg = (devFailed == 0 ? r.label() + " developed in " + secs / 60 + " min " + secs % 60 + " s"
+                : devFailed + " frame(s) could not be developed") + nn;
         endDarkroom(true);
         refresh(new Runnable() {
             public void run() {
@@ -1908,7 +2161,7 @@ public class MainActivity extends Activity {
      * until you leave it: leavePhotos asks again), and not again in this visit after MENU paused one.
      */
     private void developWaiting() {
-        if (developing != null || restarting || shootPending || shootAfterFrame || !ready || !quietAllowed() || waitingHeld) return;
+        if (developing != null || restarting || exiting || shootPending || shootAfterFrame || !ready || !quietAllowed() || waitingHeld) return;
         final Roll next = nextWaiting();
         if (next == null) return;
         if (mode == SHEET || mode == VIEW) {   // looking at photos: never pulled out of them into the darkroom
@@ -3102,6 +3355,7 @@ public class MainActivity extends Activity {
         if (s1) s1Held = true;
         // the first new press: the keys are learnt. Not a held key's repeats (Android repeats a held button after
         // ~0.5 s), nor the half-press that opened the viewfinder and is still held: both used it up unseen
+        if (exiting) return true;   // Exit Latent: only MENU, on its release (stay)
         if (mode == PHOTO && coachUntil > 0 && e.getRepeatCount() == 0 && !(s1 && s1Opened)) endCoach();
         if (mode == PHOTO && vf != null) { vfKey(keyCode, e, true); return true; }
         if (sc >= 0 && sc == playScan()) {   // the camera's Playback button: Photos, and back
@@ -3143,6 +3397,12 @@ public class MainActivity extends Activity {
     public boolean onKeyUp(int keyCode, KeyEvent e) {
         int sc = e.getScanCode();
         if (sc == SC_S1 || keyCode == KeyEvent.KEYCODE_FOCUS) { s1Held = false; s1Opened = false; }
+        if (exiting) {   // leaving: MENU stays in Latent (not once it's restarting for it); nothing else does anything
+            shutterDown = false;
+            boolean m = sc == SC_MENU || sc == SC_SK1 || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_BACK;
+            if (m && !restarting && !exitAfterStart && leaveAt != 0) stayInLatent();   // once your settings are back, never mid-restore
+            return true;
+        }
         if (mode == PHOTO && vf != null) { vfKey(keyCode, e, false); return true; }
         if (shutterKey(sc, keyCode)) {
             if (shutterDown) {
@@ -3182,6 +3442,13 @@ public class MainActivity extends Activity {
         s.battery = battery;
         s.toast = status;
         s.width = logicalWidth;
+        if (exiting) {   // Exit Latent's own screen, over any mode (Ui.leaving)
+            s.mode = UiState.BACK;   // drawn whole, as the camera back is
+            s.leavingIn = leaveAt == 0 ? 0 : (int) Math.max(1, (leaveLeft() + 999) / 1000);
+            s.leavingTotal = leaveTotal;
+            s.leavingNote = exitNote;
+            return s;
+        }
         Stock cur = current == null ? null : Stock.byId(films, current.stock);
         switch (mode) {
             case BACK:

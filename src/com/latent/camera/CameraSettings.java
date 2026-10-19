@@ -44,7 +44,7 @@ final class CameraSettings {
 
     static String style(int v) { return v >= 0 && v < STYLES.length && STYLES[v] != null ? STYLES[v] : "style " + v; }
 
-    static String dro(int v) { return v == 0 ? "Off" : v == 1 ? "Auto" : v <= 6 ? "Lv" + (v - 1) : "dro " + v; }
+    static String dro(int v) { return v == 0 ? "Off" : v == 1 ? "Auto" : v <= 6 ? "Lv" + (v - 1) : String.valueOf(v); }
 
     static String signed(int v) { return v > 0 ? "+" + v : String.valueOf(v); }
 }

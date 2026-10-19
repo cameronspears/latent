@@ -15,6 +15,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -75,6 +76,8 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         void stuck(String what);
         /** Latent's own drawing over live view, shown (true) or not (only the camera's picture). */
         void hud(boolean on);
+        /** Latent is in front (not paused): only then may the viewfinder change a camera setting. */
+        boolean inFront();
     }
 
     /**
@@ -636,6 +639,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             }
             note("focus " + afMode + ", " + afArea + "; " + shutter + " " + aperture + " ISO " + (isoAuto ? "auto" : iso) + ", exposure " + ev + "/3");
             pictureNote(p);
+            neutralPicture(p);
             flushLogSoon();   // the long dump onto the card now, not with the first shutter's flush
         } catch (Throwable e) {
             note("settings: " + Probe.why(e));
@@ -676,6 +680,69 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
         }
         note("picture: " + (pick.length() > 0 ? pick.toString() : "none of the picture keys"));
         for (int i = 0; i < all.length(); i += 400) note("parameters " + (i / 400 + 1) + ": " + all.substring(i, Math.min(all.length(), i + 400)));
+    }
+
+    /**
+     * Latent's shots neutral in its own camera session (v0.48.0). The camera's interface keeps contrast, saturation and
+     * sharpness of its own, which the camera's own mode doesn't use: every Latent shot since Oct 16 came out -1 / +1 / -1
+     * while the menus (and every own-mode shot) were 0 / 0 / 0. Any of the three not 0 is set to 0 here, once a visit,
+     * sending only those keys (as the exposure is sent), after live view starts and before the frames and the shutter.
+     * Never once closing or with Latent away. The first picture then waits NEUTRAL_HOLD_MS, and the camera isn't given
+     * back within NeutralSettings.SETTLE_MS of it (closeStep). The white balance shift keys follow the menus' stored
+     * shift, which only NeutralSettings sets (noting yours first), so they are left alone here.
+     */
+    static final boolean NEUTRAL_PICTURE = true;
+    static final String[] PICTURE_KEYS = { "contrast", "saturation", "sharpness" };
+    static final long NEUTRAL_HOLD_MS = 3000;
+    private long neutralAt;   // when the picture keys were set this visit (uptime ms); 0: not
+    private int holdNotes;
+
+    /** The picture keys in a flatten()ed parameter list that aren't 0: {key, value} each (a value not a whole number is left alone). */
+    static List<String[]> notNeutral(String flat) {
+        List<String[]> out = new ArrayList<String[]>();
+        if (flat == null) return out;
+        java.util.Map<String, String> kv = new java.util.HashMap<String, String>();
+        for (String pair : flat.split(";")) {
+            int eq = pair.indexOf('=');
+            if (eq > 0) kv.put(pair.substring(0, eq), pair.substring(eq + 1));
+        }
+        for (String k : PICTURE_KEYS) {
+            String v = kv.get(k);
+            if (v == null) continue;
+            try { if (Integer.parseInt(v.trim()) != 0) out.add(new String[] { k, v.trim() }); } catch (NumberFormatException e) { /* not ours to change */ }
+        }
+        return out;
+    }
+
+    private static String keys(List<String[]> kv) {
+        StringBuilder b = new StringBuilder();
+        for (String[] e : kv) b.append(b.length() == 0 ? "" : ", ").append(e[0]).append(' ').append(e[1]);
+        return b.toString();
+    }
+
+    private void neutralPicture(Camera.Parameters p) {
+        if (!NEUTRAL_PICTURE) return;
+        List<String[]> off = notNeutral(p.flatten());
+        if (off.isEmpty()) { note("picture: neutral"); return; }
+        if (closing || closed || !host.inFront()) { note("picture: not set neutral (" + (closing || closed ? "closing" : "Latent was left") + "): " + keys(off)); return; }
+        note("picture: setting to 0: " + keys(off));
+        flushLog();   // on the card first: if the camera restarts now, the log says what was asked
+        long t = SystemClock.uptimeMillis();
+        try {
+            Camera.Parameters q = (Camera.Parameters) cameraEx.getClass().getMethod("createEmptyParameters").invoke(cameraEx);
+            for (String[] e : off) q.set(e[0], "0");
+            NeutralSettings.wrote();   // before the request too: one that fails may still reach the camera
+            camera.setParameters(q);
+            NeutralSettings.wrote();
+            neutralAt = SystemClock.uptimeMillis();
+            List<String[]> still = notNeutral(camera.getParameters().flatten());
+            note("picture: " + (still.isEmpty() ? "neutral" : "still " + keys(still)) + " (" + (neutralAt - t) + " ms)");
+            if (!still.isEmpty()) say("Not neutral: the camera kept " + still.get(0)[0] + " " + still.get(0)[1]);
+        } catch (Throwable e) {
+            neutralAt = SystemClock.uptimeMillis();
+            note("picture: not set neutral (" + Probe.why(e) + ")");
+            say("Not neutral: the camera kept its picture settings");
+        }
     }
 
     // ------------------------------------------------------------------------------ live frames with the look
@@ -1813,6 +1880,17 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
 
     public void shoot() {
         if (closed) return;
+        long hold = neutralAt == 0 ? 0 : neutralAt + NEUTRAL_HOLD_MS - SystemClock.uptimeMillis();
+        if (hold > 0) {   // the picture settings just changed (neutralPicture): a moment first
+            if (holdNotes++ < 3) note("the shutter waits " + hold + " ms: the picture settings just changed");
+            ui.postDelayed(new Runnable() {
+                public void run() {
+                    if (closing || closed || hidden) { release.shot(false); return; }
+                    shoot();
+                }
+            }, hold);
+            return;
+        }
         if (SAVE_FIRST && stored < shots) {   // the last picture first
             if (shootWaits++ < 10) note("the shutter waits: a picture is being saved");
             ui.postDelayed(new Runnable() { public void run() { shoot(); } }, 100);
@@ -2525,6 +2603,7 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
     // ------------------------------------------------------------------------------ closing
 
     private boolean closing, held;
+    private boolean settleNoted;   // closing waited for the settle after a setting change (said once)
     private long closingAt;
     static final long SAVE_WAIT_MS = 30000;
     private String closeWhy;
@@ -2553,6 +2632,14 @@ final class Viewfinder implements SurfaceHolder.Callback, Release.Camera {
             if (closed || held) return;
             ui.removeCallbacks(poll);   // no frames while closing: the camera's processor is for the pictures
             ui.removeCallbacks(feeder);
+            // never given back within the settle after a picture-key or exposure change (v0.48.0): the camera's own mode
+            // could shoot at once, and that soon after a change has restarted the A5100. Latent keeps it until then
+            long since = NeutralSettings.sinceLastWrite();
+            if (since >= 0 && since < NeutralSettings.SETTLE_MS && SystemClock.uptimeMillis() - closingAt < SAVE_WAIT_MS) {
+                if (!settleNoted) { settleNoted = true; note("closing: keeping the camera " + (NeutralSettings.SETTLE_MS - since) + " ms more (a setting changed " + since + " ms ago)"); }
+                ui.postDelayed(this, Math.min(500, NeutralSettings.SETTLE_MS - since));
+                return;
+            }
             if (storing() && cameraEx != null) {
                 // never given back with a picture still in the camera's memory: every time that froze it
                 if (SystemClock.uptimeMillis() - closingAt < SAVE_WAIT_MS) {

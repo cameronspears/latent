@@ -144,21 +144,32 @@ public class RenderScreens {
 
         // ---- the menu, its rows from Ui.menuRows (as MainActivity builds them): a roll loaded, 9 shot
         Ui.Menu m = new Ui.Menu();
-        m.roll = true; m.developNow = true; m.changeFilm = true; m.exposed = 9; m.photos = true; m.version = "0.47.0";
+        m.roll = true; m.developNow = true; m.changeFilm = true; m.exposed = 9; m.photos = true; m.version = "0.48.0";
         s = menu(m, 1, cuban);
         render(s, "6-menu");
         s = menu(m, 3, cuban);
         render(s, "6c-menu-photos");
+        m.yours = "A2 \u00b7 M2, contrast +1, saturation +1, DRO Auto";   // Exit Latent (v0.48.0): your settings, kept while Latent shoots neutral
+        s = menu(m, Ui.menuRows(m).size() - 1, cuban);
+        render(s, "6g-menu-exit");
+        m.yours = "";
+        // Exit Latent's own screen: your settings going back, then the wait before the camera's own mode
+        s = state();
+        s.mode = UiState.BACK;
+        s.leavingIn = 0;
+        render(s, "6h-exit-putting-back");
+        s.leavingIn = 4; s.leavingTotal = 6; s.leavingNote = "A2 \u00b7 M2, contrast +1, saturation +1, DRO Auto";
+        render(s, "6i-exit-leaving");
         Ui.Menu endless = new Ui.Menu();   // an endless roll: no Develop now (it develops as you go)
-        endless.roll = true; endless.changeFilm = true; endless.endless = true; endless.exposed = 23; endless.photos = true; endless.version = "0.47.0";
+        endless.roll = true; endless.changeFilm = true; endless.endless = true; endless.exposed = 23; endless.photos = true; endless.version = "0.48.0";
         s = menu(endless, 1, trix);
         render(s, "6b-menu-endless");
         Ui.Menu empty = new Ui.Menu();   // no roll, nothing developed yet: the photos grey, and the footer says why
-        empty.version = "0.47.0";
+        empty.version = "0.48.0";
         s = menu(empty, 1, null);
         render(s, "6e-menu-no-photos");
         Ui.Menu developing = new Ui.Menu();   // a roll developing (paused): nothing of the roll's to do here, so no "This roll"
-        developing.roll = true; developing.exposed = 24; developing.photos = true; developing.version = "0.47.0";
+        developing.roll = true; developing.exposed = 24; developing.photos = true; developing.version = "0.48.0";
         s = menu(developing, 1, cuban);
         render(s, "6f-menu-roll-developing");
         menuHeadings();
@@ -1040,7 +1051,7 @@ public class RenderScreens {
             g.setFont(Font.createFont(Font.TRUETYPE_FONT, new File(fonts, "inter-medium.ttf")).deriveFont(16f));
             g.setColor(new Color(0xBBBBBB));
             g.drawString("before  \u00b7  " + name, 10, 23);
-            g.drawString("after (v0.47.0)", bi.getWidth() + gap + 10, 23);
+            g.drawString("after (v0.48.0)", bi.getWidth() + gap + 10, 23);
             g.drawImage(bi, 0, top, null);
             g.drawImage(ai, bi.getWidth() + gap, top, null);
             g.dispose();

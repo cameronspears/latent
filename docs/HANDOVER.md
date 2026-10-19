@@ -1,10 +1,10 @@
 # Latent: notes for the next session
 
 Written 2026-10-17 at **v0.45.0**, brought up to **v0.46.0** on 2026-10-18 (the looks rebuilt), then
-**v0.46.1** (the neutral settings read back) and **v0.47.0** (focus: Phase 1 of `docs/AUTOFOCUS.md`, built
-in its own session and merged here). The camera has **v0.46.0** (installed 2026-10-18; Roll 005 shot and
-developed on it). v0.47.0 is built and tested on the Mac, not yet installed: v0.46.1 and the focus work go
-to the camera together.
+**v0.46.1** (the neutral settings read back), **v0.47.0** (focus: Phase 1 of `docs/AUTOFOCUS.md`, built in its
+own session and merged here) and **v0.48.0** (neutral for every Latent shot, and Exit Latent). The camera has
+**v0.47.0** (installed 2026-10-18 about 18:50; one run, below). v0.48.0 is built and tested on the Mac, not yet
+installed; its first visit should be supervised (the next camera visit, below).
 `README.md` is the user guide and explains the develop pipeline. This file is the working context.
 
 ## The project in one paragraph
@@ -59,7 +59,7 @@ on-camera tests.
 | The software develop's threads | `tools/threads-test.sh` (the writer on core 3, a look worker on 1 and 2; with cores refused through `FL_REFUSE_CORES`, every develop the same as one thread's and on the threads expected; UBSan) |
 | Darkroom outputs unchanged | `tools/compare-builds.sh OLD_FLTOOL NEW_FLTOOL testdata/*.JPG` |
 | Sanitizer | `tools/sanitize-test.sh testdata/*.JPG` |
-| Neutral settings | `tools/settings-test.sh` (the write fence, apply and restore, against a stand-in service) |
+| Neutral settings | `tools/settings-test.sh` (the write fence; neutral on the way to shooting with a menu change adopted, the gate, a refused or hung call, the note's safe replace, Exit's restore; against a stand-in service) |
 | The .cube reader | `tools/cube-test.sh` |
 | Image core on the Mac | `tools/build-host.sh`, then `out/host/fltool` (`fltool focus PHOTO.JPG...`: the focus check's scores) |
 
@@ -106,7 +106,7 @@ line it misses.
 - `tools/make_luts.py`: the five looks (Natural, Portra, Cuban Neg, Painterly, Tri-X), each a model of
   film printed on paper; `tools/look-sheet.py` develops them all on the test photos through the core.
 
-## What works on the camera (v0.44.1; v0.46.0 since 2026-10-18)
+## What works on the camera (v0.44.1; v0.46.0 and v0.47.0 since 2026-10-18)
 
 - Home screen:
   - Choose film full screen.
@@ -121,7 +121,76 @@ line it misses.
 - Latent's own viewfinder with the film look live: ~11 frames a second (up to ~15).
 - Test shots are kept off rolls through `LATENT/IGNORE.TXT`.
 
-## What v0.47.0 changes (Mac-tested only): focus
+## What v0.48.0 changes (Mac-tested only): every Latent shot neutral, and Exit Latent
+
+The user's rule: "ANY time I'm shooting with Latent, it needs to use a neutral base." v0.47.0's run (2026-10-18,
+18:52-18:56, below) showed it didn't hold, on two counts. Every photo Latent's viewfinder has ever taken (99 on
+the card) records Creative Style Standard at contrast -1, saturation +1, sharpness -1: the camera interface's own
+`contrast`/`saturation`/`sharpness` keys, separate from the 11 stored settings (which read 0/0/0), and not used by
+the camera's own mode (DSC04708, DSC04864: 0/0/0). Whether that's Recipe Lab's leftover or what the interface
+gives every app session is unknown. And the user's WB fine-tune A2/M2, set in the menu at about 11:31 for their
+own shooting, sat in the stored settings, which v0.46.1 only read. The user asked for neutral while shooting
+with Latent and a menu option that gives their settings back ("I don't really care how it gets done").
+
+- **Neutral on the way to shooting** (`NeutralSettings.neutralize`, from `goShoot` once a visit and from
+  `loadRoll`): with no note, as `apply()`. With one, the 11 are read back (each read 1.5 s at most, as v0.46.1's
+  check); a setting changed since Latent set it and inside its menu range is adopted as yours (the note first;
+  a changed WB mode brings the grid read with it, and restore leaves the grid alone on a mode you chose since),
+  then set neutral again (`writeAll`: each write read back; a WB mode write is followed by a look at its four
+  fine-tune copies; on a failure this batch is put back). Outside its range: said, left. `apply()` too now
+  leaves a value outside the write fence where it is (as 'ours'), so restore can always complete. `goShoot` shows "Getting ready…", then the
+  6 s settle only if something was written. The card read's v0.46.1 check is gone (neutralize reads the same).
+- **The gate** (`NeutralSettings.Gate`, MainActivity's `inFront`: `resumed && !Viewfinder.opened`), asked before
+  every write, every undo and the sync. Writes run under `HardwareDevelop.SONY` (never beside Sony's delete), on
+  the worker. `loadRoll` with the viewfinder hidden writes nothing (it was set when that viewfinder opened).
+- **Safety fixes to the existing write paths** (found by the review of the plan): `lastWriteAt` is stamped before
+  each request (a refused or unanswered write arms the settle too); a call that hung makes `unanswered()` true for
+  the rest of the run (it fenced only check()'s reads), and `call()` refuses once stuck; `NEUTRAL.TXT` is synced
+  and replaced by way of `NEUTRAL.OLD` (found again after a crash between the renames); the restore when no roll
+  is loaded is gated and under `SONY`; Sony's delete waits out the settle after any setting change (checked
+  again under `SONY` in `removeOriginal`, where every stored write stamps it), and a develop's worker waits it
+  out before Sony's pipeline is set up (`prepare`) and again before each hardware frame.
+- **Latent's camera session** (`Viewfinder.neutralPicture`, `NEUTRAL_PICTURE`): after `startPreview`, in
+  `readSettings`, any of `contrast`, `saturation`, `sharpness` not 0 is set to 0 with `createEmptyParameters` and
+  one `setParameters`
+  (as `applyEvNow` sends the exposure), then read back and logged (`picture: setting to 0: ...`, `picture:
+  neutral (N ms)`). A breadcrumb is flushed first. Not once closing or with Latent away (`Host.inFront`). The
+  first picture waits `NEUTRAL_HOLD_MS` (3 s) after it; `closeStep` keeps the camera until `SETTLE_MS` after the
+  last picture-key or exposure change, so the camera's own mode can't shoot sooner. Nothing is put back: the
+  camera's own mode doesn't use these keys. The WB shift keys are left alone: they follow the menus' stored
+  shift, which only NeutralSettings writes (noting yours first). This is the one new kind of camera write; EV
+  through the same call ran 92 times on this body without a restart, and Picture Effect three times in
+  v0.27.0's test.
+- **Exit Latent** (the menu's last row, under "Latent"): `restore(gate)` (only settings still at Latent's
+  values; `restored` says what the camera now has), `Library.markAway` (LATENT/AWAY.TXT: the highest photo
+  number), then "Your camera settings are back · Leaving in N s" until `SETTLE_MS` after the last write (at least
+  1.5 s, and the power-save hold released first with its own 1 s settle, and never mid-press), then `handOver`
+  (HOME, as goShoot with no roll). MENU there stays in Latent, clears AWAY.TXT, and the next shoot sets
+  neutral again (Exit clears `neutralForShoot`). With the camera opened in
+  this process, Latent first restarts (`restartToExit`, Relaunch with why "exit", drawing the same screen) and
+  the new process does it once its card is read. The next card read moves photos numbered above AWAY.TXT's (the
+  camera's own mode, with the user's settings) into IGNORE.TXT, so no roll takes them (`Library.settleAway`).
+- **Proof on every frame** (`PictureCheck`, `pictureLine`): each original the darkroom develops gets
+  `picture DSC....JPG: Standard 0/0/0, WB shift 0 · 0, DRO off: neutral` (or what isn't) in DEVELOP.TXT, from
+  Sony's makernote (0x2004-6, 0x2014, 0xB020, 0xB025, 0x200E, 0x200A, each only in the A5100's own form), else
+  EXIF's levels; the darkroom's message adds "N not shot neutral". A makernote match can't prove everything the
+  interface might do (it also reports `pro-color-mode=pro-vivid`, recorded nowhere): an A/B of one scene, own
+  mode against Latent, would.
+- Reviewed by two workflow rounds (each finding verified by a skeptic): round 1, 18 of 34 verdicts real, 9 distinct
+  fixes; round 2 on those fixes, 4 more (the develop's settle moved onto its worker, an out-of-range value left by
+  apply() made neutral once back in range, MENU stays only once your settings are back, the hand-over waits for
+  filing and card reads), and a 5th: a finished roll gets no neutral write, and the darkroom drops a shoot still
+  waiting. All in.
+- Tests: SettingsTest (48 checks), RollTest (`away`), LogicTest (`pictureCheck`, STREET.JPG and built EXIF),
+  ViewfinderTest (`neutralKeys`, from the run's real parameter list). Every screen renders as v0.47.0's except the
+  menus (the new row; the version moves to it) and three new ones (6g, 6h, 6i).
+
+## What v0.47.0 changes (on the camera since 2026-10-18): focus
+
+First run (2026-10-18 18:52-18:56, Roll 005, 4 shots): the steady shutter took DSC04899 and DSC04900 at 1/25
+"on a still frame" 175 and 108 ms after the press; every focus check said sharp. In the first visit the check
+ran inside the viewfinder about 5 s after each shot (Linux did see those photos), in the two short visits after
+it they went to TOCHECK.TXT and were checked after the restart. The boxes and Flexible Spot weren't tried.
 
 `docs/AUTOFOCUS.md` has the evidence and the plan; this is Phase 1, with no new camera call or setting.
 
@@ -155,7 +224,7 @@ line it misses.
   every develop is identical to v0.46.1's (`compare-builds.sh`, 32 of 32; LAKE.JPG is refused by both).
 
 
-## What v0.46.1 changes (Mac-tested only): neutral read back
+## What v0.46.1 changes (on the camera since 2026-10-18; check() replaced by neutralize in v0.48.0): neutral read back
 
 v0.46.0's first camera run (Roll 005) showed Latent's frames are not neutral: every photo shot through
 Latent's viewfinder since Oct 16 (95 of them) records contrast -1, saturation +1, sharpness -1, while the
@@ -566,15 +635,24 @@ Each thread has its own last error (a pthread key: Android 2.3 has no `__thread`
 
 ## The next camera visit: what to check, and the lines that answer it
 
-Neutral (v0.46.1):
+Neutral (v0.48.0), first, with the user there (its first visit is the first time Latent sets the interface's
+picture keys):
 
-- DEVELOP.TXT, each open with a roll loaded: `neutral: read back in N ms: 0x01070019=… …` (expect contrast
-  0x01070178, saturation 0x01070187, sharpness 0x0107018a at 0, and the user's A2/M2 in 0x01070017/16 and
-  the Auto copies 0x0107067f/e, if they set it in the menu), then `as Latent set them` or `changed since`.
-  check() never writes: `wrote` lines come only from apply() (loading film with no note) and restore() (a
-  12/24/36 roll developed), as in v0.46.0. `start: camera on for N s` must keep climbing (no restart).
-- VIEWFIND.TXT, each visit: `picture: …` and `parameters 1..N:`: which keys say contrast -1, saturation +1,
-  sharpness -1 (and a creative style), and whether a WB shift key follows the menu's A2/M2.
+- **Install, open Latent, half-press.** The camera back says "Getting ready…", then "Shooting in N s" (the A2/M2
+  the user set is written back to 0 and adopted as theirs). DEVELOP.TXT: `neutral: changed since Latent set
+  them: 0x01070017 0->2, ...` then `wrote ...` lines and `neutral: set again for shooting`.
+- **In the viewfinder**, VIEWFIND.TXT: `picture: setting to 0: contrast -1, saturation 1, sharpness -1` then
+  `picture: neutral (N ms)`. Take one test shot (into IGNORE.TXT afterwards if the user wants), after the 3 s
+  hold. `start: camera on for N s` must keep climbing on the next start (no restart).
+- **The next visit's `picture:` line** says whether the keys stayed 0 (written once) or came back -1/+1/-1
+  (then each visit writes them, and the first shot waits 3 s each time).
+- **The developed frame**: DEVELOP.TXT `picture DSC....JPG: Standard 0/0/0, WB shift 0 · 0, DRO off: neutral`.
+  Compare it by eye with an own-mode shot of the same scene (the `pro-color-mode` question).
+- **Exit Latent** from the menu: "Your camera settings are back: A2 · M2, contrast +1, saturation +1, DRO Auto"
+  (NEUTRAL.TXT's Oct 16 values with today's A2/M2), the countdown, then the camera's own shooting. Shoot one
+  frame there: its EXIF should show A2/M2 and contrast +1 (the user's own). Open Latent again: DEVELOP.TXT `exit:
+  1 photo(s) shot in the camera's own mode since Exit Latent, kept off the rolls`, and that photo isn't on Roll 005.
+- If anything restarts the camera: `NEUTRAL_PICTURE = false` in Viewfinder turns the session write off alone.
 
 The looks (v0.46.0): the first run (2026-10-18, Roll 005) confirmed the five looks replaced on the card,
 the first frame's film ready (`setup=14 (ready)`) and the prints within about a level of the Mac's. Still open:

@@ -235,7 +235,44 @@ public class RollTest {
         photoOrder(new File(card.getParentFile(), "sortcard"));
         developedAll(new File(card.getParentFile(), "photoscard"));
         waiting(new File(card.getParentFile(), "waitcard"));
+        away(new File(card.getParentFile(), "awaycard"));
         System.out.println("ROLL OK");
+    }
+
+    /** Exit Latent (v0.48.0): photos shot in the camera's own mode after it stay off every roll; Latent's own after that join. */
+    static void away(File card) throws Exception {
+        File dcim = new File(card, "DCIM/100MSDCF");
+        long t = 1700000000000L;
+        for (int n = 1; n <= 3; n++) touch(new File(dcim, "DSC0490" + n + ".JPG"), t + n * 1000);
+        touch(new File(card, "LATENT/IGNORE.TXT"), 0);
+        java.nio.file.Files.write(new File(card, "LATENT/IGNORE.TXT").toPath(), "100MSDCF/DSC04735.JPG\r\n".getBytes("UTF-8"));
+        File awayNote = new File(card, "LATENT/AWAY.TXT");
+        check(Library.settleAway(card, Library.photos(card)) == null, "no Exit: nothing to settle");
+        Library.markAway(card, Roll.highest(Library.photos(card)));   // left with DSC04903 the newest
+        check(awayNote.exists() && Library.settleAway(card, Library.photos(card)).contains(" 0 photo(s)") && !awayNote.exists(),
+                "back with nothing shot meanwhile: nothing kept off, the note gone");
+        Library.markAway(card, Roll.highest(Library.photos(card)));
+        touch(new File(dcim, "DSC04904.JPG"), t + 4000);   // the camera's own mode, with your settings
+        touch(new File(dcim, "DSC04905.JPG"), t + 5000);
+        touch(new File(card, "DCIM/101MSDCF/DSC00001.JPG"), t + 6000);   // ... into the next folder
+        String said = Library.settleAway(card, Library.photos(card));
+        java.util.List<File> left = Library.withoutIgnored(card, Library.photos(card));
+        java.util.Set<String> names = new java.util.HashSet<String>();
+        for (File f : left) names.add(f.getName());
+        check(said.contains("3 photo(s)") && !awayNote.exists() && left.size() == 3 && names.contains("DSC04903.JPG") && !names.contains("DSC04904.JPG")
+                && !names.contains("DSC00001.JPG"), "after Exit, the camera's own shots (into the next folder too) stay off the rolls: " + said);
+        String ignore = new String(java.nio.file.Files.readAllBytes(new File(card, "LATENT/IGNORE.TXT").toPath()), "UTF-8");
+        check(ignore.startsWith("100MSDCF/DSC04735.JPG") && ignore.contains("101MSDCF/DSC00001.JPG"), "IGNORE.TXT keeps its old lines, the new ones added");
+        touch(new File(dcim, "DSC04906.JPG"), t + 7000);   // Latent's next shot, with no Exit since
+        check(Library.settleAway(card, Library.photos(card)) == null && Library.withoutIgnored(card, Library.photos(card)).size() == 4,
+                "a later shot with no Exit since counts as before");
+        Library.markAway(card, Roll.highest(Library.photos(card)));   // Exit, then MENU: staying in Latent
+        Library.clearAway(card);
+        touch(new File(dcim, "DSC04907.JPG"), t + 8000);   // Latent's next shot
+        check(Library.settleAway(card, Library.photos(card)) == null && Library.withoutIgnored(card, Library.photos(card)).size() == 5,
+                "Exit called off (MENU): Latent's next shots still join the roll");
+        java.nio.file.Files.write(awayNote.toPath(), "garbled".getBytes("UTF-8"));
+        check(Library.settleAway(card, Library.photos(card)).contains("unreadable") && !awayNote.exists(), "a damaged AWAY.TXT is removed, nothing kept off");
     }
 
     /**

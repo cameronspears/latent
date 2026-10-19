@@ -37,7 +37,23 @@ public class ViewfinderTest {
         focusVerdicts();
         focusLater(new File(a[0]));
         steady();
+        neutralKeys();
         System.out.println("ViewfinderTest: all passed");
+    }
+
+    /** v0.48.0: the camera interface's picture keys set to 0 in Latent's session: which, from today's real parameter list. */
+    static void neutralKeys() {
+        String flat = "max-contrast=3;contrast=-1;saturation=1;min-sharpness=-3;sharpness=-1;sharpness-gain=0;light-balance-for-white-balance=2;"
+                + "color-compensation-for-white-balance=2;min-light-balance-for-white-balance=-7;white-balance-shift-lb=0;color-mode=standard;dro-level=1";
+        java.util.List<String[]> off = Viewfinder.notNeutral(flat);
+        StringBuilder got = new StringBuilder();
+        for (String[] kv : off) got.append(kv[0]).append('=').append(kv[1]).append(' ');
+        check(got.toString().equals("contrast=-1 saturation=1 sharpness=-1 "),
+                "Latent's -1/+1/-1 is what's set to 0 (the WB shift, which follows the menus', min/max, gain, DRO level and the style left alone): " + got);
+        check(Viewfinder.notNeutral("contrast=0;saturation=0;sharpness=0;light-balance-for-white-balance=0;color-compensation-for-white-balance=0").isEmpty(),
+                "already neutral: nothing sent");
+        check(Viewfinder.notNeutral("contrast=high;sharpness=;saturation").isEmpty() && Viewfinder.notNeutral(null).isEmpty(),
+                "values that aren't whole numbers (or no list) are left alone");
     }
 
     /** VF-04: a press held through focus is taken inside focused(), so the viewfinder reads exposure only when it wasn't. */

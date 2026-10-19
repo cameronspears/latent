@@ -18,15 +18,16 @@ shows your developed photos too, without a trip to the camera's Playback.
 *The screens as Latent draws them, rendered on a Mac from the same code the camera runs
 (`tools/readme-images.sh`). The photos in them are the test photos credited below.*
 
-Status: **v0.47.0**. v0.46.0 runs on the A5100 (installed 2026-10-18): rolls (12, 24, 36 or ∞),
+Status: **v0.48.0**. v0.47.0 runs on the A5100 (installed 2026-10-18): rolls (12, 24, 36 or ∞),
 Latent's own viewfinder with the film look live, the darkroom into the camera roll on three cores,
 negatives, Photos and the five looks all work there. v0.45.0 made Latent lighter (no Lab, no settings,
 no camera tests) and added Photos, a faster viewfinder and a screen that saves the battery; v0.46.0
 rebuilt the looks: five films on a new film model, with new grain (below). v0.47.0 adds smarter focus:
 the viewfinder shows where the camera really focuses, a slow shot waits for the camera to hold still,
-and every photo is checked for focus once it's on the card (`docs/AUTOFOCUS.md`); and each visit with
-a roll loaded reads the camera's neutral settings back (v0.46.1). v0.47.0 is tested on a Mac, not yet
-on the camera: the figures below marked as estimates wait for the camera's logs. See
+and every photo is checked for focus once it's on the card (`docs/AUTOFOCUS.md`). v0.48.0 makes every
+shot Latent takes neutral, whatever the camera was set to, and adds **Exit Latent** to the menu: your
+own camera settings back, then the camera's own shooting. v0.48.0 is tested on a Mac, not yet on
+the camera: the figures below marked as estimates wait for the camera's logs. See
 `docs/HANDOVER.md` for where things stand.
 
 ## Install (about 2 minutes)
@@ -56,9 +57,10 @@ roll's last three frames in the film's colour).
 - The centre button or a half-press opens Latent's viewfinder.
 - DOWN shows your photos.
 - MENU opens the menu.
-- Right after you load film, the camera needs about 6 seconds before it can shoot: Latent has just
-  set it to neutral, and shooting sooner restarts the A5100. The camera back counts it down
-  ("Shooting in 4 s") and then opens the viewfinder.
+- When Latent has just set the camera to neutral (you loaded film, or changed something in the
+  camera's own menu since you last shot with Latent), the camera needs about 6 seconds before it
+  can shoot: shooting sooner restarts the A5100. The camera back counts it down ("Shooting in 4 s")
+  and then opens the viewfinder.
 
 <img src="docs/images/camera-back.jpg" width="426" alt="The camera back: frame 09 of 24 in Cuban Neg, the roll's ticks below">
 
@@ -190,11 +192,12 @@ to develop waits until you leave. You can't open Photos from the viewfinder or t
   and develops what's shot, after a restart if you've opened the viewfinder), Change film (the
   frames shot so far develop by themselves, as above).
 - **All rolls:** Photos.
+- **Latent:** Exit Latent: your own camera settings back, then the camera's own shooting (below).
 
-The line at the foot says what the chosen row does, or why it can't right now. On Photos it ends
-with Latent's version.
+The line at the foot says what the chosen row does, or why it can't right now. On Exit Latent it
+ends with Latent's version.
 
-<img src="docs/images/menu.jpg" width="426" alt="The menu: This roll (Develop now, Change film) and All rolls (Photos)">
+<img src="docs/images/menu.jpg" width="426" alt="The menu: This roll (Develop now, Change film), All rolls (Photos) and Latent (Exit Latent)">
 
 **A screen left alone** (the camera back, Choose film, the menu, the contact sheet) dims to about
 30% after 30 seconds untouched, as a phone dims before it locks. The first press only wakes it; a
@@ -203,20 +206,29 @@ does any screen while Latent holds the camera: once you've opened the viewfinder
 with MENU without shooting, the camera stays open behind every screen until Latent gives it back
 (when you leave, or to develop). The camera's own power-saving setting isn't touched for this.
 
-**Neutral while a roll is loaded.** Latent sets the camera to neutral (white balance Auto with
-fine-tune 0 / 0, Creative Style Standard 0 / 0 / 0, DRO off) and puts your own settings back once
-the roll is developed. Your values are kept in `LATENT/NEUTRAL.TXT` until then. Latent can only
-write those few settings, within their menu ranges, and only while it's on screen. If you leave
-while a roll's last frame develops, the roll finishes and your settings come back the next time
-you open Latent; film loaded just as you leave is set neutral then, before anything shoots.
-
-Each time you open Latent with a roll loaded, it reads those settings back and notes in
-`LATENT/DEVELOP.TXT` any that changed since it set them (in the camera's menus, or by another app).
-v0.46.1 only notes them: it reads, and changes nothing. Its viewfinder also notes, in
-`LATENT/VIEWFIND.TXT`, the picture settings Sony's camera interface uses for Latent's own shots. The
-first camera run of v0.46.0 found those at contrast −1, saturation +1, sharpness −1 while the
-camera's menus read neutral, most likely left there by Recipe Lab. Making Latent's shots neutral
-whatever the camera holds is the next step.
+**Neutral whenever you shoot with Latent.** Every photo Latent takes starts from a neutral camera:
+white balance Auto with fine-tune 0 / 0, Creative Style Standard 0 / 0 / 0, DRO off. Your own
+settings are kept in `LATENT/NEUTRAL.TXT` and come back with **Exit Latent**.
+- **On the way to shooting** (loading film, and the first shot of each visit), Latent reads those
+  settings back. Anything you changed in the camera's own menu since it last set them (say, a white
+  balance shift) becomes your setting, kept with the rest, and is set neutral again. That costs
+  the 6-second wait above, once, only when something changed.
+- **In its own viewfinder**, Latent also sets the camera interface's own contrast, saturation and
+  sharpness to 0 (the first shot of that visit waits 3 s after it). The camera keeps these apart from its menus, and before v0.48.0 every photo
+  Latent took came out at contrast −1, saturation +1, sharpness −1 (most likely left there by Recipe
+  Lab). The camera's own mode doesn't use them, so your own shooting isn't affected.
+- **Exit Latent** (MENU) puts your settings back, then hands over to the camera's own shooting
+  once it's safe: "Your camera settings are back · Leaving in 6 s". MENU there stays in Latent.
+  Photos you take in the camera's own mode after Exit are yours: they never join a roll. The next
+  time you shoot with Latent, it sets neutral again. If you leave Latent another way (the camera's
+  buttons, or switching off), the camera stays neutral until you come back and Exit.
+- With no roll loaded (a roll of 12, 24 or 36 developed), your settings come back by themselves.
+- Latent writes only those few settings, within their menu ranges, only while it's on screen and
+  never with the camera open in its own process. A setting outside what Latent may write (DRO as
+  Auto HDR leaves it, say) is left as it is, and the camera back says so.
+- Every frame the darkroom develops is checked: `LATENT/DEVELOP.TXT` gets a line saying what it
+  was shot with ("picture DSC04910.JPG: Standard 0/0/0, WB shift 0 · 0, DRO off: neutral"). The
+  darkroom says so when frames weren't shot neutral ("2 not shot neutral").
 
 ### Where developed frames go
 
@@ -245,8 +257,8 @@ can't, and the original stays in the camera roll.
 ### Best results
 
 - The looks are tuned for the camera's **Standard** creative style at 0/0/0 with auto white
-  balance. In Recipe Lab, pick the **Factory** recipe before shooting photos you plan to put through
-  Latent. A Recipe Lab look plus a Latent look stacks, and that's usually too much.
+  balance, and Latent sets that itself (above). Don't run Recipe Lab alongside Latent: it changes
+  the same settings, and a Recipe Lab look plus a Latent look stacks.
 - Shoot **JPEG** (Fine or Extra Fine). Latent can't read RAW files, or progressive JPEGs from
   other software.
 
@@ -440,6 +452,12 @@ when it closes.
 
 ## Known limits, and what the camera hasn't confirmed yet
 
+- **Neutral in Latent's viewfinder (v0.48.0):** setting the camera interface's contrast, saturation
+  and sharpness is a kind of camera change Latent hasn't made before (it has changed exposure that
+  way about a hundred times). The first visit after installing shows in `VIEWFIND.TXT` whether it
+  took (`picture: setting to 0: ...` then `picture: neutral`), and the first developed frame's
+  `picture` line in `DEVELOP.TXT` shows what the photo recorded. If the camera puts its own values
+  back at every open, the first shot of each visit waits 3 s after the change.
 - **Focus (v0.47.0):** where the camera's 25 AF areas lie on the picture is worked out from its own
   photos (a 5 x 5 grid over the whole picture), and Flexible Spot's place and sizes are a reading of
   numbers the camera hasn't explained; the first roll shows whether the boxes land on what it focused
